@@ -4,11 +4,11 @@ import tweepy
 import praw
 import time
 import re
-from googletrans import Translator
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError
 from urllib3.exceptions import ProtocolError
 from http.client import RemoteDisconnected
+import openai  # OpenAI import eklendi
 
 load_dotenv()
 
@@ -23,6 +23,9 @@ SUBREDDIT_NAME = os.getenv("SUBREDDIT_NAME")
 
 FLAIR_ID = "a3c0f742-22de-11f0-9e24-7a8b08eb260a"
 LAST_TWEET_FILE = "last_tweet_id.txt"
+
+# OpenAI API anahtarını ayarla
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 def get_last_tweet_id():
     try:
@@ -105,12 +108,19 @@ def clean_title(title):
     return title.strip()
 
 def translate_to_turkish(text):
-    translator = Translator()
+    prompt = f"Translate the following English text to Turkish ONLY. Do not add explanations or anything else.\n\nText: \"{text}\""
     try:
-        translated = translator.translate(text, src='en', dest='tr')
-        return translated.text
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=500,
+            n=1,
+        )
+        translated_text = response['choices'][0]['message']['content'].strip()
+        return translated_text
     except Exception as e:
-        print(f"Çeviri hatası: {e}")
+        print(f"OpenAI çeviri hatası: {e}")
         return text
 
 def post_to_reddit(title, media_path=None):
