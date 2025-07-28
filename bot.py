@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from requests.exceptions import ConnectionError
 from urllib3.exceptions import ProtocolError
 from http.client import RemoteDisconnected
-import openai  # OpenAI import eklendi
+import openai
 
 load_dotenv()
 
@@ -21,8 +21,15 @@ REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
 USER_AGENT = os.getenv("USER_AGENT")
 SUBREDDIT_NAME = os.getenv("SUBREDDIT_NAME")
 
-FLAIR_ID = "a3c0f742-22de-11f0-9e24-7a8b08eb260a"
 LAST_TWEET_FILE = "last_tweet_id.txt"
+
+# Flair eşlemesi
+FLAIR_MAP = {
+    "Haberler": "a3c0f742-22de-11f0-9e24-7a8b08eb260a",
+    "Tartışma": "11111111-1111-1111-1111-111111111111",
+    "Sızıntı": "22222222-2222-2222-2222-222222222222",
+    "Arkaplan": "33333333-3333-3333-3333-333333333333"
+}
 
 # OpenAI API anahtarını ayarla
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -159,7 +166,33 @@ ONLY return the Turkish translation — no quotes, no explanations, no formattin
         print(f"OpenAI çeviri hatası: {e}")
         return text
 
-def post_to_reddit(title, media_path=None, selftext=""):
+def detect_flair_from_title(title):
+    prompt = f"""
+Aşağıdaki Türkçe başlığa en uygun kategoriyi seç:
+- Haberler
+- Tartışma
+- Sızıntı
+- Arkaplan
+
+Başlık: "{title}"
+
+Sadece bu dört kategoriden birini yaz. Açıklama, alıntı veya başka kelime ekleme.
+"""
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=10,
+            n=1,
+        )
+        flair = response['choices'][0]['message']['content'].strip()
+        return FLAIR_MAP.get(flair, FLAIR_MAP["Haberler"])
+    except Exception as e:
+        print(f"Flair belirleme hatası: {e}")
+        return FLAIR_MAP["Haberler"]
+
+def post_to_reddit(title, media_path=None, selftext="", flair_id=None):
     reddit = praw.Reddit(
         client_id=REDDIT_CLIENT_ID,
         client_secret=REDDIT_CLIENT_SECRET,
@@ -175,19 +208,19 @@ def post_to_reddit(title, media_path=None, selftext=""):
             subreddit.submit_video(
                 title=title,
                 video_path=media_path,
-                flair_id=FLAIR_ID
+                flair_id=flair_id
             )
         else:
             subreddit.submit_image(
                 title=title,
                 image_path=media_path,
-                flair_id=FLAIR_ID
+                flair_id=flair_id
             )
     else:
         subreddit.submit(
             title=title,
             selftext=selftext,
-            flair_id=FLAIR_ID
+            flair_id=flair_id
         )
 
 def main():
@@ -228,8 +261,10 @@ def main():
         if raw_title.strip():
             selftext_content = translated_title
 
+    flair_id = detect_flair_from_title(translated_title)
+
     print("Reddit'e gönderiliyor...")
-    post_to_reddit(title=translated_title, media_path=media_file, selftext=selftext_content)
+    post_to_reddit(title=translated_title, media_path=media_file, selftext=selftext_content, flair_id=flair_id)
 
     save_last_tweet_id(tweet["id"])
     print("İşlem tamamlandı.")
