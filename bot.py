@@ -172,7 +172,6 @@ Aşağıdaki Türkçe başlığa en uygun kategoriyi seç:
 - Haberler
 - Tartışma
 - Sızıntı
-- Arkaplan
 
 Başlık: "{title}"
 
