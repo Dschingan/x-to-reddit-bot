@@ -105,12 +105,27 @@ def clean_title(title):
     return title.strip()
 
 def translate_to_turkish(text):
-    translator = Translator()
+    url = "https://translateai.p.rapidapi.com/translate/text"
+    headers = {
+        "content-type": "application/json",
+        "X-RapidAPI-Key": os.getenv("RAPIDAPI_KEY"),
+        "X-RapidAPI-Host": os.getenv("RAPIDAPI_HOST")
+    }
+    payload = {
+        "text": text,
+        "target_lang": "tr"
+    }
+
     try:
-        translated = translator.translate(text, src='en', dest='tr')
-        return translated.text
+        response = requests.post(url, json=payload, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("translated_text", text)
+        else:
+            print(f"Çeviri API hatası: {response.status_code} - {response.text}")
+            return text
     except Exception as e:
-        print(f"Çeviri hatası: {e}")
+        print(f"Çeviri sırasında hata oluştu: {e}")
         return text
 
 def post_to_reddit(title, media_path=None):
