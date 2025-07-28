@@ -4,6 +4,7 @@ import tweepy
 import praw
 import time
 import re
+from googletrans import Translator
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError
 from urllib3.exceptions import ProtocolError
@@ -100,31 +101,15 @@ def get_latest_tweet_with_retry():
 def clean_title(title):
     title = re.sub(r'https://t\.co/\w+', '', title)
     title = re.sub(r'#\w+', '', title)
-    title = title.replace('|', '')
     return title.strip()
 
 def translate_to_turkish(text):
-    url = "https://translateai.p.rapidapi.com/translate/text"
-    headers = {
-        "content-type": "application/json",
-        "X-RapidAPI-Key": os.getenv("RAPIDAPI_KEY"),
-        "X-RapidAPI-Host": os.getenv("RAPIDAPI_HOST")
-    }
-    payload = {
-        "text": text,
-        "target_lang": "tr"
-    }
-
+    translator = Translator()
     try:
-        response = requests.post(url, json=payload, headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("translated_text", text)
-        else:
-            print(f"Çeviri API hatası: {response.status_code} - {response.text}")
-            return text
+        translated = translator.translate(text, src='en', dest='tr')
+        return translated.text
     except Exception as e:
-        print(f"Çeviri sırasında hata oluştu: {e}")
+        print(f"Çeviri hatası: {e}")
         return text
 
 def post_to_reddit(title, media_path=None):
