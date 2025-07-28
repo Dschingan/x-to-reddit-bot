@@ -4,7 +4,6 @@ import tweepy
 import praw
 import time
 import re
-from googletrans import Translator
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError
 from urllib3.exceptions import ProtocolError
