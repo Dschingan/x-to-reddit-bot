@@ -112,7 +112,7 @@ def clean_title(title):
     return title.strip()
 
 def translate_to_turkish(text):
-    prompt = f"Translate the following English text to Turkish ONLY. Do not add explanations or anything else.\n\nText: \"{text}\""
+    prompt = f"Translate the following English text to Turkish ONLY. Do not add explanations or anything else. Do not add even "".\n\nText: \"{text}\""
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
