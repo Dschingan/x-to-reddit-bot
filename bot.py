@@ -58,7 +58,7 @@ def get_latest_tweet_with_retry():
                 id=TWITTER_USER_ID,
                 max_results=5,
                 expansions="attachments.media_keys",
-                tweet_fields=["attachments", "created_at", "text"],
+                tweet_fields=["attachments", "created_at", "text", "in_reply_to_user_id"],
                 media_fields=["url", "type", "variants", "preview_image_url"]
             )
             break
@@ -76,30 +76,34 @@ def get_latest_tweet_with_retry():
     if not tweets.data:
         return None
 
-    tweet = tweets.data[0]
     media = {m.media_key: m for m in tweets.includes.get("media", [])}
 
-    tweet_info = {
-        "id": str(tweet.id),
-        "text": tweet.text,
-        "media_urls": [],
-        "video_url": None
-    }
+    # Yanıt olmayan (reply olmayan) ilk tweeti bul
+    for tweet in tweets.data:
+        if tweet.in_reply_to_user_id is None:
+            tweet_info = {
+                "id": str(tweet.id),
+                "text": tweet.text,
+                "media_urls": [],
+                "video_url": None
+            }
 
-    if tweet.attachments and "media_keys" in tweet.attachments:
-        for key in tweet.attachments["media_keys"]:
-            m = media.get(key)
-            if m:
-                if m.type == "photo":
-                    tweet_info["media_urls"].append(m.url)
-                elif m.type in ["video", "animated_gif"]:
-                    variants = m.variants if hasattr(m, "variants") else m["variants"]
-                    best = sorted(variants, key=lambda x: x.get("bit_rate", 0), reverse=True)
-                    for variant in best:
-                        if "url" in variant:
-                            tweet_info["video_url"] = variant["url"]
-                            break
-    return tweet_info
+            if tweet.attachments and "media_keys" in tweet.attachments:
+                for key in tweet.attachments["media_keys"]:
+                    m = media.get(key)
+                    if m:
+                        if m.type == "photo":
+                            tweet_info["media_urls"].append(m.url)
+                        elif m.type in ["video", "animated_gif"]:
+                            variants = m.variants if hasattr(m, "variants") else m["variants"]
+                            best = sorted(variants, key=lambda x: x.get("bit_rate", 0), reverse=True)
+                            for variant in best:
+                                if "url" in variant:
+                                    tweet_info["video_url"] = variant["url"]
+                                    break
+            return tweet_info
+
+    return None
 
 def clean_title(title):
     title = re.sub(r'https://t\.co/\w+', '', title)
