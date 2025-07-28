@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from requests.exceptions import ConnectionError
 from urllib3.exceptions import ProtocolError
 from http.client import RemoteDisconnected
-import openai
+import openai  # OpenAI import eklendi
 
 load_dotenv()
 
@@ -21,15 +21,8 @@ REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
 USER_AGENT = os.getenv("USER_AGENT")
 SUBREDDIT_NAME = os.getenv("SUBREDDIT_NAME")
 
+FLAIR_ID = "a3c0f742-22de-11f0-9e24-7a8b08eb260a"
 LAST_TWEET_FILE = "last_tweet_id.txt"
-
-# Flair eşlemesi
-FLAIR_MAP = {
-    "Haberler": os.getenv("FLAIR_HABERLER"),
-    "Tartışma": os.getenv("FLAIR_TARTISMA"),
-    "Sızıntı": os.getenv("FLAIR_SIZINTI"),
-    "Arkaplan": os.getenv("FLAIR_ARKAPLAN")
-}
 
 # OpenAI API anahtarını ayarla
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -64,18 +57,9 @@ def get_latest_tweet_with_retry():
             tweets = client.get_users_tweets(
                 id=TWITTER_USER_ID,
                 max_results=5,
-                expansions=[
-                    "attachments.media_keys",
-                    "referenced_tweets.id",
-                    "referenced_tweets.id.attachments.media_keys"
-                ],
-                tweet_fields=[
-                    "attachments", "created_at", "text",
-                    "in_reply_to_user_id", "referenced_tweets"
-                ],
-                media_fields=[
-                    "url", "type", "variants", "preview_image_url"
-                ]
+                expansions="attachments.media_keys",
+                tweet_fields=["attachments", "created_at", "text", "in_reply_to_user_id"],
+                media_fields=["url", "type", "variants", "preview_image_url"]
             )
             break
         except tweepy.TooManyRequests as e:
@@ -93,16 +77,15 @@ def get_latest_tweet_with_retry():
         return None
 
     media = {m.media_key: m for m in tweets.includes.get("media", [])}
-    referenced_tweets = {t.id: t for t in tweets.includes.get("tweets", [])}
 
+    # Yanıt olmayan (reply olmayan) ilk tweeti bul
     for tweet in tweets.data:
         if tweet.in_reply_to_user_id is None:
             tweet_info = {
                 "id": str(tweet.id),
                 "text": tweet.text,
                 "media_urls": [],
-                "video_url": None,
-                "quoted_media_url": None
+                "video_url": None
             }
 
             if tweet.attachments and "media_keys" in tweet.attachments:
@@ -118,25 +101,6 @@ def get_latest_tweet_with_retry():
                                 if "url" in variant:
                                     tweet_info["video_url"] = variant["url"]
                                     break
-
-            if tweet.referenced_tweets:
-                for ref in tweet.referenced_tweets:
-                    if ref.type == "quoted":
-                        quoted = referenced_tweets.get(ref.id)
-                        if quoted and quoted.attachments and "media_keys" in quoted.attachments:
-                            for key in quoted.attachments["media_keys"]:
-                                m = media.get(key)
-                                if m:
-                                    if m.type == "photo":
-                                        tweet_info["quoted_media_url"] = m.url
-                                        break
-                                    elif m.type in ["video", "animated_gif"]:
-                                        variants = m.variants if hasattr(m, "variants") else m["variants"]
-                                        best = sorted(variants, key=lambda x: x.get("bit_rate", 0), reverse=True)
-                                        for variant in best:
-                                            if "url" in variant:
-                                                tweet_info["quoted_media_url"] = variant["url"]
-                                                break
             return tweet_info
 
     return None
@@ -166,32 +130,7 @@ ONLY return the Turkish translation — no quotes, no explanations, no formattin
         print(f"OpenAI çeviri hatası: {e}")
         return text
 
-def detect_flair_from_title(title):
-    prompt = f"""
-Aşağıdaki Türkçe başlığa en uygun kategoriyi seç:
-- Haberler
-- Tartışma
-- Sızıntı
-
-Başlık: "{title}"
-
-Sadece bu dört kategoriden birini yaz. Açıklama, alıntı veya başka kelime ekleme.
-"""
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=10,
-            n=1,
-        )
-        flair = response['choices'][0]['message']['content'].strip()
-        return FLAIR_MAP.get(flair, FLAIR_MAP["Haberler"])
-    except Exception as e:
-        print(f"Flair belirleme hatası: {e}")
-        return FLAIR_MAP["Haberler"]
-
-def post_to_reddit(title, media_path=None, selftext="", flair_id=None):
+def post_to_reddit(title, media_path=None):
     reddit = praw.Reddit(
         client_id=REDDIT_CLIENT_ID,
         client_secret=REDDIT_CLIENT_SECRET,
@@ -207,19 +146,19 @@ def post_to_reddit(title, media_path=None, selftext="", flair_id=None):
             subreddit.submit_video(
                 title=title,
                 video_path=media_path,
-                flair_id=flair_id
+                flair_id=FLAIR_ID
             )
         else:
             subreddit.submit_image(
                 title=title,
                 image_path=media_path,
-                flair_id=flair_id
+                flair_id=FLAIR_ID
             )
     else:
         subreddit.submit(
             title=title,
-            selftext=selftext,
-            flair_id=flair_id
+            selftext="",
+            flair_id=FLAIR_ID
         )
 
 def main():
@@ -240,7 +179,6 @@ def main():
     cleaned_title = clean_title(raw_title)
     translated_title = translate_to_turkish(cleaned_title)
     media_file = None
-    selftext_content = ""
 
     if tweet["video_url"]:
         print("Video indiriliyor...")
@@ -254,16 +192,8 @@ def main():
         print("Fotoğraf indiriliyor...")
         media_file = download_file(tweet["media_urls"][0], "image.jpg")
 
-    elif tweet.get("quoted_media_url"):
-        print("Alıntılanan tweet'ten medya indiriliyor...")
-        media_file = download_file(tweet["quoted_media_url"], "quoted_media.jpg")
-        if raw_title.strip():
-            selftext_content = translated_title
-
-    flair_id = detect_flair_from_title(translated_title)
-
     print("Reddit'e gönderiliyor...")
-    post_to_reddit(title=translated_title, media_path=media_file, selftext=selftext_content, flair_id=flair_id)
+    post_to_reddit(title=translated_title, media_path=media_file)
 
     save_last_tweet_id(tweet["id"])
     print("İşlem tamamlandı.")
