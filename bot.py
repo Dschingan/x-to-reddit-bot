@@ -25,10 +25,10 @@ LAST_TWEET_FILE = "last_tweet_id.txt"
 
 # Flair eşlemesi
 FLAIR_MAP = {
-    "Haberler": "a3c0f742-22de-11f0-9e24-7a8b08eb260a",
-    "Tartışma": "11111111-1111-1111-1111-111111111111",
-    "Sızıntı": "22222222-2222-2222-2222-222222222222",
-    "Arkaplan": "33333333-3333-3333-3333-333333333333"
+    "Haberler": os.getenv("FLAIR_HABERLER"),
+    "Tartışma": os.getenv("FLAIR_TARTISMA"),
+    "Sızıntı": os.getenv("FLAIR_SIZINTI"),
+    "Arkaplan": os.getenv("FLAIR_ARKAPLAN")
 }
 
 # OpenAI API anahtarını ayarla
