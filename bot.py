@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from requests.exceptions import ConnectionError
 from urllib3.exceptions import ProtocolError
 from http.client import RemoteDisconnected
-import openai
+import openai  # OpenAI import eklendi
 
 load_dotenv()
 
@@ -24,6 +24,7 @@ SUBREDDIT_NAME = os.getenv("SUBREDDIT_NAME")
 FLAIR_ID = "a3c0f742-22de-11f0-9e24-7a8b08eb260a"
 LAST_TWEET_FILE = "last_tweet_id.txt"
 
+# OpenAI API anahtarını ayarla
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 def get_last_tweet_id():
@@ -50,10 +51,7 @@ def reencode_video(input_path, output_path):
     os.system(f'ffmpeg -y -i "{input_path}" -c:v libx264 -crf 23 -preset fast -c:a aac -b:a 128k "{output_path}"')
 
 def get_latest_tweet_with_retry():
-    client = tweepy.Client(
-        bearer_token=TWITTER_BEARER_TOKEN,
-        wait_on_rate_limit=True
-    )
+    client = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN)
     while True:
         try:
             tweets = client.get_users_tweets(
@@ -65,18 +63,11 @@ def get_latest_tweet_with_retry():
                     "referenced_tweets.id.attachments.media_keys"
                 ],
                 tweet_fields=[
-                    "attachments",
-                    "created_at",
-                    "text",
-                    "in_reply_to_user_id",
-                    "referenced_tweets"
+                    "attachments", "created_at", "text",
+                    "in_reply_to_user_id", "referenced_tweets"
                 ],
                 media_fields=[
-                    "url",
-                    "type",
-                    "variants",
-                    "preview_image_url",
-                    "media_key"
+                    "url", "type", "variants", "preview_image_url"
                 ]
             )
             break
@@ -95,7 +86,7 @@ def get_latest_tweet_with_retry():
         return None
 
     media = {m.media_key: m for m in tweets.includes.get("media", [])}
-    ref_tweet_map = {t.id: t for t in tweets.includes.get("referenced_tweets", [])}
+    referenced_tweets = {t.id: t for t in tweets.includes.get("tweets", [])}
 
     for tweet in tweets.data:
         if tweet.in_reply_to_user_id is None:
@@ -104,30 +95,9 @@ def get_latest_tweet_with_retry():
                 "text": tweet.text,
                 "media_urls": [],
                 "video_url": None,
-                "quoted_media": None
+                "quoted_media_url": None
             }
 
-            # Alıntı tweet kontrolü ve medya yakalama
-            if tweet.referenced_tweets:
-                for ref in tweet.referenced_tweets:
-                    if ref.type == "quoted":
-                        quoted = ref_tweet_map.get(ref.id)
-                        if quoted and hasattr(quoted, "attachments") and "media_keys" in quoted.attachments:
-                            for key in quoted.attachments["media_keys"]:
-                                m = media.get(key)
-                                if m:
-                                    if m.type == "photo":
-                                        tweet_info["quoted_media"] = {"type": "photo", "url": m.url}
-                                    elif m.type in ["video", "animated_gif"]:
-                                        variants = m.variants if hasattr(m, "variants") else m["variants"]
-                                        best = sorted(variants, key=lambda x: x.get("bit_rate", 0), reverse=True)
-                                        for variant in best:
-                                            if "url" in variant:
-                                                tweet_info["quoted_media"] = {"type": "video", "url": variant["url"]}
-                                                break
-                        break
-
-            # Tweetin kendi medyası
             if tweet.attachments and "media_keys" in tweet.attachments:
                 for key in tweet.attachments["media_keys"]:
                     m = media.get(key)
@@ -142,6 +112,24 @@ def get_latest_tweet_with_retry():
                                     tweet_info["video_url"] = variant["url"]
                                     break
 
+            if tweet.referenced_tweets:
+                for ref in tweet.referenced_tweets:
+                    if ref.type == "quoted":
+                        quoted = referenced_tweets.get(ref.id)
+                        if quoted and quoted.attachments and "media_keys" in quoted.attachments:
+                            for key in quoted.attachments["media_keys"]:
+                                m = media.get(key)
+                                if m:
+                                    if m.type == "photo":
+                                        tweet_info["quoted_media_url"] = m.url
+                                        break
+                                    elif m.type in ["video", "animated_gif"]:
+                                        variants = m.variants if hasattr(m, "variants") else m["variants"]
+                                        best = sorted(variants, key=lambda x: x.get("bit_rate", 0), reverse=True)
+                                        for variant in best:
+                                            if "url" in variant:
+                                                tweet_info["quoted_media_url"] = variant["url"]
+                                                break
             return tweet_info
 
     return None
@@ -171,7 +159,7 @@ ONLY return the Turkish translation — no quotes, no explanations, no formattin
         print(f"OpenAI çeviri hatası: {e}")
         return text
 
-def post_to_reddit(title, media_path=None):
+def post_to_reddit(title, media_path=None, selftext=""):
     reddit = praw.Reddit(
         client_id=REDDIT_CLIENT_ID,
         client_secret=REDDIT_CLIENT_SECRET,
@@ -198,7 +186,7 @@ def post_to_reddit(title, media_path=None):
     else:
         subreddit.submit(
             title=title,
-            selftext="",
+            selftext=selftext,
             flair_id=FLAIR_ID
         )
 
@@ -220,19 +208,9 @@ def main():
     cleaned_title = clean_title(raw_title)
     translated_title = translate_to_turkish(cleaned_title)
     media_file = None
+    selftext_content = ""
 
-    # Alıntılanan tweetten medya varsa onu kullan
-    if tweet.get("quoted_media"):
-        print("Alıntılanan tweetten medya indiriliyor...")
-        qmedia = tweet["quoted_media"]
-        ext = ".mp4" if qmedia["type"] == "video" else ".jpg"
-        media_file = download_file(qmedia["url"], "quoted_media" + ext)
-        if media_file and qmedia["type"] == "video":
-            print("Video yeniden kodlanıyor...")
-            reencode_video(media_file, "video_final.mp4")
-            media_file = "video_final.mp4"
-
-    elif tweet["video_url"]:
+    if tweet["video_url"]:
         print("Video indiriliyor...")
         media_file = download_file(tweet["video_url"], "video.mp4")
         if media_file:
@@ -244,8 +222,14 @@ def main():
         print("Fotoğraf indiriliyor...")
         media_file = download_file(tweet["media_urls"][0], "image.jpg")
 
+    elif tweet.get("quoted_media_url"):
+        print("Alıntılanan tweet'ten medya indiriliyor...")
+        media_file = download_file(tweet["quoted_media_url"], "quoted_media.jpg")
+        if raw_title.strip():
+            selftext_content = translated_title
+
     print("Reddit'e gönderiliyor...")
-    post_to_reddit(title=translated_title, media_path=media_file)
+    post_to_reddit(title=translated_title, media_path=media_file, selftext=selftext_content)
 
     save_last_tweet_id(tweet["id"])
     print("İşlem tamamlandı.")
