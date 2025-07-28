@@ -101,6 +101,7 @@ def get_latest_tweet_with_retry():
 def clean_title(title):
     title = re.sub(r'https://t\.co/\w+', '', title)
     title = re.sub(r'#\w+', '', title)
+    title = title.replace('|', '')
     return title.strip()
 
 def translate_to_turkish(text):
