@@ -59,8 +59,9 @@ def get_latest_tweet_for_user(user_id, username):
             tweets = client.get_users_tweets(
                 id=user_id,
                 max_results=5,
-                expansions="attachments.media_keys,referenced_tweets.id",
+                expansions="attachments.media_keys,referenced_tweets.id,referenced_tweets.id.author_id",
                 tweet_fields=["attachments", "created_at", "text", "in_reply_to_user_id", "referenced_tweets"],
+                user_fields=["username"],
                 media_fields=["url", "type", "variants", "preview_image_url"]
             )
             break
@@ -79,6 +80,7 @@ def get_latest_tweet_for_user(user_id, username):
         return None
 
     media = {m.media_key: m for m in tweets.includes.get("media", [])}
+    users = {u.id: u for u in tweets.includes.get("users", [])} if tweets.includes.get("users") else {}
 
     for tweet in tweets.data:
         is_reply = tweet.in_reply_to_user_id is not None
@@ -93,11 +95,18 @@ def get_latest_tweet_for_user(user_id, username):
             if not is_retweet_or_quote:
                 continue  # repost (retweet) değilse geç
 
+        credit_username = None
+        if username == "BF6_TR" and is_retweet_or_quote:
+            ref_author_id = tweet.referenced_tweets[0].author_id if tweet.referenced_tweets else None
+            if ref_author_id and ref_author_id in users:
+                credit_username = users[ref_author_id].username
+
         tweet_info = {
             "id": str(tweet.id),
             "text": tweet.text,
             "media_urls": [],
-            "video_url": None
+            "video_url": None,
+            "credit_username": credit_username
         }
 
         if tweet.attachments and "media_keys" in tweet.attachments:
@@ -142,7 +151,7 @@ ONLY return the Turkish translation — no quotes, no explanations, no formattin
         print(f"OpenAI çeviri hatası: {e}")
         return text
 
-def post_to_reddit(title, media_path=None):
+def post_to_reddit(title, media_path=None, selftext=""):
     reddit = praw.Reddit(
         client_id=REDDIT_CLIENT_ID,
         client_secret=REDDIT_CLIENT_SECRET,
@@ -158,18 +167,20 @@ def post_to_reddit(title, media_path=None):
             subreddit.submit_video(
                 title=title,
                 video_path=media_path,
-                flair_id=FLAIR_ID
+                flair_id=FLAIR_ID,
+                description=selftext
             )
         else:
             subreddit.submit_image(
                 title=title,
                 image_path=media_path,
-                flair_id=FLAIR_ID
+                flair_id=FLAIR_ID,
+                description=selftext
             )
     else:
         subreddit.submit(
             title=title,
-            selftext="",
+            selftext=selftext,
             flair_id=FLAIR_ID
         )
 
@@ -212,8 +223,12 @@ def main():
             print("Fotoğraf indiriliyor...")
             media_file = download_file(tweet["media_urls"][0], "image.jpg")
 
+        selftext = ""
+        if username == "BF6_TR" and tweet.get("credit_username"):
+            selftext = f"Retweet sahibine kredi: @{tweet['credit_username']}"
+
         print("Reddit'e gönderiliyor...")
-        post_to_reddit(title=translated_title, media_path=media_file)
+        post_to_reddit(title=translated_title, media_path=media_file, selftext=selftext)
 
         save_last_tweet_id_for_user(username, tweet["id"])
         print(f"{username} için işlem tamamlandı.")
