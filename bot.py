@@ -1,59 +1,3 @@
-# TwitterRedditBot - Bot Açıklaması
-#
-# Amaç:
-#   - Belirli bir Twitter kullanıcısının son tweetlerini takip eder.
-#   - Tweetlerden retweet veya yanıt (reply) olmayanları seçer.
-#   - Tweet metinlerini RapidAPI kullanarak Türkçeye çevirir.
-#   - Tweetlerdeki varsa medya içeriklerini indirir, video formatlarını Reddit'e uygun hale getirir.
-#   - Çeviri ve medya ile Reddit'te önceden belirlenmiş subreddit'e otomatik olarak gönderi yapar.
-#
-# Ana İşlevler:
-#   1. Ortam Değişkenlerini (.env) okuma:
-#       - Twitter API bilgileri (token, user id vs)
-#       - Reddit API bilgileri (client id, secret, user/pass, user agent)
-#       - RapidAPI çeviri servisi bilgileri (api key, url, host)
-#       - Subreddit ismi ve flair ID'leri
-#
-#   2. Twitter API'den son 5 tweeti çekme:
-#       - Tweetlerle birlikte medya (foto, video) bilgilerini alma
-#       - Rate limit (kota) kontrolü yapma ve gerekiyorsa bekleme
-#
-#   3. Tweet temizleme:
-#       - Linkler, hashtagler, "|" karakteri ve fazla boşlukları temizleme
-#
-#   4. Tweet metnini Türkçeye çevirme:
-#       - RapidAPI üzerinde belirlenen çeviri servisi kullanılır
-#       - JSON yanıtından "translation" alanı kullanılarak çeviri alınır
-#
-#   5. Retweet ve yanıt tweetleri filtreleme:
-#       - Retweet veya reply içerikli tweetler atlanır
-#
-#   6. Medya işlemleri:
-#       - Fotoğraflar indirilir
-#       - Videolar en iyi varyantı seçilip indirilir
-#       - İndirilen videolar ffmpeg ile Reddit uyumlu hale dönüştürülür
-#
-#   7. Reddit gönderisi paylaşımı:
-#       - İçeriğe göre uygun flair atanır (örneğin haber, sızıntı, tartışma)
-#       - Medya sayısına göre tek resim, video, galeri veya metin olarak paylaşılır
-#
-#   8. Son işlenen tweet ID'sinin takibi:
-#       - İşlenen tweetin ID'si dosyada saklanır, tekrar işlenmez
-#
-#   9. Sürekli çalışma:
-#       - Döngü içinde belirli aralıklarla yeni tweetler kontrol edilir ve işlenir
-#
-#   10. Hata yönetimi ve loglama:
-#       - Tüm önemli işlemler ve hata durumları loglanır
-#       - API hatalarında ve beklenmeyen durumlarda uygun hata yönetimi yapılır
-#
-# Kullanım:
-#   - Gerekli API anahtarları ve ayarlar .env dosyasına girilir
-#   - Python ortamında gerekli paketler (requests, praw, dotenv, vb.) kurulur
-#   - Sisteme ffmpeg kurulup PATH'e eklenir
-#   - Bot çalıştırılarak otomatik Twitter -> Reddit paylaşımı sağlanır
-#
-
 import os
 import time
 import json
@@ -461,31 +405,27 @@ class TwitterRedditBot:
             logger.error(f"Temizlik hatası: {e}")
     
     def create_reddit_title(self, turkish_text: str, original_text: str) -> str:
-        """Reddit için başlık oluştur"""
-        text_to_use = turkish_text if turkish_text != original_text else original_text
+        """
+        Reddit için başlık oluştur
+        - Sadece çeviri metni kullanılır (original_text artık kullanılmaz)
+        """
+        title = turkish_text.strip()
 
-        # Başlık satırı olarak ilk satır veya tüm metin
-        if '\n' in text_to_use:
-            title = text_to_use.split('\n')[0].strip()
-        else:
-            title = text_to_use.strip()
-
-        # Başlık kısa ise orijinal metinle genişlet
-        if len(title) < 50 and turkish_text != original_text:
-            extended = original_text[:100].strip()
-            title = f"{title} | {extended}"
+        if '\n' in title:
+            title = title.split('\n')[0].strip()
 
         # Başlık uzun ise kes
         if len(title) > 280:
             title = title[:280] + "..."
+
         return title
     
     def process_tweet(self, tweet: Dict) -> bool:
-        """Tek bir tweet'i işler"""
+        """Tek bir tweet'i işler (sadece çeviri metni kullanarak gönderir)"""
         tweet_id = tweet['id']
         tweet_text = tweet['text']
 
-        # Reply veya retweet tweetleri atla (burada tekrar kontrol opsiyonel)
+        # Reply veya retweet tweetleri atla
         if self.is_reply_or_retweet(tweet):
             logger.info(f"Tweet atlandı (cevap veya retweet): {tweet_id}")
             return False
@@ -496,11 +436,13 @@ class TwitterRedditBot:
         turkish_text = self.translate_to_turkish(cleaned_text)
         media_paths = self.process_media(tweet.get('media', []))
 
-        title = self.create_reddit_title(turkish_text, tweet_text)
+        # Başlık ve içerik sadece çevrilmiş metin olacak
+        title = self.create_reddit_title(turkish_text, turkish_text)
+
         if self.post_to_reddit(title, media_paths, turkish_text):
             self.save_last_tweet_id(tweet_id)
             return True
-        
+
         return False
 
     def run(self):
