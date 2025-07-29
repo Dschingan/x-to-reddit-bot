@@ -14,7 +14,6 @@ load_dotenv()
 
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
 TWITTER_USER_ID = os.getenv("TWITTER_USER_ID")
-TWITTER_USER_ID_2 = os.getenv("TWITTER_USER_ID_2")  # BF6_TR için
 REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
 REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
@@ -23,21 +22,20 @@ USER_AGENT = os.getenv("USER_AGENT")
 SUBREDDIT_NAME = os.getenv("SUBREDDIT_NAME")
 
 FLAIR_ID = "a3c0f742-22de-11f0-9e24-7a8b08eb260a"
+LAST_TWEET_FILE = "last_tweet_id.txt"
 
 # OpenAI API anahtarını ayarla
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def get_last_tweet_id_for_user(username):
-    filename = f"last_tweet_id_{username}.txt"
+def get_last_tweet_id():
     try:
-        with open(filename, "r") as f:
+        with open(LAST_TWEET_FILE, "r") as f:
             return f.read().strip()
     except FileNotFoundError:
         return ""
 
-def save_last_tweet_id_for_user(username, tweet_id):
-    filename = f"last_tweet_id_{username}.txt"
-    with open(filename, "w") as f:
+def save_last_tweet_id(tweet_id):
+    with open(LAST_TWEET_FILE, "w") as f:
         f.write(str(tweet_id))
 
 def download_file(url, filename):
@@ -52,16 +50,15 @@ def download_file(url, filename):
 def reencode_video(input_path, output_path):
     os.system(f'ffmpeg -y -i "{input_path}" -c:v libx264 -crf 23 -preset fast -c:a aac -b:a 128k "{output_path}"')
 
-def get_latest_tweet_for_user(user_id, username):
+def get_latest_tweet_with_retry():
     client = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN)
     while True:
         try:
             tweets = client.get_users_tweets(
-                id=user_id,
+                id=TWITTER_USER_ID,
                 max_results=5,
-                expansions="attachments.media_keys,referenced_tweets.id,referenced_tweets.id.author_id",
-                tweet_fields=["attachments", "created_at", "text", "in_reply_to_user_id", "referenced_tweets"],
-                user_fields=["username"],
+                expansions="attachments.media_keys",
+                tweet_fields=["attachments", "created_at", "text", "in_reply_to_user_id"],
                 media_fields=["url", "type", "variants", "preview_image_url"]
             )
             break
@@ -80,49 +77,31 @@ def get_latest_tweet_for_user(user_id, username):
         return None
 
     media = {m.media_key: m for m in tweets.includes.get("media", [])}
-    users = {u.id: u for u in tweets.includes.get("users", [])} if tweets.includes.get("users") else {}
 
+    # Yanıt olmayan (reply olmayan) ilk tweeti bul
     for tweet in tweets.data:
-        is_reply = tweet.in_reply_to_user_id is not None
-        is_retweet_or_quote = hasattr(tweet, "referenced_tweets") and tweet.referenced_tweets is not None
+        if tweet.in_reply_to_user_id is None:
+            tweet_info = {
+                "id": str(tweet.id),
+                "text": tweet.text,
+                "media_urls": [],
+                "video_url": None
+            }
 
-        if username == "TheBFWire":
-            if is_reply or is_retweet_or_quote:
-                continue  # sadece özgün tweetler
-        elif username == "BF6_TR":
-            if is_reply:
-                continue  # yanıt istemiyoruz ama repost olabilir
-            if not is_retweet_or_quote:
-                continue  # repost (retweet) değilse geç
-
-        credit_username = None
-        if username == "BF6_TR" and is_retweet_or_quote:
-            ref_author_id = tweet.referenced_tweets[0].author_id if tweet.referenced_tweets else None
-            if ref_author_id and ref_author_id in users:
-                credit_username = users[ref_author_id].username
-
-        tweet_info = {
-            "id": str(tweet.id),
-            "text": tweet.text,
-            "media_urls": [],
-            "video_url": None,
-            "credit_username": credit_username
-        }
-
-        if tweet.attachments and "media_keys" in tweet.attachments:
-            for key in tweet.attachments["media_keys"]:
-                m = media.get(key)
-                if m:
-                    if m.type == "photo":
-                        tweet_info["media_urls"].append(m.url)
-                    elif m.type in ["video", "animated_gif"]:
-                        variants = m.variants if hasattr(m, "variants") else m["variants"]
-                        best = sorted(variants, key=lambda x: x.get("bit_rate", 0), reverse=True)
-                        for variant in best:
-                            if "url" in variant:
-                                tweet_info["video_url"] = variant["url"]
-                                break
-        return tweet_info
+            if tweet.attachments and "media_keys" in tweet.attachments:
+                for key in tweet.attachments["media_keys"]:
+                    m = media.get(key)
+                    if m:
+                        if m.type == "photo":
+                            tweet_info["media_urls"].append(m.url)
+                        elif m.type in ["video", "animated_gif"]:
+                            variants = m.variants if hasattr(m, "variants") else m["variants"]
+                            best = sorted(variants, key=lambda x: x.get("bit_rate", 0), reverse=True)
+                            for variant in best:
+                                if "url" in variant:
+                                    tweet_info["video_url"] = variant["url"]
+                                    break
+            return tweet_info
 
     return None
 
@@ -151,7 +130,7 @@ ONLY return the Turkish translation — no quotes, no explanations, no formattin
         print(f"OpenAI çeviri hatası: {e}")
         return text
 
-def post_to_reddit(title, media_path=None, selftext=""):
+def post_to_reddit(title, media_path=None):
     reddit = praw.Reddit(
         client_id=REDDIT_CLIENT_ID,
         client_secret=REDDIT_CLIENT_SECRET,
@@ -167,71 +146,57 @@ def post_to_reddit(title, media_path=None, selftext=""):
             subreddit.submit_video(
                 title=title,
                 video_path=media_path,
-                flair_id=FLAIR_ID,
-                description=selftext
+                flair_id=FLAIR_ID
             )
         else:
             subreddit.submit_image(
                 title=title,
                 image_path=media_path,
-                flair_id=FLAIR_ID,
-                description=selftext
+                flair_id=FLAIR_ID
             )
     else:
         subreddit.submit(
             title=title,
-            selftext=selftext,
+            selftext="",
             flair_id=FLAIR_ID
         )
 
 def main():
-    user_map = {
-        "TheBFWire": TWITTER_USER_ID,
-        "BF6_TR": TWITTER_USER_ID_2
-    }
+    last_id = get_last_tweet_id()
+    tweet = get_latest_tweet_with_retry()
 
-    for username, user_id in user_map.items():
-        print(f"\n--- {username} kullanıcısı kontrol ediliyor ---")
+    if not tweet:
+        print("Tweet bulunamadı.")
+        return
 
-        last_id = get_last_tweet_id_for_user(username)
-        tweet = get_latest_tweet_for_user(user_id, username)
+    if last_id and tweet["id"] == last_id:
+        print("Yeni tweet yok.")
+        return
 
-        if not tweet:
-            print(f"{username} için uygun tweet bulunamadı.")
-            continue
+    print(f"Yeni tweet bulundu: {tweet['text']}")
 
-        if last_id and tweet["id"] == last_id:
-            print(f"{username} için yeni tweet yok.")
-            continue
+    raw_title = tweet["text"]
+    cleaned_title = clean_title(raw_title)
+    translated_title = translate_to_turkish(cleaned_title)
+    media_file = None
 
-        print(f"{username} için yeni tweet bulundu: {tweet['text']}")
+    if tweet["video_url"]:
+        print("Video indiriliyor...")
+        media_file = download_file(tweet["video_url"], "video.mp4")
+        if media_file:
+            print("Video yeniden kodlanıyor...")
+            reencode_video("video.mp4", "video_final.mp4")
+            media_file = "video_final.mp4"
 
-        raw_title = tweet["text"]
-        cleaned_title = clean_title(raw_title)
-        translated_title = translate_to_turkish(cleaned_title)
-        media_file = None
+    elif tweet["media_urls"]:
+        print("Fotoğraf indiriliyor...")
+        media_file = download_file(tweet["media_urls"][0], "image.jpg")
 
-        if tweet["video_url"]:
-            print("Video indiriliyor...")
-            media_file = download_file(tweet["video_url"], "video.mp4")
-            if media_file:
-                print("Video yeniden kodlanıyor...")
-                reencode_video("video.mp4", "video_final.mp4")
-                media_file = "video_final.mp4"
+    print("Reddit'e gönderiliyor...")
+    post_to_reddit(title=translated_title, media_path=media_file)
 
-        elif tweet["media_urls"]:
-            print("Fotoğraf indiriliyor...")
-            media_file = download_file(tweet["media_urls"][0], "image.jpg")
-
-        selftext = ""
-        if username == "BF6_TR" and tweet.get("credit_username"):
-            selftext = f"Retweet sahibine kredi: @{tweet['credit_username']}"
-
-        print("Reddit'e gönderiliyor...")
-        post_to_reddit(title=translated_title, media_path=media_file, selftext=selftext)
-
-        save_last_tweet_id_for_user(username, tweet["id"])
-        print(f"{username} için işlem tamamlandı.")
+    save_last_tweet_id(tweet["id"])
+    print("İşlem tamamlandı.")
 
 if __name__ == "__main__":
     print("Program başladı.")
