@@ -1,3 +1,59 @@
+# TwitterRedditBot - Bot Açıklaması
+#
+# Amaç:
+#   - Belirli bir Twitter kullanıcısının son tweetlerini takip eder.
+#   - Tweetlerden retweet veya yanıt (reply) olmayanları seçer.
+#   - Tweet metinlerini RapidAPI kullanarak Türkçeye çevirir.
+#   - Tweetlerdeki varsa medya içeriklerini indirir, video formatlarını Reddit'e uygun hale getirir.
+#   - Çeviri ve medya ile Reddit'te önceden belirlenmiş subreddit'e otomatik olarak gönderi yapar.
+#
+# Ana İşlevler:
+#   1. Ortam Değişkenlerini (.env) okuma:
+#       - Twitter API bilgileri (token, user id vs)
+#       - Reddit API bilgileri (client id, secret, user/pass, user agent)
+#       - RapidAPI çeviri servisi bilgileri (api key, url, host)
+#       - Subreddit ismi ve flair ID'leri
+#
+#   2. Twitter API'den son 5 tweeti çekme:
+#       - Tweetlerle birlikte medya (foto, video) bilgilerini alma
+#       - Rate limit (kota) kontrolü yapma ve gerekiyorsa bekleme
+#
+#   3. Tweet temizleme:
+#       - Linkler, hashtagler, "|" karakteri ve fazla boşlukları temizleme
+#
+#   4. Tweet metnini Türkçeye çevirme:
+#       - RapidAPI üzerinde belirlenen çeviri servisi kullanılır
+#       - JSON yanıtından "translation" alanı kullanılarak çeviri alınır
+#
+#   5. Retweet ve yanıt tweetleri filtreleme:
+#       - Retweet veya reply içerikli tweetler atlanır
+#
+#   6. Medya işlemleri:
+#       - Fotoğraflar indirilir
+#       - Videolar en iyi varyantı seçilip indirilir
+#       - İndirilen videolar ffmpeg ile Reddit uyumlu hale dönüştürülür
+#
+#   7. Reddit gönderisi paylaşımı:
+#       - İçeriğe göre uygun flair atanır (örneğin haber, sızıntı, tartışma)
+#       - Medya sayısına göre tek resim, video, galeri veya metin olarak paylaşılır
+#
+#   8. Son işlenen tweet ID'sinin takibi:
+#       - İşlenen tweetin ID'si dosyada saklanır, tekrar işlenmez
+#
+#   9. Sürekli çalışma:
+#       - Döngü içinde belirli aralıklarla yeni tweetler kontrol edilir ve işlenir
+#
+#   10. Hata yönetimi ve loglama:
+#       - Tüm önemli işlemler ve hata durumları loglanır
+#       - API hatalarında ve beklenmeyen durumlarda uygun hata yönetimi yapılır
+#
+# Kullanım:
+#   - Gerekli API anahtarları ve ayarlar .env dosyasına girilir
+#   - Python ortamında gerekli paketler (requests, praw, dotenv, vb.) kurulur
+#   - Sisteme ffmpeg kurulup PATH'e eklenir
+#   - Bot çalıştırılarak otomatik Twitter -> Reddit paylaşımı sağlanır
+#
+
 import os
 import time
 import json
