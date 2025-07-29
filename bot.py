@@ -128,49 +128,69 @@ class TwitterRedditBot:
                 print("\nBekleme tamamlandı.")
             return True
         return False
-    
+
     def get_latest_tweets(self) -> List[Dict[Any, Any]]:
-        """Twitter'dan son tweet'leri al"""
+        """
+        Twitter'dan son 5 tweeti alır.
+        Alıntı tweetler de expansions ile ve includes ile beraber gelir.
+        """
         url = f"https://api.twitter.com/2/users/{self.twitter_user_id}/tweets"
         params = {
             'max_results': 5,
             'tweet.fields': 'created_at,attachments,in_reply_to_user_id,referenced_tweets',
-            'media.fields': 'type,url,variants,preview_image_url',
-            'expansions': 'attachments.media_keys'
+            'media.fields': 'type,url,variants,preview_image_url,media_key',
+            'expansions': 'attachments.media_keys,referenced_tweets.id'  # Alıntı tweet ID'leri için
         }
-        
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 response = requests.get(url, headers=self.twitter_headers, params=params, timeout=30)
-                
+
                 if self.handle_rate_limit(response):
                     continue
-                
+
                 if response.status_code == 200:
                     data = response.json()
                     tweets = data.get('data', [])
-                    media_data = {media['media_key']: media for media in data.get('includes', {}).get('media', [])}
-                    
+                    includes = data.get('includes', {})
+                    media_data = {media['media_key']: media for media in includes.get('media', [])}
+                    included_tweets = {tweet['id']: tweet for tweet in includes.get('tweets', [])}
+
+                    # Ana tweetlerin medya ataması
                     for tweet in tweets:
                         if 'attachments' in tweet and 'media_keys' in tweet['attachments']:
-                            tweet['media'] = [media_data.get(key) for key in tweet['attachments']['media_keys']]
-                    
-                    logger.info(f"{len(tweets)} tweet alındı")
+                            tweet['media'] = [media_data.get(k) for k in tweet['attachments']['media_keys']]
+
+                    # Alıntı tweetlerin (quoted tweets) medya ataması
+                    for tweet in tweets:
+                        # Alıntı tweet varsa alıntılanan tweet nesnesini ata
+                        referenced = tweet.get('referenced_tweets', [])
+                        for ref in referenced:
+                            if ref.get('type') == 'quoted':
+                                quoted_id = ref.get('id')
+                                quoted_tweet = included_tweets.get(quoted_id)
+                                if quoted_tweet:
+                                    # Alıntı tweetin medyasını ata
+                                    if 'attachments' in quoted_tweet and 'media_keys' in quoted_tweet['attachments']:
+                                        quoted_tweet['media'] = [media_data.get(k) for k in quoted_tweet['attachments']['media_keys']]
+                                    tweet['quoted_tweet'] = quoted_tweet
+                                break  # Birden çok quoted varsa sadece birinciyi alıyoruz
+
+                    logger.info(f"{len(tweets)} tweet ve alıntıları alındı")
                     return tweets
                 else:
                     logger.error(f"Twitter API hatası: {response.status_code} - {response.text}")
-                    
+
             except requests.exceptions.RequestException as e:
                 logger.error(f"Bağlantı hatası (deneme {attempt + 1}): {e}")
                 if attempt < max_retries - 1:
                     time.sleep(5 * (attempt + 1))
-        
+
         return []
-    
+
     def clean_tweet_text(self, text: str) -> str:
         """Tweet metnini temizle"""
-        # Linkleri ve hashtagleri kaldır
         text = re.sub(r'http[s]?://\S+', '', text)
         text = re.sub(r'#\w+', '', text)
         text = re.sub(r'\|', '', text)
@@ -184,37 +204,26 @@ class TwitterRedditBot:
             "x-rapidapi-host": self.translation_api_host,
             "Content-Type": "application/json"
         }
-
         payload = {
-            "origin_language": "en",  # Kaynak dil
-            "target_language": "tr",  # Hedef dil
-            "words_not_to_translate": "",  # İstemediğiniz kelimeler varsa
+            "origin_language": "en",
+            "target_language": "tr",
+            "words_not_to_translate": "",
             "input_text": text
         }
-
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response = requests.post(
-                    self.translation_api_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=30
-                )
+                response = requests.post(self.translation_api_url, headers=headers, json=payload, timeout=30)
                 response.raise_for_status()
                 data = response.json()
                 logger.info(f"RapidAPI raw response: {json.dumps(data, ensure_ascii=False)}")
-
-                # Düzeltme: Çeviri 'translation' alanında geliyor.
                 translated_text = data.get('translation', text)
-
                 logger.info(f"Çeviri sonucu: '{translated_text}'")
                 return translated_text
             except requests.exceptions.RequestException as e:
                 logger.error(f"RapidAPI hatası (deneme {attempt + 1}): {e}")
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
-        
         logger.warning("RapidAPI çevirisi başarısız oldu, orijinal metin kullanılacak.")
         return text
     
@@ -233,11 +242,9 @@ class TwitterRedditBot:
         except Exception as e:
             logger.error(f"Medya indirme hatası: {e}")
         return None
-    
+
     def convert_video_for_reddit(self, input_path: str) -> Optional[str]:
-        """Videoyu Reddit için uygun formata dönüştür"""
         output_path = str(input_path).replace('.mp4', '_reddit.mp4')
-        
         try:
             cmd = [
                 'ffmpeg', '-i', input_path,
@@ -253,7 +260,6 @@ class TwitterRedditBot:
                 output_path
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            
             if result.returncode == 0:
                 logger.info(f"Video dönüştürüldü: {output_path}")
                 return output_path
@@ -264,30 +270,24 @@ class TwitterRedditBot:
         return None
 
     def get_best_video_variant(self, media_info: Dict) -> Optional[str]:
-        """En iyi video varyantını seç"""
         if media_info.get('type') not in ['video', 'animated_gif']:
             return None
         variants = media_info.get('variants', [])
         if not variants:
             return None
-        
         best_variant = max(
             [v for v in variants if v.get('content_type') == 'video/mp4'],
             key=lambda x: x.get('bit_rate', 0),
             default=None
         )
         return best_variant.get('url') if best_variant else None
-        
+
     def process_media(self, media_list: List[Dict]) -> List[str]:
-        """Medya dosyalarını işle"""
         processed_media = []
-        
         for i, media in enumerate(media_list):
             if not media:
                 continue
-
             media_type = media.get('type')
-
             if media_type == 'photo':
                 media_url = media.get('url')
                 if media_url:
@@ -295,7 +295,6 @@ class TwitterRedditBot:
                     filepath = self.download_media(media_url, filename)
                     if filepath:
                         processed_media.append(filepath)
-            
             elif media_type in ['video', 'animated_gif']:
                 video_url = self.get_best_video_variant(media)
                 if video_url:
@@ -307,11 +306,9 @@ class TwitterRedditBot:
                             processed_media.append(converted_path)
                         else:
                             processed_media.append(filepath)
-
         return processed_media
-    
+
     def determine_flair(self, tweet_text: str) -> Optional[str]:
-        """Tweet içeriğine göre flair belirle"""
         text_lower = tweet_text.lower()
         if any(word in text_lower for word in ['breaking', 'urgent', 'alert', 'news', 'report']):
             return self.flair_haberler
@@ -321,34 +318,25 @@ class TwitterRedditBot:
             return self.flair_tartisma or self.flair_haberler
 
     def is_reply_or_retweet(self, tweet: Dict) -> bool:
-        """Tweet yanıt ya da retweet ise True döner"""
-        # Reply ise
         if tweet.get('in_reply_to_user_id'):
             return True
-
-        # Referenced tweets kontrolü
         referenced = tweet.get('referenced_tweets', [])
         for ref in referenced:
-            # Reply veya retweet tipi olabilir
             if ref.get('type') in ['replied_to', 'retweeted']:
                 return True
         return False
-    
+
     def post_to_reddit(self, title: str, media_paths: List[str], tweet_text: str) -> bool:
-        """Reddit'e gönderi paylaş"""
         try:
             subreddit = self.reddit.subreddit(self.subreddit_name)
             flair_id = self.determine_flair(tweet_text)
             self.reddit.validate_on_submit = True
 
             if media_paths:
-                # Eğer 1 medya varsa tekil post, 2+ medya varsa galeri
                 if len(media_paths) == 1:
                     media_entry = media_paths[0]
                     ext = os.path.splitext(media_entry)[1].lower()
-
                     if ext in ['.mp4', '.mkv', '.avi', '.mov']:
-                        # Video dosyasıysa
                         try:
                             submission = subreddit.submit_video(
                                 title=title,
@@ -359,14 +347,12 @@ class TwitterRedditBot:
                             logger.error(f"Video yükleme hatası: {e}, metin olarak denenecek.")
                             submission = subreddit.submit(title, selftext=tweet_text + "\n\n(Video yüklenemedi)", flair_id=flair_id)
                     else:
-                        # Resim dosyası
                         submission = subreddit.submit_image(
                             title=title,
                             image_path=media_entry,
                             flair_id=flair_id
                         )
                 else:
-                    # Galeri gönderisi
                     image_paths = [p for p in media_paths if os.path.splitext(p)[1].lower() in ['.jpg', '.jpeg', '.png', '.gif']]
                     if image_paths:
                         media_gallery = [{'image_path': p} for p in image_paths]
@@ -382,50 +368,38 @@ class TwitterRedditBot:
                             flair_id=flair_id
                         )
             else:
-                # Medya yoksa sadece metin gönder
                 submission = subreddit.submit(
                     title=title,
                     selftext=tweet_text,
                     flair_id=flair_id
                 )
-
             logger.info(f"Reddit'e gönderildi: {submission.url}")
             return True
         except Exception as e:
             logger.error(f"Reddit paylaşımı başarısız oldu: {e}")
             return False
-    
+
     def cleanup_temp_files(self):
-        """Geçici dosyaları temizle"""
         try:
             for f in self.temp_dir.glob('*'):
                 f.unlink()
             logger.info("Geçici medya dosyaları temizlendi")
         except Exception as e:
             logger.error(f"Temizlik hatası: {e}")
-    
-    def create_reddit_title(self, turkish_text: str, original_text: str) -> str:
-        """
-        Reddit için başlık oluştur
-        - Sadece çeviri metni kullanılır (original_text artık kullanılmaz)
-        """
-        title = turkish_text.strip()
 
+    def create_reddit_title(self, turkish_text: str, original_text: str) -> str:
+        """Reddit için başlık oluştur"""
+        title = turkish_text.strip()
         if '\n' in title:
             title = title.split('\n')[0].strip()
-
-        # Başlık uzun ise kes
         if len(title) > 280:
             title = title[:280] + "..."
-
         return title
-    
+
     def process_tweet(self, tweet: Dict) -> bool:
-        """Tek bir tweet'i işler (sadece çeviri metni kullanarak gönderir)"""
         tweet_id = tweet['id']
         tweet_text = tweet['text']
 
-        # Reply veya retweet tweetleri atla
         if self.is_reply_or_retweet(tweet):
             logger.info(f"Tweet atlandı (cevap veya retweet): {tweet_id}")
             return False
@@ -434,19 +408,35 @@ class TwitterRedditBot:
 
         cleaned_text = self.clean_tweet_text(tweet_text)
         turkish_text = self.translate_to_turkish(cleaned_text)
-        media_paths = self.process_media(tweet.get('media', []))
 
-        # Başlık ve içerik sadece çevrilmiş metin olacak
+        # Medya işle: ana tweetin medyası
+        main_media = self.process_media(tweet.get('media', []))
+
+        # Alıntı tweet varsa onun medyasını da indir
+        quoted_media = []
+        quoted_tweet = tweet.get('quoted_tweet')
+        if quoted_tweet:
+            quoted_media = self.process_media(quoted_tweet.get('media', []))
+
+            # Alıntı tweet metnini de çevirip mesaj içeriğine ekleyebiliriz
+            quoted_text = quoted_tweet.get('text', '')
+            cleaned_quoted_text = self.clean_tweet_text(quoted_text)
+            translated_quoted_text = self.translate_to_turkish(cleaned_quoted_text)
+            # Alıntı metni varsa, tweet_text sonuna ekle (veya istediğiniz formatta)
+            turkish_text += "\n\nAlıntı Tweet:\n" + translated_quoted_text
+
+        # Ana tweet + alıntı tweet medyalarını birleştir
+        all_media = main_media + quoted_media
+
         title = self.create_reddit_title(turkish_text, turkish_text)
 
-        if self.post_to_reddit(title, media_paths, turkish_text):
+        if self.post_to_reddit(title, all_media, turkish_text):
             self.save_last_tweet_id(tweet_id)
             return True
 
         return False
 
     def run(self):
-        """Ana döngü"""
         logger.info("Bot çalışmaya başladı (RapidAPI çevirisi ile)")
 
         while True:
@@ -459,7 +449,6 @@ class TwitterRedditBot:
                     time.sleep(60)
                     continue
 
-                # Yanıt veya retweet olmayan tweetleri filtrele
                 non_reply_retweet_tweets = [t for t in tweets if not self.is_reply_or_retweet(t)]
 
                 if not non_reply_retweet_tweets:
@@ -473,7 +462,7 @@ class TwitterRedditBot:
                     logger.info("Yeni tweet yok, 60 saniye bekleniyor...")
                     time.sleep(60)
                     continue
-                
+
                 success = self.process_tweet(latest_tweet)
 
                 if success:
@@ -482,7 +471,7 @@ class TwitterRedditBot:
                     logger.warning("Tweet işlenirken hata oluştu")
 
                 self.cleanup_temp_files()
-                time.sleep(300)  # 5 dakika bekle
+                time.sleep(300)
 
             except KeyboardInterrupt:
                 logger.info("Bot kapatıldı (Ctrl+C)")
@@ -490,6 +479,7 @@ class TwitterRedditBot:
             except Exception as e:
                 logger.error(f"Gönderimde beklenmeyen hata: {e}")
                 time.sleep(60)
+
 
 if __name__ == "__main__":
     try:
