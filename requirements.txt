@@ -4,4 +4,4 @@ tweepy
 praw
 python-dotenv
 urllib3
-googletrans==4.0.0-rc1
+google-generativeai
