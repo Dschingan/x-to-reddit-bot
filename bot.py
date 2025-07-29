@@ -505,22 +505,22 @@ class TwitterRedditBot:
                 tweets = self.get_latest_tweets()
 
                 if not tweets:
-                    logger.info("Tweet yok, 60 saniye bekleniyor...")
-                    time.sleep(60)
+                    logger.info("Tweet yok, 2600 saniye bekleniyor...")
+                    time.sleep(2600)
                     continue
 
                 non_reply_retweet_tweets = [t for t in tweets if not self.is_reply_or_retweet(t)]
 
                 if not non_reply_retweet_tweets:
-                    logger.info("Yeni retweet veya yanıt olmayan tweet yok, 60 saniye bekleniyor...")
-                    time.sleep(60)
+                    logger.info("Yeni retweet veya yanıt olmayan tweet yok, 2600 saniye bekleniyor...")
+                    time.sleep(2600)
                     continue
 
                 latest_tweet = non_reply_retweet_tweets[0]
 
                 if last_tweet_id and latest_tweet['id'] == last_tweet_id:
-                    logger.info("Yeni tweet yok, 60 saniye bekleniyor...")
-                    time.sleep(60)
+                    logger.info("Yeni tweet yok, 2600 saniye bekleniyor...")
+                    time.sleep(2600)
                     continue
 
                 success = self.process_tweet(latest_tweet)
@@ -531,14 +531,14 @@ class TwitterRedditBot:
                     logger.warning("Tweet işlenirken hata oluştu")
 
                 self.cleanup_temp_files()
-                time.sleep(300)
+                time.sleep(2600)
 
             except KeyboardInterrupt:
                 logger.info("Bot kapatıldı (Ctrl+C)")
                 break
             except Exception as e:
                 logger.error(f"Gönderimde beklenmeyen hata: {e}")
-                time.sleep(60)
+                time.sleep(2600)
 
 
 if __name__ == "__main__":
