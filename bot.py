@@ -28,7 +28,7 @@ load_dotenv()
 class TwitterRedditBot:
     def __init__(self):
         # Environment variables
-        self.twitter_bearer_token = os.getenv('TWITTER_BEARER_TOKEN')
+        self.twitter_rapidapi_key = os.getenv('TWITTER_RAPIDAPI_KEY')
         self.twitter_username = os.getenv('TWITTER_USERNAME')
         self.twitter_user_id = os.getenv('TWITTER_USER_ID')
         
@@ -55,10 +55,10 @@ class TwitterRedditBot:
         self.temp_dir = Path('temp_media')
         self.temp_dir.mkdir(exist_ok=True)
         
-        # Twitter API başlıkları
+        # RapidAPI Twitter başlıkları
         self.twitter_headers = {
-            'Authorization': f'Bearer {self.twitter_bearer_token}',
-            'Content-Type': 'application/json'
+            "x-rapidapi-key": self.twitter_rapidapi_key,
+            "x-rapidapi-host": "twitter241.p.rapidapi.com"
         }
         
         # Reddit istemcisini başlat
@@ -131,59 +131,119 @@ class TwitterRedditBot:
 
     def get_latest_tweets(self) -> List[Dict[Any, Any]]:
         """
-        Twitter'dan son 5 tweeti alır.
-        Alıntı tweetler de expansions ile ve includes ile beraber gelir.
+        RapidAPI Twitter241 API'sinden son 5 tweeti alır.
         """
-        url = f"https://api.twitter.com/2/users/{self.twitter_user_id}/tweets"
-        params = {
-            'max_results': 5,
-            'tweet.fields': 'created_at,attachments,in_reply_to_user_id,referenced_tweets',
-            'media.fields': 'type,url,variants,preview_image_url,media_key',
-            'expansions': 'attachments.media_keys,referenced_tweets.id'  # Alıntı tweet ID'leri için
+        url = "https://twitter241.p.rapidapi.com/user-tweets"
+        querystring = {
+            "user": self.twitter_user_id,
+            "count": "5"
         }
 
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response = requests.get(url, headers=self.twitter_headers, params=params, timeout=30)
-
-                if self.handle_rate_limit(response):
-                    continue
+                response = requests.get(url, headers=self.twitter_headers, params=querystring, timeout=30)
 
                 if response.status_code == 200:
                     data = response.json()
-                    tweets = data.get('data', [])
-                    includes = data.get('includes', {})
-                    media_data = {media['media_key']: media for media in includes.get('media', [])}
-                    included_tweets = {tweet['id']: tweet for tweet in includes.get('tweets', [])}
-
-                    # Ana tweetlerin medya ataması
-                    for tweet in tweets:
-                        if 'attachments' in tweet and 'media_keys' in tweet['attachments']:
-                            tweet['media'] = [media_data.get(k) for k in tweet['attachments']['media_keys']]
-
-                    # Alıntı tweetlerin (quoted tweets) medya ataması
-                    for tweet in tweets:
-                        # Alıntı tweet varsa alıntılanan tweet nesnesini ata
-                        referenced = tweet.get('referenced_tweets', [])
-                        for ref in referenced:
-                            if ref.get('type') == 'quoted':
-                                quoted_id = ref.get('id')
-                                quoted_tweet = included_tweets.get(quoted_id)
-                                if quoted_tweet:
-                                    # Alıntı tweetin medyasını ata
-                                    if 'attachments' in quoted_tweet and 'media_keys' in quoted_tweet['attachments']:
-                                        quoted_tweet['media'] = [media_data.get(k) for k in quoted_tweet['attachments']['media_keys']]
-                                    tweet['quoted_tweet'] = quoted_tweet
-                                break  # Birden çok quoted varsa sadece birinciyi alıyoruz
-
-                    logger.info(f"{len(tweets)} tweet ve alıntıları alındı")
-                    return tweets
+                    
+                    # RapidAPI'den gelen veriyi işle
+                    if 'result' in data and 'timeline' in data['result']:
+                        timeline = data['result']['timeline']
+                        tweets = []
+                        
+                        for instruction in timeline.get('instructions', []):
+                            if instruction.get('type') == 'TimelineAddEntries':
+                                for entry in instruction.get('entries', []):
+                                    if entry.get('entryId', '').startswith('tweet-'):
+                                        tweet_data = entry.get('content', {}).get('itemContent', {}).get('tweet_results', {}).get('result', {})
+                                        
+                                        if 'legacy' in tweet_data:
+                                            legacy = tweet_data['legacy']
+                                            
+                                            # Tweet bilgilerini standart formata çevir
+                                            tweet = {
+                                                'id': legacy.get('id_str', ''),
+                                                'text': legacy.get('full_text', ''),
+                                                'created_at': legacy.get('created_at', ''),
+                                                'in_reply_to_user_id': legacy.get('in_reply_to_user_id_str'),
+                                                'referenced_tweets': []
+                                            }
+                                            
+                                            # Medya bilgilerini işle
+                                            if 'entities' in legacy and 'media' in legacy['entities']:
+                                                media_list = []
+                                                for media in legacy['entities']['media']:
+                                                    media_info = {
+                                                        'type': media.get('type', ''),
+                                                        'url': media.get('media_url_https', ''),
+                                                        'media_key': media.get('id_str', '')
+                                                    }
+                                                    
+                                                    # Video variantları
+                                                    if 'video_info' in media and 'variants' in media['video_info']:
+                                                        media_info['variants'] = media['video_info']['variants']
+                                                    
+                                                    media_list.append(media_info)
+                                                
+                                                tweet['media'] = media_list
+                                            
+                                            # Alıntı tweet kontrolü
+                                            if 'quoted_status' in legacy:
+                                                quoted = legacy['quoted_status']
+                                                quoted_tweet = {
+                                                    'id': quoted.get('id_str', ''),
+                                                    'text': quoted.get('full_text', ''),
+                                                    'created_at': quoted.get('created_at', '')
+                                                }
+                                                
+                                                # Alıntı tweet medyası
+                                                if 'entities' in quoted and 'media' in quoted['entities']:
+                                                    quoted_media = []
+                                                    for media in quoted['entities']['media']:
+                                                        quoted_media_info = {
+                                                            'type': media.get('type', ''),
+                                                            'url': media.get('media_url_https', ''),
+                                                            'media_key': media.get('id_str', '')
+                                                        }
+                                                        
+                                                        if 'video_info' in media and 'variants' in media['video_info']:
+                                                            quoted_media_info['variants'] = media['video_info']['variants']
+                                                        
+                                                        quoted_media.append(quoted_media_info)
+                                                    
+                                                    quoted_tweet['media'] = quoted_media
+                                                
+                                                tweet['quoted_tweet'] = quoted_tweet
+                                                tweet['referenced_tweets'].append({
+                                                    'type': 'quoted',
+                                                    'id': quoted.get('id_str', '')
+                                                })
+                                            
+                                            # Retweet kontrolü
+                                            if 'retweeted_status' in legacy:
+                                                tweet['referenced_tweets'].append({
+                                                    'type': 'retweeted',
+                                                    'id': legacy['retweeted_status'].get('id_str', '')
+                                                })
+                                            
+                                            tweets.append(tweet)
+                        
+                        logger.info(f"{len(tweets)} tweet RapidAPI'den alındı")
+                        return tweets
+                    else:
+                        logger.warning("RapidAPI'den beklenmeyen veri formatı")
+                        logger.debug(f"API Response: {data}")
+                        return []
                 else:
-                    logger.error(f"Twitter API hatası: {response.status_code} - {response.text}")
+                    logger.error(f"RapidAPI hatası: {response.status_code} - {response.text}")
 
             except requests.exceptions.RequestException as e:
                 logger.error(f"Bağlantı hatası (deneme {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(5 * (attempt + 1))
+            except Exception as e:
+                logger.error(f"Veri işleme hatası (deneme {attempt + 1}): {e}")
                 if attempt < max_retries - 1:
                     time.sleep(5 * (attempt + 1))
 
