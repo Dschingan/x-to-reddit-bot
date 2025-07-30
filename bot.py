@@ -525,11 +525,23 @@ class TwitterRedditBot:
                 logger.info(f"No new tweets to process for {user_key}: {user_name}")
                 return
             
-            for tweet in tweets:
-                success = self.process_tweet(tweet, user_key, includes)
-                if success:
-                    # Add delay between posts to avoid rate limiting
-                    time.sleep(5)
+            # Select the most recent tweet (highest Snowflake ID assumed newest)
+            latest_tweet = max(tweets, key=lambda t: int(t.id))
+            
+            # Process only the latest tweet
+            success = self.process_tweet(latest_tweet, user_key, includes)
+            
+            # Mark older tweets as processed so they are not reposted later
+            for tw in tweets:
+                if tw.id != latest_tweet.id:
+                    self.processed_tweets[user_key].add(str(tw.id))
+            
+            # Persist processed tweet IDs
+            self.save_processed_tweets(user_key)
+            
+            if success:
+                # Add delay between posts to avoid rate limiting
+                time.sleep(5)
                     
         except Exception as e:
             logger.error(f"Error in check_and_post_tweets for {user_key}: {user_name}: {e}")
