@@ -9,7 +9,7 @@ load_dotenv()
 
 # Logging setup
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # İlk çalıştırmada DEBUG
     format='%(asctime)s %(levelname)s %(message)s',
     handlers=[logging.StreamHandler()]
 )
@@ -95,6 +95,9 @@ class RedditAntiBanBot:
 
 if __name__ == "__main__":
     bot = RedditAntiBanBot()
+    logging.info("[DEBUG] First run: Will fetch, translate, and post the latest tweet with detailed debug logs.")
+    bot.run()  # İlk çalıştırmada hemen çalıştır
+    logging.getLogger().setLevel(logging.INFO)  # Sonra INFO seviyesine al
     while True:
         logging.info("[Scheduler] Checking for new tweet and posting if needed...")
         bot.run()
