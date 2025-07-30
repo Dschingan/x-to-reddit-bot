@@ -41,6 +41,9 @@ class TwitterRedditBot:
         self.reddit_username = os.getenv('REDDIT_USERNAME')
         self.reddit_password = os.getenv('REDDIT_PASSWORD')
         
+        # Opsiyonel: PRAW yerine REST API kullanılsın mı?
+        self.use_reddit_rest = os.getenv('USE_REDDIT_REST', 'false').lower() == 'true'
+        
         # Gelişmiş User Agent - Reddit'in banlamasını önlemek için
         custom_user_agent = os.getenv('USER_AGENT')
         if not custom_user_agent or custom_user_agent.strip() == '':
@@ -83,6 +86,10 @@ class TwitterRedditBot:
         # Reddit istemcisini başlat
         self._init_reddit()
         
+        # REST API tokeni önbelleklemek için
+        self._rest_token: Optional[str] = None
+        self._rest_token_expiry: float = 0.0
+        
         # Çeviri sistemini test et
         self._test_translation()
         
@@ -103,6 +110,61 @@ class TwitterRedditBot:
             logger.error(f"Reddit API bağlantı hatası: {e}")
             raise
     
+    def _get_reddit_token(self) -> Optional[str]:
+        """Reddit OAuth2 token'ı al (REST API için)"""
+        # Token hâlâ geçerliyse yeniden alma
+        if self._rest_token and time.time() < self._rest_token_expiry - 60:
+            return self._rest_token
+        try:
+            auth = requests.auth.HTTPBasicAuth(self.reddit_client_id, self.reddit_client_secret)
+            data = {
+                'grant_type': 'password',
+                'username': self.reddit_username,
+                'password': self.reddit_password
+            }
+            headers = {'User-Agent': self.user_agent}
+            resp = requests.post('https://www.reddit.com/api/v1/access_token', auth=auth, data=data, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                token_json = resp.json()
+                self._rest_token = token_json['access_token']
+                self._rest_token_expiry = time.time() + token_json.get('expires_in', 3600)
+                logger.info("Reddit REST API erişim tokenı alındı")
+                return self._rest_token
+            else:
+                logger.error(f"Token alma hatası: {resp.status_code} - {resp.text}")
+                return None
+        except Exception as e:
+            logger.error(f"Token isteği sırasında hata: {e}")
+            return None
+
+    def _rest_submit(self, title: str, selftext: str) -> bool:
+        """PRAW yerine doğrudan Reddit REST API ile metin gönderisi yap"""
+        token = self._get_reddit_token()
+        if not token:
+            return False
+        headers = {
+            'Authorization': f'bearer {token}',
+            'User-Agent': self.user_agent
+        }
+        data = {
+            'sr': self.subreddit_name,
+            'kind': 'self',  # metin gönderisi
+            'title': title,
+            'text': selftext,
+            'flair_id': self.determine_flair(selftext) or ''
+        }
+        try:
+            resp = requests.post('https://oauth.reddit.com/api/submit', headers=headers, data=data, timeout=30)
+            if resp.status_code in [200, 201, 202, 204]:
+                logger.info("Reddit REST API ile gönderi paylaşıldı")
+                return True
+            else:
+                logger.error(f"REST submit hatası: {resp.status_code} - {resp.text}")
+                return False
+        except Exception as e:
+            logger.error(f"REST submit isteğinde hata: {e}")
+            return False
+
     def _test_translation(self):
         """Çeviri sistemini test et"""
         test_text = "Hello world"
@@ -383,6 +445,10 @@ class TwitterRedditBot:
 
     def post_to_reddit(self, title: str, media_paths: List[str], tweet_text: str) -> bool:
         # Rate limit kontrolü
+        # Eğer REST API seçildiyse PRAW yolunu atla
+        if self.use_reddit_rest:
+            return self._handle_reddit_errors(lambda: self._rest_submit(title, tweet_text))
+        
         self._check_rate_limit()
         
         def _submit_to_reddit():
