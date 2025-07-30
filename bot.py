@@ -10,9 +10,6 @@ import re
 from dotenv import load_dotenv
 import logging
 from typing import Optional, Dict, Any, List
-import random
-import platform
-from prawcore.exceptions import TooManyRequests, ServerError, RequestException
 
 # Logging ayarları
 logging.basicConfig(
@@ -40,27 +37,8 @@ class TwitterRedditBot:
         self.reddit_client_secret = os.getenv('REDDIT_CLIENT_SECRET')
         self.reddit_username = os.getenv('REDDIT_USERNAME')
         self.reddit_password = os.getenv('REDDIT_PASSWORD')
-        
-        # Opsiyonel: PRAW yerine REST API kullanılsın mı?
-        self.use_reddit_rest = os.getenv('USE_REDDIT_REST', 'false').lower() == 'true'
-        
-        # Gelişmiş User Agent - Reddit'in banlamasını önlemek için
-        custom_user_agent = os.getenv('USER_AGENT')
-        if not custom_user_agent or custom_user_agent.strip() == '':
-            # Eğer .env'de user agent yoksa, otomatik oluştur
-            python_version = platform.python_version()
-            system_info = platform.system()
-            custom_user_agent = f"TwitterRedditBot/1.0 (by /u/{self.reddit_username}; Python/{python_version}; {system_info})"
-        
-        self.user_agent = custom_user_agent
+        self.user_agent = os.getenv('USER_AGENT')
         self.subreddit_name = os.getenv('SUBREDDIT_NAME')
-        
-        # Anti-ban ayarları
-        self.min_delay = 300  # Minimum 5 dakika bekleme
-        self.max_delay = 900  # Maximum 15 dakika bekleme
-        self.rate_limit_delay = 3600  # Rate limit durumunda 1 saat bekle
-        self.max_retries = 3  # Maksimum yeniden deneme sayısı
-        self.last_post_time = 0  # Son post zamanı
         
         # Flair ID'leri
         self.flair_haberler = os.getenv('FLAIR_HABERLER')
@@ -86,10 +64,6 @@ class TwitterRedditBot:
         # Reddit istemcisini başlat
         self._init_reddit()
         
-        # REST API tokeni önbelleklemek için
-        self._rest_token: Optional[str] = None
-        self._rest_token_expiry: float = 0.0
-        
         # Çeviri sistemini test et
         self._test_translation()
         
@@ -110,61 +84,6 @@ class TwitterRedditBot:
             logger.error(f"Reddit API bağlantı hatası: {e}")
             raise
     
-    def _get_reddit_token(self) -> Optional[str]:
-        """Reddit OAuth2 token'ı al (REST API için)"""
-        # Token hâlâ geçerliyse yeniden alma
-        if self._rest_token and time.time() < self._rest_token_expiry - 60:
-            return self._rest_token
-        try:
-            auth = requests.auth.HTTPBasicAuth(self.reddit_client_id, self.reddit_client_secret)
-            data = {
-                'grant_type': 'password',
-                'username': self.reddit_username,
-                'password': self.reddit_password
-            }
-            headers = {'User-Agent': self.user_agent}
-            resp = requests.post('https://www.reddit.com/api/v1/access_token', auth=auth, data=data, headers=headers, timeout=30)
-            if resp.status_code == 200:
-                token_json = resp.json()
-                self._rest_token = token_json['access_token']
-                self._rest_token_expiry = time.time() + token_json.get('expires_in', 3600)
-                logger.info("Reddit REST API erişim tokenı alındı")
-                return self._rest_token
-            else:
-                logger.error(f"Token alma hatası: {resp.status_code} - {resp.text}")
-                return None
-        except Exception as e:
-            logger.error(f"Token isteği sırasında hata: {e}")
-            return None
-
-    def _rest_submit(self, title: str, selftext: str) -> bool:
-        """PRAW yerine doğrudan Reddit REST API ile metin gönderisi yap"""
-        token = self._get_reddit_token()
-        if not token:
-            return False
-        headers = {
-            'Authorization': f'bearer {token}',
-            'User-Agent': self.user_agent
-        }
-        data = {
-            'sr': self.subreddit_name,
-            'kind': 'self',  # metin gönderisi
-            'title': title,
-            'text': selftext,
-            'flair_id': self.determine_flair(selftext) or ''
-        }
-        try:
-            resp = requests.post('https://oauth.reddit.com/api/submit', headers=headers, data=data, timeout=30)
-            if resp.status_code in [200, 201, 202, 204]:
-                logger.info("Reddit REST API ile gönderi paylaşıldı")
-                return True
-            else:
-                logger.error(f"REST submit hatası: {resp.status_code} - {resp.text}")
-                return False
-        except Exception as e:
-            logger.error(f"REST submit isteğinde hata: {e}")
-            return False
-
     def _test_translation(self):
         """Çeviri sistemini test et"""
         test_text = "Hello world"
@@ -173,42 +92,6 @@ class TwitterRedditBot:
         
         if result == test_text:
             logger.warning("NOT: RapidAPI çevirisinde sorun olabilir, orijinal metin döndürüldü.")
-    
-    def _wait_random_delay(self):
-        """Reddit banlanmasını önlemek için rastgele bekleme"""
-        delay = random.randint(self.min_delay, self.max_delay)
-        logger.info(f"Anti-ban rastgele bekleme: {delay} saniye ({delay//60} dakika {delay%60} saniye)")
-        time.sleep(delay)
-    
-    def _check_rate_limit(self):
-        """Son post zamanından itibaren minimum bekleme süresini kontrol et"""
-        current_time = time.time()
-        time_since_last_post = current_time - self.last_post_time
-        
-        if time_since_last_post < self.min_delay:
-            wait_time = self.min_delay - time_since_last_post
-            logger.info(f"Rate limit koruması: {wait_time:.0f} saniye daha bekleniyor")
-            time.sleep(wait_time)
-    
-    def _handle_reddit_errors(self, func, *args, **kwargs):
-        """Reddit API hatalarını yönet ve yeniden dene"""
-        for attempt in range(self.max_retries):
-            try:
-                return func(*args, **kwargs)
-            except TooManyRequests as e:
-                logger.warning(f"Reddit rate limit! {self.rate_limit_delay} saniye bekleniyor... (Deneme {attempt + 1}/{self.max_retries})")
-                time.sleep(self.rate_limit_delay)
-            except (ServerError, RequestException) as e:
-                wait_time = (2 ** attempt) * 60  # Exponential backoff
-                logger.warning(f"Reddit sunucu hatası: {e}. {wait_time} saniye bekleniyor... (Deneme {attempt + 1}/{self.max_retries})")
-                time.sleep(wait_time)
-            except Exception as e:
-                logger.error(f"Reddit API hatası (Deneme {attempt + 1}/{self.max_retries}): {e}")
-                if attempt == self.max_retries - 1:
-                    raise
-                time.sleep(60 * (attempt + 1))
-        
-        return None
     
     def read_last_tweet_id(self) -> Optional[str]:
         """Son işlenen tweet ID'sini oku"""
@@ -444,103 +327,56 @@ class TwitterRedditBot:
         return False
 
     def post_to_reddit(self, title: str, media_paths: List[str], tweet_text: str) -> bool:
-        # Rate limit kontrolü
-        # Eğer REST API seçildiyse PRAW yolunu atla
-        if self.use_reddit_rest:
-            return self._handle_reddit_errors(lambda: self._rest_submit(title, tweet_text))
-        
-        self._check_rate_limit()
-        
-        def _submit_to_reddit():
+        try:
             subreddit = self.reddit.subreddit(self.subreddit_name)
-            
-            # Flair belirleme
             flair_id = self.determine_flair(tweet_text)
-            
+            self.reddit.validate_on_submit = True
+
             if media_paths:
-                # Medya türlerini ayır
-                image_paths = []
-                video_paths = []
-                
-                for media_path in media_paths:
-                    if Path(media_path).exists():
-                        ext = Path(media_path).suffix.lower()
-                        if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
-                            image_paths.append(media_path)
-                        elif ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
-                            video_paths.append(media_path)
-                
-                # Video varsa öncelikle video yükle (Reddit tek video destekler)
-                if video_paths:
-                    video_path = video_paths[0]  # İlk videoyu al
-                    logger.info(f"Video yükleniyor: {video_path}")
-                    
-                    try:
-                        submission = subreddit.submit_video(
-                            title=title,
-                            video_path=video_path,
-                            flair_id=flair_id
-                        )
-                        
-                        logger.info(f"Reddit'te video ile paylaşıldı: {submission.url}")
-                        return True
-                        
-                    except Exception as video_error:
-                        logger.error(f"Video yükleme hatası: {video_error}")
-                        # Video yüklenemezse metin olarak paylaş
-                        logger.info("Video yüklenemedi, metin olarak paylaşılıyor")
-                
-                # Sadece resim varsa gallery olarak yükle
-                elif image_paths:
-                    media_dict_list = [{'image_path': img_path} for img_path in image_paths]
-                    
-                    if len(image_paths) == 1:
-                        # Tek resim varsa submit_image kullan
+                if len(media_paths) == 1:
+                    media_entry = media_paths[0]
+                    ext = os.path.splitext(media_entry)[1].lower()
+                    if ext in ['.mp4', '.mkv', '.avi', '.mov']:
+                        try:
+                            submission = subreddit.submit_video(
+                                title=title,
+                                video_path=media_entry,
+                                flair_id=flair_id
+                            )
+                        except Exception as e:
+                            logger.error(f"Video yükleme hatası: {e}, metin olarak denenecek.")
+                            submission = subreddit.submit(title, selftext=tweet_text + "\n\n(Video yüklenemedi)", flair_id=flair_id)
+                    else:
                         submission = subreddit.submit_image(
                             title=title,
-                            image_path=image_paths[0],
+                            image_path=media_entry,
+                            flair_id=flair_id
+                        )
+                else:
+                    image_paths = [p for p in media_paths if os.path.splitext(p)[1].lower() in ['.jpg', '.jpeg', '.png', '.gif']]
+                    if image_paths:
+                        media_gallery = [{'image_path': p} for p in image_paths]
+                        submission = subreddit.submit_gallery(
+                            title=title,
+                            images=media_gallery,
                             flair_id=flair_id
                         )
                     else:
-                        # Çoklu resim varsa gallery kullan
-                        submission = subreddit.submit_gallery(
+                        submission = subreddit.submit(
                             title=title,
-                            images=media_dict_list,
+                            selftext=tweet_text,
                             flair_id=flair_id
                         )
-                    
-
-                    
-                    logger.info(f"Reddit'te resim ile paylaşıldı: {submission.url}")
-                    return True
-                
-                else:
-                    logger.warning("Desteklenen medya dosyası bulunamadı, sadece metin paylaşılıyor")
-            
-            # Medya yoksa veya medya yüklenemezse sadece metin paylaş
-            submission = subreddit.submit(
-                title=title,
-                selftext=tweet_text,
-                flair_id=flair_id
-            )
-            
-            logger.info(f"Reddit'te metin olarak paylaşıldı: {submission.url}")
-            return True
-        
-        try:
-            # Anti-ban error handling ile Reddit'e gönder
-            result = self._handle_reddit_errors(_submit_to_reddit)
-            if result:
-                # Başarılı post sonrası zamanı kaydet
-                self.last_post_time = time.time()
-                logger.info("Reddit post başarılı - anti-ban timer güncellendi")
-                return True
             else:
-                logger.error("Reddit paylaşımı tüm denemeler sonrası başarısız oldu")
-                return False
-                
+                submission = subreddit.submit(
+                    title=title,
+                    selftext=tweet_text,
+                    flair_id=flair_id
+                )
+            logger.info(f"Reddit'e gönderildi: {submission.url}")
+            return True
         except Exception as e:
-            logger.error(f"Reddit paylaşımı kritik hata: {e}")
+            logger.error(f"Reddit paylaşımı başarısız oldu: {e}")
             return False
 
     def cleanup_temp_files(self):
@@ -601,9 +437,7 @@ class TwitterRedditBot:
         return False
 
     def run(self):
-        logger.info("Bot çalışmaya başladı (RapidAPI çevirisi ile) - Anti-ban önlemleri aktif")
-        logger.info(f"User Agent: {self.user_agent}")
-        logger.info(f"Rastgele bekleme aralığı: {self.min_delay//60}-{self.max_delay//60} dakika")
+        logger.info("Bot çalışmaya başladı (RapidAPI çevirisi ile)")
 
         while True:
             try:
@@ -611,46 +445,40 @@ class TwitterRedditBot:
                 tweets = self.get_latest_tweets()
 
                 if not tweets:
-                    logger.info("Tweet yok, kısa bekleme...")
-                    time.sleep(random.randint(30, 90))  # 30-90 saniye rastgele
+                    logger.info("Tweet yok, 60 saniye bekleniyor...")
+                    time.sleep(60)
                     continue
 
                 non_reply_retweet_tweets = [t for t in tweets if not self.is_reply_or_retweet(t)]
 
                 if not non_reply_retweet_tweets:
-                    logger.info("Yeni retweet veya yanıt olmayan tweet yok, kısa bekleme...")
-                    time.sleep(random.randint(30, 90))  # 30-90 saniye rastgele
+                    logger.info("Yeni retweet veya yanıt olmayan tweet yok, 60 saniye bekleniyor...")
+                    time.sleep(60)
                     continue
 
                 latest_tweet = non_reply_retweet_tweets[0]
 
                 if last_tweet_id and latest_tweet['id'] == last_tweet_id:
-                    logger.info("Yeni tweet yok, kısa bekleme...")
-                    time.sleep(random.randint(30, 90))  # 30-90 saniye rastgele
+                    logger.info("Yeni tweet yok, 60 saniye bekleniyor...")
+                    time.sleep(60)
                     continue
 
                 success = self.process_tweet(latest_tweet)
 
                 if success:
                     logger.info("Tweet başarıyla Reddit'te paylaşıldı")
-                    # Başarılı post sonrası anti-ban rastgele bekleme
-                    self._wait_random_delay()
                 else:
                     logger.warning("Tweet işlenirken hata oluştu")
-                    # Hata durumunda daha kısa bekleme
-                    time.sleep(random.randint(60, 180))
 
                 self.cleanup_temp_files()
+                time.sleep(300)
 
             except KeyboardInterrupt:
                 logger.info("Bot kapatıldı (Ctrl+C)")
                 break
             except Exception as e:
                 logger.error(f"Gönderimde beklenmeyen hata: {e}")
-                # Hata durumunda exponential backoff
-                error_delay = random.randint(120, 300)  # 2-5 dakika
-                logger.info(f"Hata sonrası {error_delay} saniye bekleniyor...")
-                time.sleep(error_delay)
+                time.sleep(60)
 
 
 if __name__ == "__main__":
