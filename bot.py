@@ -227,7 +227,27 @@ class TwitterRedditBot:
                                         new_tweets.append(tweet_data)
                     
                     logger.info(f"RapidAPI: Found {len(new_tweets)} new tweets to process for {user_key}: {user_name}")
-                    return new_tweets, None
+                    if new_tweets:
+                        return new_tweets, None
+                    else:
+                        # Fallback to Twitter API v2 if RapidAPI returned no new tweets
+                        logger.warning(f"RapidAPI returned no new tweets for {user_key}. Falling back to Twitter API.")
+                        # Reuse v2 logic
+                        exclude_params = []
+                        tweets_v2 = self.twitter_api.get_users_tweets(
+                            id=user_id,
+                            max_results=10,
+                            exclude=exclude_params,
+                            tweet_fields=['created_at', 'attachments', 'author_id', 'text', 'referenced_tweets'],
+                            media_fields=['media_key', 'type', 'url', 'preview_image_url'],
+                            expansions=['attachments.media_keys', 'referenced_tweets.id']
+                        )
+                        if not tweets_v2.data:
+                            logger.info(f"Twitter API fallback: No tweets found for {user_key}: {user_name}")
+                            return [], None
+                        filtered_tweets_fb = [t for t in tweets_v2.data if str(t.id) not in self.processed_tweets[user_key]]
+                        logger.info(f"Twitter API fallback: Found {len(filtered_tweets_fb)} new tweets to process for {user_key}: {user_name}")
+                        return filtered_tweets_fb, tweets_v2.includes
                 else:
                     logger.error(f"RapidAPI request failed for {user_key}: {response.status_code}")
                     return [], None
