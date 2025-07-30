@@ -95,4 +95,8 @@ class RedditAntiBanBot:
 
 if __name__ == "__main__":
     bot = RedditAntiBanBot()
-    bot.run()
+    while True:
+        logging.info("[Scheduler] Checking for new tweet and posting if needed...")
+        bot.run()
+        logging.info("[Scheduler] Sleeping for 5 hours (18,000 seconds)...")
+        time.sleep(18000)  # 5 saat
