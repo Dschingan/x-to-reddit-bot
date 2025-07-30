@@ -1,3 +1,4 @@
+print("[DEBUG] bot.py starting...")
 import os
 import time
 import random
