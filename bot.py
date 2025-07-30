@@ -67,6 +67,8 @@ class TwitterRedditBot:
         self.reddit_password = os.getenv('REDDIT_PASSWORD')
         self.user_agent = os.getenv('USER_AGENT')
         self.subreddit_name = os.getenv('SUBREDDIT_NAME')
+        # Default Reddit flair (optional)
+        self.flair_default = os.getenv('FLAIR_HABERLER')
         
         # Translation API credentials
         self.translation_api_key = os.getenv('TRANSLATION_API_KEY')
@@ -302,7 +304,7 @@ class TwitterRedditBot:
             }
             
             payload = {
-                'text': text,
+                'input_text': text,
                 'source': 'en',
                 'target': 'tr'
             }
@@ -408,7 +410,8 @@ class TwitterRedditBot:
                     # Single media file
                     submission = subreddit.submit_image(
                         title=title,
-                        image_path=media_paths[0]
+                        image_path=media_paths[0],
+                        flair_id=self.flair_default
                     )
                     # Add comment with description if we have tweet author
                     if description:
@@ -430,7 +433,8 @@ class TwitterRedditBot:
                 # Text post with description
                 submission = subreddit.submit(
                     title=title,
-                    selftext=description
+                    selftext=description,
+                    flair_id=self.flair_default
                 )
             
             logger.info(f"Successfully posted to Reddit: {submission.url}")
