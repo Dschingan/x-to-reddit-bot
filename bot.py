@@ -503,6 +503,11 @@ class TwitterRedditBot:
         logger.info("- user1: TheBFWire - Off-peak hours (00:01-11:59): Daily at 05:00")
         logger.info("- user2: BF6_TR - Every 7 hours 12 minutes (432 minutes)")
         
+        # Run initial checks immediately upon startup
+        self.scheduled_check_peak_user1()
+        self.scheduled_check_offpeak_user1()
+        self.scheduled_check_user2()
+        
         while True:
             try:
                 schedule.run_pending()
