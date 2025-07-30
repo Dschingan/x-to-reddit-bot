@@ -416,11 +416,6 @@ class TwitterRedditBot:
                             flair_id=flair_id
                         )
                         
-                        # Video açıklamasını yorum olarak ekle
-                        if tweet_text.strip():
-                            time.sleep(random.randint(5, 15))
-                            submission.reply(tweet_text)
-                        
                         logger.info(f"Reddit'te video ile paylaşıldı: {submission.url}")
                         return True
                         
@@ -448,10 +443,7 @@ class TwitterRedditBot:
                             flair_id=flair_id
                         )
                     
-                    # Resim açıklamasını yorum olarak ekle
-                    if tweet_text.strip():
-                        time.sleep(random.randint(5, 15))
-                        submission.reply(tweet_text)
+
                     
                     logger.info(f"Reddit'te resim ile paylaşıldı: {submission.url}")
                     return True
