@@ -9,6 +9,7 @@ import re
 import subprocess
 import tempfile
 import json
+import random
 from datetime import datetime, time as dt_time
 from dotenv import load_dotenv
 from pathlib import Path
@@ -107,12 +108,16 @@ class TwitterRedditBot:
     def setup_reddit_api(self):
         """Setup Reddit API client"""
         try:
+            # Ensure a proper user-agent; Reddit recommends a descriptive format.
+            ua = self.user_agent or f"python:x-to-reddit-bot:v1.0 (by /u/{self.reddit_username})"
+            
             self.reddit = praw.Reddit(
                 client_id=self.reddit_client_id,
                 client_secret=self.reddit_client_secret,
                 username=self.reddit_username,
                 password=self.reddit_password,
-                user_agent=self.user_agent
+                user_agent=ua,
+                ratelimit_seconds=60  # Extra safety buffer on top of PRAW's built-in handling
             )
             logger.info("Reddit API client initialized successfully")
         except Exception as e:
@@ -540,8 +545,10 @@ class TwitterRedditBot:
             self.save_processed_tweets(user_key)
             
             if success:
-                # Add delay between posts to avoid rate limiting
-                time.sleep(5)
+                # Randomized delay (60–300 s) to mimic human posting and avoid spam detection
+                delay = random.uniform(60, 300)
+                logger.info(f"Sleeping {delay:.1f} seconds before next check to respect Reddit rate limits")
+                time.sleep(delay)
                     
         except Exception as e:
             logger.error(f"Error in check_and_post_tweets for {user_key}: {user_name}: {e}")
