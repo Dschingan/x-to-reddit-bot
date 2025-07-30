@@ -1,7 +1,6 @@
-openai
-requests
-tweepy
-praw
-python-dotenv
-urllib3
-google-generativeai
+requests==2.31.0
+tweepy==4.14.0
+praw==7.7.1
+python-dotenv==1.0.0
+schedule==1.2.0
+urllib3==2.0.4
