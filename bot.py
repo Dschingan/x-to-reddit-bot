@@ -12,6 +12,7 @@ import json
 from datetime import datetime, time as dt_time
 from dotenv import load_dotenv
 from pathlib import Path
+from types import SimpleNamespace
 
 # Load environment variables
 load_dotenv()
@@ -197,14 +198,47 @@ class TwitterRedditBot:
                     'X-RapidAPI-Host': user_config['rapidapi_host']
                 }
                 
-                response = requests.get(user_config['rapidapi_url'], headers=headers)
+                # Build RapidAPI request URL dynamically in case the base URL needs parameters
+                base_url = user_config['rapidapi_url']
+                if '{username}' in base_url:
+                    rapidapi_url = base_url.format(username=user_name)
+                else:
+                    # Append query parameters if not already present
+                    join_char = '&' if '?' in base_url else '?'
+                    rapidapi_url = f"{base_url}{join_char}username={user_name}&limit=20&include_replies=false"
+                
+                response = requests.get(rapidapi_url, headers=headers)
+                logger.debug(f"RapidAPI request URL: {rapidapi_url}")
                 
                 if response.status_code == 200:
                     data = response.json()
 
                     # The structure of the "timeline" key can vary (dict or list). Normalize it.
                     timeline = data.get('timeline', {})
-                    if isinstance(timeline, dict):
+                    # Handle multiple possible RapidAPI response structures
+                    if isinstance(timeline, list) and timeline and 'tweet_id' in timeline[0]:
+                        # New simple list format (each item is a tweet dict)
+                        new_tweets = []
+                        for item in timeline:
+                            tweet_id = item.get('tweet_id') or item.get('id')
+                            if tweet_id and str(tweet_id) not in self.processed_tweets[user_key]:
+                                # Convert dict to SimpleNamespace for uniform handling downstream
+                                new_tweets.append(SimpleNamespace(**{
+                                    'id': tweet_id,
+                                    'text': item.get('text', ''),
+                                    'created_at': item.get('created_at'),
+                                    'media': item.get('media', {}),
+                                    'author_id': item.get('author', {}).get('rest_id'),
+                                    # store entire original entry for later use if needed
+                                    '_raw': item
+                                }))
+                        logger.info(f"RapidAPI (simple): Found {len(new_tweets)} new tweets to process for {user_key}: {user_name}")
+                        if new_tweets:
+                            return new_tweets, None
+                        else:
+                            logger.info(f"RapidAPI (simple) returned no new tweets for {user_key}: {user_name}")
+                            return [], None
+                    elif isinstance(timeline, dict):
                         instructions = timeline.get('instructions', [])
                     elif isinstance(timeline, list):
                         instructions = timeline  # Already a list of instructions
