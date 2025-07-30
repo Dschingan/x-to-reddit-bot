@@ -59,7 +59,7 @@ def translate_text(text: str, target_language: str = "tr") -> str:
             "X-RapidAPI-Host": api_host,
             "Content-Type": "application/json",
         }
-        payload = {"text": text, "target": target_language, "source": "auto"}
+        payload = {"input_text": text, "target": target_language, "source": "auto"}
         resp = requests.post(api_url, json=payload, headers=headers, timeout=15)
         if resp.status_code == 200:
             translated = resp.json().get("translatedText", text)
@@ -120,6 +120,7 @@ class Bf6RetweetBot:
             ),
         )
         self.subreddit_name = os.getenv("SUBREDDIT_NAME", "BF6_TR")
+        self.flair_id = os.getenv("FLAIR_ID")  # optional flair id required by subreddit
 
         self.last_file = "last_retweet_id_user2.txt"
         logger.info("Bot initialized for user2 (BF6_TR)")
@@ -217,12 +218,12 @@ class Bf6RetweetBot:
                 if media_url:
                     path = download_media(media_url)
                     if path:
-                        submission = subreddit.submit_image(title=title, image_path=path)
+                        submission = subreddit.submit_image(title=title, image_path=path, flair_id=self.flair_id)
                         os.unlink(path)
                     else:
-                        submission = subreddit.submit(title=title, selftext=body)
+                        submission = subreddit.submit(title=title, selftext=body, flair_id=self.flair_id)
                 else:
-                    submission = subreddit.submit(title=title, selftext=body)
+                    submission = subreddit.submit(title=title, selftext=body, flair_id=self.flair_id)
                 logger.info("Posted to Reddit: %s", submission.url)
                 self._save_last_id(str(retweet.id))
                 wait_human()  # delay before next possible post
