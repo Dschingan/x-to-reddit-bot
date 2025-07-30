@@ -392,29 +392,72 @@ class TwitterRedditBot:
             flair_id = self.determine_flair(tweet_text)
             
             if media_paths:
-                # Medya varsa gallery olarak paylaş
-                media_dict_list = []
+                # Medya türlerini ayır
+                image_paths = []
+                video_paths = []
+                
                 for media_path in media_paths:
                     if Path(media_path).exists():
-                        media_dict_list.append({'image_path': media_path})
+                        ext = Path(media_path).suffix.lower()
+                        if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
+                            image_paths.append(media_path)
+                        elif ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
+                            video_paths.append(media_path)
                 
-                if media_dict_list:
-                    submission = subreddit.submit_gallery(
-                        title=title,
-                        images=media_dict_list,
-                        flair_id=flair_id
-                    )
+                # Video varsa öncelikle video yükle (Reddit tek video destekler)
+                if video_paths:
+                    video_path = video_paths[0]  # İlk videoyu al
+                    logger.info(f"Video yükleniyor: {video_path}")
                     
-                    # İlk yoruma tweet metnini ekle
+                    try:
+                        submission = subreddit.submit_video(
+                            title=title,
+                            video_path=video_path,
+                            flair_id=flair_id
+                        )
+                        
+                        # Video açıklamasını yorum olarak ekle
+                        if tweet_text.strip():
+                            time.sleep(random.randint(5, 15))
+                            submission.reply(tweet_text)
+                        
+                        logger.info(f"Reddit'te video ile paylaşıldı: {submission.url}")
+                        return True
+                        
+                    except Exception as video_error:
+                        logger.error(f"Video yükleme hatası: {video_error}")
+                        # Video yüklenemezse metin olarak paylaş
+                        logger.info("Video yüklenemedi, metin olarak paylaşılıyor")
+                
+                # Sadece resim varsa gallery olarak yükle
+                elif image_paths:
+                    media_dict_list = [{'image_path': img_path} for img_path in image_paths]
+                    
+                    if len(image_paths) == 1:
+                        # Tek resim varsa submit_image kullan
+                        submission = subreddit.submit_image(
+                            title=title,
+                            image_path=image_paths[0],
+                            flair_id=flair_id
+                        )
+                    else:
+                        # Çoklu resim varsa gallery kullan
+                        submission = subreddit.submit_gallery(
+                            title=title,
+                            images=media_dict_list,
+                            flair_id=flair_id
+                        )
+                    
+                    # Resim açıklamasını yorum olarak ekle
                     if tweet_text.strip():
-                        # Yorum yaparken de anti-ban önlemi
-                        time.sleep(random.randint(5, 15))  # 5-15 saniye bekle
+                        time.sleep(random.randint(5, 15))
                         submission.reply(tweet_text)
                     
-                    logger.info(f"Reddit'te medya ile paylaşıldı: {submission.url}")
+                    logger.info(f"Reddit'te resim ile paylaşıldı: {submission.url}")
                     return True
+                
                 else:
-                    logger.warning("Medya dosyaları bulunamadı, sadece metin paylaşılıyor")
+                    logger.warning("Desteklenen medya dosyası bulunamadı, sadece metin paylaşılıyor")
             
             # Medya yoksa veya medya yüklenemezse sadece metin paylaş
             submission = subreddit.submit(
