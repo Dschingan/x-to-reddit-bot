@@ -15,6 +15,7 @@ oauthlib>=3.2.2
 requests-oauthlib>=1.3.1
 websocket-client>=1.6.1
 update-checker>=0.18.0
+aiofiles
 
 # Development and testing (optional)
 # pytest>=7.4.0
