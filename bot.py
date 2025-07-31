@@ -1,244 +1,330 @@
 import os
+import json
 import time
-import random
-import logging
-import requests
-import praw
-import tweepy
-from datetime import datetime
-from dotenv import load_dotenv
-import tempfile
+import base64
+import asyncio
+import aiofiles
+import aiohttp
 import shutil
-
-"""
-BF6 Twitter ➜ Reddit retweet bot
-
-Monitors the BF6_TR account *only for retweets*. When the user retweets a tweet that
-contains media (photo or video), the bot:
-1. Retrieves the original tweet and its media.
-2. Translates the tweet text to Turkish.
-3. Posts the media to the configured subreddit with:
-   - Title = translated text (truncated to 300 chars)
-   - Body = original text, translated text, tweet link, and credit to the original author.
-4. Ensures each retweet is processed only once (last_retweet_id_user2.txt).
-
-Anti-ban basics: 5-15 min random delay between Reddit posts.
-"""
+import subprocess
+from pathlib import Path
+from dotenv import load_dotenv
 
 load_dotenv()
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Logging
-# ────────────────────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("bf6_bot.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
+REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
+REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
+REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT")
+SUBREDDIT_NAME = os.getenv("SUBREDDIT_NAME")
+TWITTER_RAPIDAPI_KEY = os.getenv("TWITTER_RAPIDAPI_KEY")
+TWITTER_USERNAME = os.getenv("TWITTER_USERNAME")
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Helper functions
-# ────────────────────────────────────────────────────────────────────────────────
+POSTED_TWEETS_FILE = Path("./postedTweets.json")
+MAX_VIDEO_SIZE = 100 * 1024 * 1024  # 100 MB
 
-def translate_text(text: str, target_language: str = "tr") -> str:
-    """Translate text via RapidAPI (same creds as main bot)."""
+REDDIT_OAUTH_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
+REDDIT_API_BASE_URL = "https://oauth.reddit.com"
+
+
+async def sleep(ms):
+    await asyncio.sleep(ms / 1000)
+
+
+async def load_posted_tweets():
+    if not POSTED_TWEETS_FILE.exists():
+        return set()
     try:
-        api_key = os.getenv("TRANSLATION_API_KEY")
-        api_url = os.getenv("TRANSLATION_API_URL")
-        api_host = os.getenv("TRANSLATION_API_HOST")
-        if not all([api_key, api_url, api_host]):
-            logger.warning("Translation API credentials missing; returning original text")
-            return text
-
-        headers = {
-            "X-RapidAPI-Key": api_key,
-            "X-RapidAPI-Host": api_host,
-            "Content-Type": "application/json",
-        }
-        payload = {"input_text": text, "target": target_language, "source": "auto"}
-        resp = requests.post(api_url, json=payload, headers=headers, timeout=15)
-        if resp.status_code == 200:
-            translated = resp.json().get("translatedText", text)
-            logger.debug("Translated → %s", translated[:80])
-            return translated
-        logger.error("Translation failed %s: %s", resp.status_code, resp.text)
-    except Exception as exc:
-        logger.error("Translation error: %s", exc)
-    return text  # Fallback to original text
+        async with aiofiles.open(POSTED_TWEETS_FILE, "r", encoding="utf-8") as f:
+            data = await f.read()
+        return set(json.loads(data))
+    except Exception as e:
+        print(f"Gönderilen tweet dosyası okunamadı: {e}")
+        return set()
 
 
-def download_media(url: str) -> str | None:
-    """Download media to a temp file and return the local path."""
+async def save_posted_tweet(tweet_id, posted_set):
     try:
-        resp = requests.get(url, stream=True, timeout=30)
-        if resp.status_code == 200:
-            suffix = os.path.splitext(url)[1].split("?")[0] or ".jpg"
-            fd, path = tempfile.mkstemp(suffix=suffix)
-            with os.fdopen(fd, "wb") as f_out:
-                shutil.copyfileobj(resp.raw, f_out)
-            return path
-        logger.error("Failed to download media: %s", resp.status_code)
-    except Exception as exc:
-        logger.error("Download error: %s", exc)
-    return None
+        posted_set.add(tweet_id)
+        async with aiofiles.open(POSTED_TWEETS_FILE, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(list(posted_set), indent=2, ensure_ascii=False))
+    except Exception as e:
+        print(f"Gönderilen tweet dosyasına yazılamadı: {e}")
 
 
-def wait_human(min_s: int = 5 * 60, max_s: int = 15 * 60):
-    delay = random.randint(min_s, max_s)
-    logger.info("Sleeping %s seconds to mimic human behaviour", delay)
-    time.sleep(delay)
+async def get_reddit_access_token_password_grant(session):
+    basic_auth = base64.b64encode(f"{REDDIT_CLIENT_ID}:{REDDIT_CLIENT_SECRET}".encode()).decode()
+    data = {
+        "grant_type": "password",
+        "username": REDDIT_USERNAME,
+        "password": REDDIT_PASSWORD,
+    }
+    headers = {
+        "Authorization": f"Basic {basic_auth}",
+        "User-Agent": REDDIT_USER_AGENT,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    async with session.post(REDDIT_OAUTH_TOKEN_URL, data=data, headers=headers) as resp:
+        resp.raise_for_status()
+        json_resp = await resp.json()
+        print("Password grant token alındı:", "EVET" if json_resp.get("access_token") else "HAYIR")
+        return json_resp.get("access_token")
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Main Bot Class
-# ────────────────────────────────────────────────────────────────────────────────
 
-class Bf6RetweetBot:
-    """Dedicated bot for BF6_TR retweets."""
+async def get_reddit_access_token_installed_client(session):
+    basic_auth = base64.b64encode(f"{REDDIT_CLIENT_ID}:".encode()).decode()
+    data = {
+        "grant_type": "installed_client",
+        "device_id": "DO_NOT_TRACK_THIS_DEVICE",
+    }
+    headers = {
+        "Authorization": f"Basic {basic_auth}",
+        "User-Agent": REDDIT_USER_AGENT,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    async with session.post(REDDIT_OAUTH_TOKEN_URL, data=data, headers=headers) as resp:
+        resp.raise_for_status()
+        json_resp = await resp.json()
+        print("Installed client grant token alındı:", "EVET" if json_resp.get("access_token") else "HAYIR")
+        return json_resp.get("access_token")
 
-    def __init__(self):
-        # Twitter
-        self.twitter_client = tweepy.Client(
-            bearer_token=os.getenv("TWITTER_BEARER_TOKEN"), wait_on_rate_limit=True
-        )
-        self.user_id = os.getenv("TWITTER_USER_ID_2")  # BF6_TR id
-        if not self.user_id:
-            raise ValueError("TWITTER_USER_ID_2 missing in environment")
 
-        # Reddit
-        self.reddit = praw.Reddit(
-            client_id=os.getenv("REDDIT_CLIENT_ID"),
-            client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
-            username=os.getenv("REDDIT_USERNAME"),
-            password=os.getenv("REDDIT_PASSWORD"),
-            user_agent=os.getenv(
-                "USER_AGENT",
-                "BF6RetweetBot/1.0 (by /u/{})".format(os.getenv("REDDIT_USERNAME", "unknown")),
-            ),
-        )
-        self.subreddit_name = os.getenv("SUBREDDIT_NAME", "BF6_TR")
-        self.flair_id = os.getenv("FLAIR_ID")  # optional flair id required by subreddit
+async def get_latest_tweet_with_video(session, screen_name, posted_set):
+    url = "https://twitter-api45.p.rapidapi.com/timeline.php"
+    headers = {
+        "x-rapidapi-key": TWITTER_RAPIDAPI_KEY,
+        "x-rapidapi-host": "twitter-api45.p.rapidapi.com",
+    }
+    params = {"screenname": screen_name}
 
-        self.last_file = "last_retweet_id_user2.txt"
-        logger.info("Bot initialized for user2 (BF6_TR)")
+    async with session.get(url, headers=headers, params=params) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+        print("Twitter API response data:", json.dumps(data, indent=2, ensure_ascii=False))
 
-    # ────────────────────────────────────────────────────────────────────────
-    # Helpers to track already-processed tweets
-    # ────────────────────────────────────────────────────────────────────────
-
-    def _get_last_id(self) -> str | None:
-        if os.path.exists(self.last_file):
-            return open(self.last_file).read().strip() or None
+        timeline = data.get("timeline", [])
+        for tweet in timeline:
+            if tweet.get("retweeted_tweet") or tweet.get("quoted_tweet") or tweet.get("in_reply_to_status_id_str"):
+                continue
+            media = tweet.get("media", {})
+            if not media:
+                continue
+            tweet_id = tweet.get("tweet_id")
+            if tweet_id in posted_set:
+                continue
+            video_media = None
+            if "video" in media and len(media["video"]) > 0:
+                video_media = media["video"][0]
+            if not video_media:
+                continue
+            variants = video_media.get("variants", [])
+            if not variants:
+                continue
+            mp4s = [v for v in variants if v.get("content_type") == "video/mp4"]
+            if not mp4s:
+                continue
+            best_video = max(mp4s, key=lambda v: v.get("bitrate", 0))
+            return {"tweet": tweet, "videoUrl": best_video.get("url")}
         return None
 
-    def _save_last_id(self, tweet_id: str):
-        with open(self.last_file, "w", encoding="utf-8") as fp:
-            fp.write(tweet_id)
 
-    # ────────────────────────────────────────────────────────────────────────
-    # Core logic
-    # ────────────────────────────────────────────────────────────────────────
-
-    def fetch_and_post(self):
-        logger.info("Checking for new retweets …")
-        last_id = self._get_last_id()
-
-        tweets = self.twitter_client.get_users_tweets(
-            id=self.user_id,
-            max_results=10,
-            exclude=["replies"],
-            tweet_fields=["referenced_tweets", "attachments", "text"],
-            expansions=["attachments.media_keys", "referenced_tweets.id", "referenced_tweets.id.author_id"],
-            media_fields=["url", "preview_image_url", "type"],
-            user_fields=["username"],
-            since_id=last_id,
-        )
-        if not tweets.data:
-            logger.info("No new tweets")
-            return
-
-        includes = tweets.includes or {}
-        media_map = {m["media_key"]: m for m in includes.get("media", [])}
-        users_map = {u["id"]: u for u in includes.get("users", [])}
-        tweets_sorted = sorted(tweets.data, key=lambda t: t.id)
-
-        for retweet in tweets_sorted:
-            if not retweet.referenced_tweets:
-                continue  # not a retweet
-            if retweet.referenced_tweets[0].type != "retweeted":
-                continue
-
-            orig_id = retweet.referenced_tweets[0].id
-            # Retrieve original tweet full object (if not in includes)
-            orig_tweet_resp = self.twitter_client.get_tweet(
-                id=orig_id,
-                tweet_fields=["text", "attachments", "author_id"],
-                expansions=["attachments.media_keys", "author_id"],
-                media_fields=["url", "type", "preview_image_url"],
-                user_fields=["username"],
-            )
-            orig = orig_tweet_resp.data
-            orig_includes = orig_tweet_resp.includes or {}
-            if not orig:
-                logger.warning("Original tweet %s not found", orig_id)
-                continue
-
-            author = users_map.get(orig.author_id) or orig_includes.get("users", [{}])[0]
-            author_username = author.get("username", "unknown")
-
-            media_keys = (orig.attachments or {}).get("media_keys", [])
-            media_url = None
-            for key in media_keys:
-                m = media_map.get(key) or next(
-                    (i for i in orig_includes.get("media", []) if i["media_key"] == key),
-                    None,
-                )
-                if m and m["type"] in {"photo", "video"}:
-                    media_url = m.get("url") or m.get("preview_image_url")
+async def download_video(session, url, filepath):
+    async with session.get(url) as resp:
+        resp.raise_for_status()
+        with open(filepath, "wb") as f:
+            while True:
+                chunk = await resp.content.read(1024 * 1024)
+                if not chunk:
                     break
+                f.write(chunk)
 
-            translated = translate_text(orig.text)
-            title = (translated[:297] + "…") if len(translated) > 300 else translated
 
-            body_lines = [
-                f"Orijinal Tweet: https://twitter.com/{author_username}/status/{orig.id}",
-                f"\nKredi: @{author_username}",
-                "\n---\n",
-                "Orijinal: \n" + orig.text,
-                "\n---\n",
-                "Çeviri (TR): \n" + translated,
-            ]
-            body = "\n".join(body_lines)
+async def reencode_video(input_path, output_path):
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_path,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        "-vf",
+        "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease",
+        output_path,
+    ]
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"FFmpeg hatası: {stderr.decode()}")
+    print(f"Video yeniden kodlandı: {output_path}")
 
-            subreddit = self.reddit.subreddit(self.subreddit_name)
+
+async def check_file_size(filepath):
+    return os.path.getsize(filepath)
+
+
+async def get_upload_info(session, access_token, video_file_path, max_retries=3):
+    file_size = os.path.getsize(video_file_path)
+    file_name = os.path.basename(video_file_path)
+    url = f"{REDDIT_API_BASE_URL}/api/media/asset.json"
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": REDDIT_USER_AGENT,
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "filepath": file_name,
+        "mimetype": "video/mp4",
+        "fileSize": file_size,
+    }
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"Upload info denemesi {attempt}/{max_retries}...")
+            async with session.post(url, json=payload, headers=headers) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                print("Upload info alındı:", data)
+                return data
+        except aiohttp.ClientResponseError as e:
+            if e.status == 500 and attempt < max_retries:
+                print("500 hatası alındı, 3 saniye bekleyip tekrar deneniyor...")
+                await asyncio.sleep(3)
+                continue
+            else:
+                raise RuntimeError(f"Reddit upload info alma hatası: {e}")
+        except Exception as e:
+            raise RuntimeError(f"Reddit upload info alma hatası: {e}")
+
+
+async def upload_video_to_s3(session, upload_data, video_file_path):
+    action = upload_data["args"]["action"]
+    fields = upload_data["args"]["fields"]
+
+    form = aiohttp.FormData()
+    for k, v in fields.items():
+        form.add_field(k, v)
+    with open(video_file_path, "rb") as f:
+        form.add_field("file", f, filename=os.path.basename(video_file_path), content_type="video/mp4")
+
+        async with session.post(action, data=form) as resp:
+            if resp.status != 204:
+                text = await resp.text()
+                raise RuntimeError(f"Video upload başarısız, status: {resp.status}, response: {text}")
+
+
+async def submit_video_post(session, access_token, subreddit, title, asset_id):
+    url = f"{REDDIT_API_BASE_URL}/api/submit"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": REDDIT_USER_AGENT,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "sr": subreddit,
+        "kind": "video",
+        "title": title,
+        "resubmit": True,
+        "api_type": "json",
+        "media_asset_id": asset_id,
+    }
+    async with session.post(url, json=payload, headers=headers) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+        errors = data.get("json", {}).get("errors", [])
+        if errors:
+            raise RuntimeError(f"Reddit gönderme hatası: {errors}")
+        return data.get("json", {}).get("data", {})
+
+
+async def clean_up_file(filepath):
+    try:
+        os.remove(filepath)
+    except Exception as e:
+        print(f"Dosya silme hatası: {e}")
+
+
+async def run_cycle():
+    print("Başlıyor...")
+    posted_set = await load_posted_tweets()
+
+    async with aiohttp.ClientSession() as session:
+        try:
             try:
-                if media_url:
-                    path = download_media(media_url)
-                    if path:
-                        submission = subreddit.submit_image(title=title, image_path=path, flair_id=self.flair_id)
-                        os.unlink(path)
-                    else:
-                        submission = subreddit.submit(title=title, selftext=body, flair_id=self.flair_id)
-                else:
-                    submission = subreddit.submit(title=title, selftext=body, flair_id=self.flair_id)
-                logger.info("Posted to Reddit: %s", submission.url)
-                self._save_last_id(str(retweet.id))
-                wait_human()  # delay before next possible post
-            except praw.exceptions.APIException as api_exc:
-                logger.error("Reddit API error: %s", api_exc)
-            except Exception as exc:
-                logger.error("Unexpected error posting: %s", exc)
+                access_token = await get_reddit_access_token_password_grant(session)
+            except Exception:
+                print("Password grant ile token alınamadı, installed client denenecek...")
+                access_token = await get_reddit_access_token_installed_client(session)
 
-    # ────────────────────────────────────────────────────────────────────────
+            tweet_with_video = await get_latest_tweet_with_video(session, TWITTER_USERNAME, posted_set)
+
+            if not tweet_with_video:
+                print("Video içeren uygun yeni tweet bulunamadı.")
+                return
+
+            raw_video_path = "./temp_video_raw.mp4"
+            reencoded_video_path = "./temp_video.mp4"
+
+            print("Video indiriliyor...")
+            await download_video(session, tweet_with_video["videoUrl"], raw_video_path)
+
+            print("Video yeniden kodlanıyor...")
+            await reencode_video(raw_video_path, reencoded_video_path)
+
+            await clean_up_file(raw_video_path)  # Ham videoyu sil
+
+            size = await check_file_size(reencoded_video_path)
+            if size > MAX_VIDEO_SIZE:
+                print("Video dosyası çok büyük, atlanıyor.")
+                await clean_up_file(reencoded_video_path)
+                return
+
+            print("Reddit video upload bilgisi alınıyor...")
+            upload_info = await get_upload_info(session, access_token, reencoded_video_path)
+
+            print("Video S3'e yükleniyor...")
+            await upload_video_to_s3(session, upload_info, reencoded_video_path)
+
+            print("Reddit gönderisi oluşturuluyor...")
+            post_result = await submit_video_post(
+                session,
+                access_token,
+                SUBREDDIT_NAME,
+                tweet_with_video["tweet"]["text"],
+                upload_info["asset"]["asset_id"],
+            )
+
+            print("Reddit gönderisi başarılı:", post_result)
+
+            await save_posted_tweet(tweet_with_video["tweet"]["tweet_id"], posted_set)
+
+            await clean_up_file(reencoded_video_path)
+
+        except Exception as e:
+            print("Hata:", e)
 
 
-def main():
-    bot = Bf6RetweetBot()
-    bot.fetch_and_post()
+async def main_loop():
+    while True:
+        try:
+            await run_cycle()
+        except Exception as e:
+            print("Ana döngüde hata yakalandı, devam ediyor:", e)
+        print("2 saat bekleniyor...")
+        await asyncio.sleep(7200)  # 2 saat
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_loop())
