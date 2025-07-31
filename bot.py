@@ -3,6 +3,7 @@ import os
 import time
 import requests
 import praw
+import re
 
 load_dotenv()
 
@@ -30,6 +31,29 @@ reddit = praw.Reddit(
     user_agent=REDDIT_USER_AGENT,
     ratelimit_seconds=300  # 5 dakikaya kadar otomatik bekle
 )
+
+def clean_tweet_text(text):
+    """
+    Tweet metnini temizler: URL'leri, hashtagleri ve "|" sembolünü çıkarır
+    """
+    if not text:
+        return ""
+    
+    # URL'leri temizle (http://, https://, www. ile başlayanlar ve t.co linkler)
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r'www\.\S+', '', text)
+    text = re.sub(r't\.co/\S+', '', text)
+    
+    # Hashtagleri temizle (#kelime formatında)
+    text = re.sub(r'#\w+', '', text)
+    
+    # "|" sembolünü temizle
+    text = text.replace('|', '')
+    
+    # Fazla boşlukları temizle ve başındaki/sonundaki boşlukları kaldır
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
 
 def get_latest_tweet():
     url = "https://twitter-api45.p.rapidapi.com/timeline.php"
@@ -115,36 +139,6 @@ def get_media_urls_from_user_tweets(tweet_id):
     print(f"[+] Toplam {len(media_urls)} medya URL'si bulundu")
     return media_urls
 
-def clean_content(text):
-    """
-    Reddit'e göndermeden önce içeriği temizle:
-    - Hashtag'ları kaldır (#Battlefield6)
-    - Linkleri kaldır (https://t.co/...)
-    - Dik çizgileri kaldır (|)
-    - Fazla boşlukları temizle
-    """
-    import re
-    
-    # Hashtag'ları kaldır (#kelime)
-    text = re.sub(r'#\w+', '', text)
-    
-    # Twitter linklerini kaldır (https://t.co/...)
-    text = re.sub(r'https://t\.co/\w+', '', text)
-    
-    # Tüm HTTP/HTTPS linklerini kaldır
-    text = re.sub(r'https?://\S+', '', text)
-    
-    # Dik çizgileri kaldır
-    text = text.replace('|', '')
-    
-    # Fazla boşlukları temizle
-    text = re.sub(r'\s+', ' ', text)
-    
-    # Başta ve sonda boşlukları kaldır
-    text = text.strip()
-    
-    return text
-
 def translate_text(text):
     translate_url = "https://translateai.p.rapidapi.com/google/translate/json"
     payload = {
@@ -174,10 +168,6 @@ def translate_text(text):
         print("Çeviri alınamadı:", e)
         print("Raw response:", data)
         return text
-
-def clean_content_for_reddit(text):
-    # Implement your cleaning logic here
-    return text
 
 def download_media(media_url, filename):
     try:
@@ -230,13 +220,13 @@ def main_loop():
                 print("[!] Yeni tweet yok.")
             else:
                 text = tweet.get("text", "")
-                print(f"[+] Tweet bulundu: {text}")
+                print(f"[+] Orijinal Tweet: {text}")
                 
-                # İçeriği temizle (hashtag, link, dik çizgi kaldır)
-                cleaned_text = clean_content(text)
-                print(f"[+] Temizlenmiş içerik: {cleaned_text}")
+                # Tweet metnini temizle
+                cleaned_text = clean_tweet_text(text)
+                print(f"[+] Temizlenmiş Tweet: {cleaned_text}")
                 
-                # Temizlenmiş içeriği çevir
+                # Temizlenmiş metni çevir
                 translated = translate_text(cleaned_text)
                 print(f"[+] Çeviri: {translated}")
 
@@ -250,7 +240,7 @@ def main_loop():
                     if path:
                         media_files.append(path)
 
-                submit_post(cleaned_title, media_files)
+                submit_post(translated, media_files)
                 posted_tweet_ids.add(tweet_id)
 
                 # Medya dosyalarını temizle
