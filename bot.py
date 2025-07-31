@@ -126,6 +126,29 @@ def post_to_reddit(title, media_path=None):
             flair_id=FLAIR_ID
         )
 
+TRANSLATION_API_URL = os.getenv("TRANSLATION_API_URL")
+TRANSLATION_API_KEY = os.getenv("TRANSLATION_API_KEY")
+TRANSLATION_API_HOST = os.getenv("TRANSLATION_API_HOST")
+
+def translate_en_to_tr(text: str) -> str:
+    try:
+        headers = {
+            "content-type": "application/json",
+            "X-RapidAPI-Key": TRANSLATION_API_KEY,
+            "X-RapidAPI-Host": TRANSLATION_API_HOST,
+        }
+        data = {
+            "origin_language": "en",
+            "target_language": "tr",
+            "input_text": text,
+        }
+        response = requests.post(TRANSLATION_API_URL, json=data, headers=headers, timeout=10)
+        response.raise_for_status()
+        result = response.json()
+        return result.get("translation") or result.get("translatedText") or "[Çeviri yok]"
+    except Exception as e:
+        return f"[Çeviri Hatası: {e}]"
+
 def main():
     print("Program başladı.")
     last_id = get_last_tweet_id()
@@ -155,6 +178,7 @@ def main():
 
     raw_title = tweet["text"]
     title = clean_title(raw_title)
+    translated_title = translate_en_to_tr(title)
     media_file = None
 
     if tweet["video_url"]:
@@ -170,7 +194,7 @@ def main():
         media_file = download_file(tweet["media_urls"][0], "image.jpg")
 
     print("Reddit'e gönderiliyor...")
-    post_to_reddit(title=title, media_path=media_file)
+    post_to_reddit(title=translated_title, media_path=media_file)
 
     save_last_tweet_id(tweet["id"])
     print("İşlem tamamlandı.")
