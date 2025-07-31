@@ -21,13 +21,14 @@ RAPIDAPI_TRANSLATE_KEY = os.getenv("RAPIDAPI_KEY")  # Aynı key veya farklı ola
 TWITTER_SCREENNAME = "TheBFWire"
 TWITTER_REST_ID = "1939708158051500032"
 
-# Reddit bağlantısı
+# Reddit bağlantısı - API kurallarına uygun konfigürasyon
 reddit = praw.Reddit(
     client_id=REDDIT_CLIENT_ID,
     client_secret=REDDIT_CLIENT_SECRET,
     username=REDDIT_USERNAME,
     password=REDDIT_PASSWORD,
-    user_agent=REDDIT_USER_AGENT
+    user_agent=REDDIT_USER_AGENT,
+    ratelimit_seconds=300  # 5 dakikaya kadar otomatik bekle
 )
 
 def get_latest_tweet():
@@ -48,12 +49,78 @@ def get_latest_tweet():
         return None
     return timeline[0]
 
+def get_media_urls_from_user_tweets(tweet_id):
+    url = "https://twitter241.p.rapidapi.com/user-tweets"
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_TWITTER_KEY,
+        "x-rapidapi-host": "twitter241.p.rapidapi.com"
+    }
+    params = {
+        "user": TWITTER_REST_ID,
+        "count": "20"
+    }
+    r = requests.get(url, headers=headers, params=params)
+    r.raise_for_status()
+    data = r.json()
+
+    media_urls = []
+
+    try:
+        # Correct path: {},result,timeline,instructions,1:,entries:,0:,content:,itemContent:,tweet_results:,result:,legacy:,extended_entities:,media:,0:,media_url_https
+        result = data.get("result", {})
+        timeline = result.get("timeline", {})
+        instructions = timeline.get("instructions", [])
+        
+        if len(instructions) < 2:
+            print("[HATA] instructions listesi yetersiz (en az 2 eleman gerekli).")
+            return []
+
+        # instructions[1] kullan (index 1)
+        entries = instructions[1].get("entries", [])
+        if not entries:
+            print("[HATA] entries bulunamadı.")
+            return []
+
+        for entry in entries:
+            entry_id = entry.get("entryId", "")
+            # Tweet id ile eşleşme kontrolü: entryId "tweet-<tweet_id>" formatında
+            if not entry_id.endswith(tweet_id):
+                continue
+
+            print(f"[+] Tweet bulundu: {entry_id}")
+            
+            # Doğru path'i takip et
+            content = entry.get("content", {})
+            itemContent = content.get("itemContent", {})
+            tweet_results = itemContent.get("tweet_results", {})
+            result_tweet = tweet_results.get("result", {})
+            legacy = result_tweet.get("legacy", {})
+            extended_entities = legacy.get("extended_entities", {})
+            media_list = extended_entities.get("media", [])
+
+            print(f"[+] {len(media_list)} medya bulundu")
+            
+            for media in media_list:
+                media_url = media.get("media_url_https")
+                if media_url:
+                    print(f"[+] Medya URL'si: {media_url}")
+                    media_urls.append(media_url)
+
+    except Exception as e:
+        print(f"[HATA] Media parse edilirken hata: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+    print(f"[+] Toplam {len(media_urls)} medya URL'si bulundu")
+    return media_urls
+
 def translate_text(text):
     translate_url = "https://translateai.p.rapidapi.com/google/translate/json"
     payload = {
         "origin_language": "en",
         "target_language": "tr",
-        "words_not_to_translate": "Battlefield",  # Kelimeleri koru
+        "words_not_to_translate": "Battlefield",
         "paths_to_exclude": "product.media.img_desc",
         "common_keys_to_exclude": "name; price",
         "json_content": {
@@ -76,7 +143,7 @@ def translate_text(text):
     except Exception as e:
         print("Çeviri alınamadı:", e)
         print("Raw response:", data)
-        return text  # Çeviri olmazsa orijinal metni döndür
+        return text
 
 def download_media(media_url, filename):
     try:
@@ -133,26 +200,15 @@ def main_loop():
                 translated = translate_text(text)
                 print(f"[+] Çeviri: {translated}")
 
+                # Medyayı user-tweets API ile çek
+                media_urls = get_media_urls_from_user_tweets(tweet_id)
                 media_files = []
-                media = tweet.get("media")
-                if media:
-                    if isinstance(media, list):
-                        for m in media:
-                            media_url = m.get("media_url_https") or m.get("media_url")
-                            if media_url:
-                                ext = os.path.splitext(media_url)[1].split("?")[0]
-                                filename = f"temp_media{ext}"
-                                path = download_media(media_url, filename)
-                                if path:
-                                    media_files.append(path)
-                    elif isinstance(media, dict):
-                        media_url = media.get("media_url_https") or media.get("media_url")
-                        if media_url:
-                            ext = os.path.splitext(media_url)[1].split("?")[0]
-                            filename = f"temp_media{ext}"
-                            path = download_media(media_url, filename)
-                            if path:
-                                media_files.append(path)
+                for i, media_url in enumerate(media_urls):
+                    ext = os.path.splitext(media_url)[1].split("?")[0]
+                    filename = f"temp_media_{i}{ext}"
+                    path = download_media(media_url, filename)
+                    if path:
+                        media_files.append(path)
 
                 submit_post(translated, media_files)
                 posted_tweet_ids.add(tweet_id)
@@ -162,8 +218,8 @@ def main_loop():
                     if os.path.exists(fpath):
                         os.remove(fpath)
 
-        print("⏳ 15 dakika bekleniyor..")
-        time.sleep(900)  # 900 saniye = 15 dakika
+        print("⏳ 2 saat bekleniyor..")
+        time.sleep(7200)  # 2 saat = 7200 saniye
 
 if __name__ == "__main__":
     main_loop()
