@@ -135,6 +135,18 @@ def main():
         print("Tweet bulunamadı.")
         return
 
+    # RT (retweet) kontrolü
+    if tweet["text"].strip().startswith("RT @"):
+        print("Bu tweet bir retweet, atlanıyor.")
+        return
+
+    # Eğer tweet objesinde retweet'i belirten başka bir alan varsa (ör. referenced_tweets)
+    if "referenced_tweets" in tweet and tweet["referenced_tweets"]:
+        for ref in tweet["referenced_tweets"]:
+            if ref.get("type") == "retweeted":
+                print("Bu tweet bir retweet (referenced_tweets), atlanıyor.")
+                return
+
     if tweet["id"] == last_id:
         print("Yeni tweet yok.")
         return
