@@ -109,10 +109,15 @@ class TwitterRedditBot:
             }
             
             # Use RapidAPI Twitter service to get user timeline
+            # Try different parameter formats based on the API
             params = {
                 'screenname': self.target_user_id,
-                'count': '1'  # Get only the latest tweet
+                'count': 1
             }
+            
+            logger.info(f"Making request to: {self.twitter_rapidapi_url}")
+            logger.info(f"Headers: {headers}")
+            logger.info(f"Params: {params}")
             
             response = requests.get(
                 self.twitter_rapidapi_url,
@@ -121,20 +126,64 @@ class TwitterRedditBot:
                 timeout=30
             )
             
+            logger.info(f"Response status: {response.status_code}")
+            logger.info(f"Response headers: {dict(response.headers)}")
+            logger.info(f"Response text (first 500 chars): {response.text[:500]}")
+            
             if response.status_code != 200:
                 logger.error(f"RapidAPI Twitter error: {response.status_code} - {response.text}")
                 return None
             
-            data = response.json()
+            # Check if response is empty
+            if not response.text.strip():
+                logger.error("Empty response from RapidAPI")
+                return None
             
-            # Check if we got tweets
-            if not data or 'timeline' not in data or not data['timeline']:
-                logger.warning("No tweets found for user")
+            try:
+                data = response.json()
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON response: {e}")
+                logger.error(f"Response content: {response.text}")
+                return None
+            
+            logger.info(f"Parsed data structure: {type(data)}")
+            if isinstance(data, dict):
+                logger.info(f"Data keys: {list(data.keys())}")
+            
+            # Handle different response formats from RapidAPI
+            tweets_data = None
+            if isinstance(data, list) and data:
+                tweets_data = data
+            elif isinstance(data, dict):
+                # Try different possible keys
+                for key in ['timeline', 'tweets', 'data', 'results']:
+                    if key in data and data[key]:
+                        tweets_data = data[key]
+                        break
+                
+                # If no tweets found in expected keys, check if data itself is the tweet
+                if not tweets_data and 'text' in data:
+                    tweets_data = [data]
+            
+            if not tweets_data:
+                logger.warning("No tweets found in response")
+                logger.info(f"Full response: {data}")
                 return None
             
             # Get the latest tweet
-            latest_tweet = data['timeline'][0]
-            tweet_id = str(latest_tweet.get('tweet_id', ''))
+            latest_tweet = tweets_data[0] if isinstance(tweets_data, list) else tweets_data
+            
+            # Extract tweet ID - try different possible field names
+            tweet_id = None
+            for id_field in ['tweet_id', 'id', 'id_str', 'tweetId']:
+                if id_field in latest_tweet:
+                    tweet_id = str(latest_tweet[id_field])
+                    break
+            
+            if not tweet_id:
+                logger.error("Could not find tweet ID in response")
+                logger.info(f"Tweet data: {latest_tweet}")
+                return None
             
             # Check if we've already processed this tweet
             last_processed_id = self.get_last_processed_tweet_id()
@@ -142,30 +191,54 @@ class TwitterRedditBot:
                 logger.info("Latest tweet already processed")
                 return None
             
+            # Extract tweet text - try different possible field names
+            tweet_text = ''
+            for text_field in ['text', 'full_text', 'tweet_text', 'content']:
+                if text_field in latest_tweet:
+                    tweet_text = latest_tweet[text_field]
+                    break
+            
             # Prepare tweet data
             tweet_data = {
                 'id': tweet_id,
-                'text': latest_tweet.get('text', ''),
+                'text': tweet_text,
                 'created_at': latest_tweet.get('created_at', ''),
                 'author_id': self.target_user_id,
                 'media': []
             }
             
-            # Extract media if available
-            if 'media' in latest_tweet and latest_tweet['media']:
-                for media in latest_tweet['media']:
-                    if media.get('type') in ['photo', 'video']:
-                        tweet_data['media'].append({
-                            'type': media.get('type'),
-                            'url': media.get('media_url_https') or media.get('url'),
-                            'preview_url': media.get('media_url_https') or media.get('url')
-                        })
+            # Extract media if available - try different possible field names
+            media_sources = []
+            for media_field in ['media', 'entities', 'extended_entities']:
+                if media_field in latest_tweet:
+                    if media_field == 'entities' and 'media' in latest_tweet[media_field]:
+                        media_sources = latest_tweet[media_field]['media']
+                    elif media_field == 'extended_entities' and 'media' in latest_tweet[media_field]:
+                        media_sources = latest_tweet[media_field]['media']
+                    elif media_field == 'media':
+                        media_sources = latest_tweet[media_field]
+                    break
             
-            logger.info(f"Retrieved tweet: {tweet_data['id']}")
+            if media_sources:
+                for media in media_sources:
+                    if media.get('type') in ['photo', 'video']:
+                        media_url = media.get('media_url_https') or media.get('media_url') or media.get('url')
+                        if media_url:
+                            tweet_data['media'].append({
+                                'type': media.get('type'),
+                                'url': media_url,
+                                'preview_url': media_url
+                            })
+            
+            logger.info(f"Successfully retrieved tweet: {tweet_data['id']}")
+            logger.info(f"Tweet text: {tweet_data['text'][:100]}...")
+            logger.info(f"Media count: {len(tweet_data['media'])}")
+            
             return tweet_data
             
         except Exception as e:
             logger.error(f"Error fetching latest tweet: {e}")
+            logger.exception("Full exception details:")
             return None
     
     def clean_text_for_translation(self, text: str) -> str:
