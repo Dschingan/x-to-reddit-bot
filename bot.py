@@ -1,330 +1,358 @@
 import os
-import json
 import time
-import base64
-import asyncio
-import aiofiles
-import aiohttp
-import shutil
-import subprocess
-from pathlib import Path
+import logging
+import requests
+import praw
+import re
+import json
+from datetime import datetime
 from dotenv import load_dotenv
+from typing import Optional, Dict, Any
 
+# Load environment variables
 load_dotenv()
 
-REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
-REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
-REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
-REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
-REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT")
-SUBREDDIT_NAME = os.getenv("SUBREDDIT_NAME")
-TWITTER_RAPIDAPI_KEY = os.getenv("TWITTER_RAPIDAPI_KEY")
-TWITTER_USERNAME = os.getenv("TWITTER_USERNAME")
-
-POSTED_TWEETS_FILE = Path("./postedTweets.json")
-MAX_VIDEO_SIZE = 100 * 1024 * 1024  # 100 MB
-
-REDDIT_OAUTH_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
-REDDIT_API_BASE_URL = "https://oauth.reddit.com"
-
-
-async def sleep(ms):
-    await asyncio.sleep(ms / 1000)
-
-
-async def load_posted_tweets():
-    if not POSTED_TWEETS_FILE.exists():
-        return set()
-    try:
-        async with aiofiles.open(POSTED_TWEETS_FILE, "r", encoding="utf-8") as f:
-            data = await f.read()
-        return set(json.loads(data))
-    except Exception as e:
-        print(f"Gönderilen tweet dosyası okunamadı: {e}")
-        return set()
-
-
-async def save_posted_tweet(tweet_id, posted_set):
-    try:
-        posted_set.add(tweet_id)
-        async with aiofiles.open(POSTED_TWEETS_FILE, "w", encoding="utf-8") as f:
-            await f.write(json.dumps(list(posted_set), indent=2, ensure_ascii=False))
-    except Exception as e:
-        print(f"Gönderilen tweet dosyasına yazılamadı: {e}")
-
-
-async def get_reddit_access_token_password_grant(session):
-    basic_auth = base64.b64encode(f"{REDDIT_CLIENT_ID}:{REDDIT_CLIENT_SECRET}".encode()).decode()
-    data = {
-        "grant_type": "password",
-        "username": REDDIT_USERNAME,
-        "password": REDDIT_PASSWORD,
-    }
-    headers = {
-        "Authorization": f"Basic {basic_auth}",
-        "User-Agent": REDDIT_USER_AGENT,
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    async with session.post(REDDIT_OAUTH_TOKEN_URL, data=data, headers=headers) as resp:
-        resp.raise_for_status()
-        json_resp = await resp.json()
-        print("Password grant token alındı:", "EVET" if json_resp.get("access_token") else "HAYIR")
-        return json_resp.get("access_token")
-
-
-async def get_reddit_access_token_installed_client(session):
-    basic_auth = base64.b64encode(f"{REDDIT_CLIENT_ID}:".encode()).decode()
-    data = {
-        "grant_type": "installed_client",
-        "device_id": "DO_NOT_TRACK_THIS_DEVICE",
-    }
-    headers = {
-        "Authorization": f"Basic {basic_auth}",
-        "User-Agent": REDDIT_USER_AGENT,
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    async with session.post(REDDIT_OAUTH_TOKEN_URL, data=data, headers=headers) as resp:
-        resp.raise_for_status()
-        json_resp = await resp.json()
-        print("Installed client grant token alındı:", "EVET" if json_resp.get("access_token") else "HAYIR")
-        return json_resp.get("access_token")
-
-
-async def get_latest_tweet_with_video(session, screen_name, posted_set):
-    url = "https://twitter-api45.p.rapidapi.com/timeline.php"
-    headers = {
-        "x-rapidapi-key": TWITTER_RAPIDAPI_KEY,
-        "x-rapidapi-host": "twitter-api45.p.rapidapi.com",
-    }
-    params = {"screenname": screen_name}
-
-    async with session.get(url, headers=headers, params=params) as resp:
-        resp.raise_for_status()
-        data = await resp.json()
-        print("Twitter API response data:", json.dumps(data, indent=2, ensure_ascii=False))
-
-        timeline = data.get("timeline", [])
-        for tweet in timeline:
-            if tweet.get("retweeted_tweet") or tweet.get("quoted_tweet") or tweet.get("in_reply_to_status_id_str"):
-                continue
-            media = tweet.get("media", {})
-            if not media:
-                continue
-            tweet_id = tweet.get("tweet_id")
-            if tweet_id in posted_set:
-                continue
-            video_media = None
-            if "video" in media and len(media["video"]) > 0:
-                video_media = media["video"][0]
-            if not video_media:
-                continue
-            variants = video_media.get("variants", [])
-            if not variants:
-                continue
-            mp4s = [v for v in variants if v.get("content_type") == "video/mp4"]
-            if not mp4s:
-                continue
-            best_video = max(mp4s, key=lambda v: v.get("bitrate", 0))
-            return {"tweet": tweet, "videoUrl": best_video.get("url")}
-        return None
-
-
-async def download_video(session, url, filepath):
-    async with session.get(url) as resp:
-        resp.raise_for_status()
-        with open(filepath, "wb") as f:
-            while True:
-                chunk = await resp.content.read(1024 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-
-
-async def reencode_video(input_path, output_path):
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        input_path,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "23",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        "-vf",
-        "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease",
-        output_path,
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
     ]
-    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg hatası: {stderr.decode()}")
-    print(f"Video yeniden kodlandı: {output_path}")
+)
+logger = logging.getLogger(__name__)
 
-
-async def check_file_size(filepath):
-    return os.path.getsize(filepath)
-
-
-async def get_upload_info(session, access_token, video_file_path, max_retries=3):
-    file_size = os.path.getsize(video_file_path)
-    file_name = os.path.basename(video_file_path)
-    url = f"{REDDIT_API_BASE_URL}/api/media/asset.json"
-
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "User-Agent": REDDIT_USER_AGENT,
-        "Content-Type": "application/json",
-    }
-
-    payload = {
-        "filepath": file_name,
-        "mimetype": "video/mp4",
-        "fileSize": file_size,
-    }
-
-    for attempt in range(1, max_retries + 1):
+class TwitterRedditBot:
+    def __init__(self):
+        """Initialize the Twitter to Reddit bot with API credentials."""
+        self.setup_twitter_rapidapi()
+        self.setup_reddit_api()
+        self.setup_translation_api()
+        self.target_user_id = "1"  # Twitter user ID 1
+        self.subreddit_name = "bf6_tr"
+        self.last_tweet_file = "last_tweet_id_user1.json"
+        
+    def setup_twitter_rapidapi(self):
+        """Setup Twitter RapidAPI client."""
         try:
-            print(f"Upload info denemesi {attempt}/{max_retries}...")
-            async with session.post(url, json=payload, headers=headers) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                print("Upload info alındı:", data)
-                return data
-        except aiohttp.ClientResponseError as e:
-            if e.status == 500 and attempt < max_retries:
-                print("500 hatası alındı, 3 saniye bekleyip tekrar deneniyor...")
-                await asyncio.sleep(3)
-                continue
-            else:
-                raise RuntimeError(f"Reddit upload info alma hatası: {e}")
+            self.twitter_rapidapi_key = os.getenv('TWITTER_RAPIDAPI_KEY')
+            self.twitter_rapidapi_url = os.getenv('RAPIDAPI_TWITTER_API_URL')
+            self.twitter_rapidapi_host = os.getenv('RAPIDAPI_TWITTER_API_HOST')
+            
+            if not all([self.twitter_rapidapi_key, self.twitter_rapidapi_url, self.twitter_rapidapi_host]):
+                raise ValueError("Twitter RapidAPI credentials not found")
+            
+            logger.info("Twitter RapidAPI client configured successfully")
         except Exception as e:
-            raise RuntimeError(f"Reddit upload info alma hatası: {e}")
-
-
-async def upload_video_to_s3(session, upload_data, video_file_path):
-    action = upload_data["args"]["action"]
-    fields = upload_data["args"]["fields"]
-
-    form = aiohttp.FormData()
-    for k, v in fields.items():
-        form.add_field(k, v)
-    with open(video_file_path, "rb") as f:
-        form.add_field("file", f, filename=os.path.basename(video_file_path), content_type="video/mp4")
-
-        async with session.post(action, data=form) as resp:
-            if resp.status != 204:
-                text = await resp.text()
-                raise RuntimeError(f"Video upload başarısız, status: {resp.status}, response: {text}")
-
-
-async def submit_video_post(session, access_token, subreddit, title, asset_id):
-    url = f"{REDDIT_API_BASE_URL}/api/submit"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "User-Agent": REDDIT_USER_AGENT,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "sr": subreddit,
-        "kind": "video",
-        "title": title,
-        "resubmit": True,
-        "api_type": "json",
-        "media_asset_id": asset_id,
-    }
-    async with session.post(url, json=payload, headers=headers) as resp:
-        resp.raise_for_status()
-        data = await resp.json()
-        errors = data.get("json", {}).get("errors", [])
-        if errors:
-            raise RuntimeError(f"Reddit gönderme hatası: {errors}")
-        return data.get("json", {}).get("data", {})
-
-
-async def clean_up_file(filepath):
-    try:
-        os.remove(filepath)
-    except Exception as e:
-        print(f"Dosya silme hatası: {e}")
-
-
-async def run_cycle():
-    print("Başlıyor...")
-    posted_set = await load_posted_tweets()
-
-    async with aiohttp.ClientSession() as session:
+            logger.error(f"Failed to configure Twitter RapidAPI: {e}")
+            raise
+    
+    def setup_reddit_api(self):
+        """Setup Reddit API client."""
         try:
-            try:
-                access_token = await get_reddit_access_token_password_grant(session)
-            except Exception:
-                print("Password grant ile token alınamadı, installed client denenecek...")
-                access_token = await get_reddit_access_token_installed_client(session)
-
-            tweet_with_video = await get_latest_tweet_with_video(session, TWITTER_USERNAME, posted_set)
-
-            if not tweet_with_video:
-                print("Video içeren uygun yeni tweet bulunamadı.")
-                return
-
-            raw_video_path = "./temp_video_raw.mp4"
-            reencoded_video_path = "./temp_video.mp4"
-
-            print("Video indiriliyor...")
-            await download_video(session, tweet_with_video["videoUrl"], raw_video_path)
-
-            print("Video yeniden kodlanıyor...")
-            await reencode_video(raw_video_path, reencoded_video_path)
-
-            await clean_up_file(raw_video_path)  # Ham videoyu sil
-
-            size = await check_file_size(reencoded_video_path)
-            if size > MAX_VIDEO_SIZE:
-                print("Video dosyası çok büyük, atlanıyor.")
-                await clean_up_file(reencoded_video_path)
-                return
-
-            print("Reddit video upload bilgisi alınıyor...")
-            upload_info = await get_upload_info(session, access_token, reencoded_video_path)
-
-            print("Video S3'e yükleniyor...")
-            await upload_video_to_s3(session, upload_info, reencoded_video_path)
-
-            print("Reddit gönderisi oluşturuluyor...")
-            post_result = await submit_video_post(
-                session,
-                access_token,
-                SUBREDDIT_NAME,
-                tweet_with_video["tweet"]["text"],
-                upload_info["asset"]["asset_id"],
+            self.reddit = praw.Reddit(
+                client_id=os.getenv('REDDIT_CLIENT_ID'),
+                client_secret=os.getenv('REDDIT_CLIENT_SECRET'),
+                username=os.getenv('REDDIT_USERNAME'),
+                password=os.getenv('REDDIT_PASSWORD'),
+                user_agent=os.getenv('REDDIT_USER_AGENT', 'TwitterRedditBot/1.0')
             )
-
-            print("Reddit gönderisi başarılı:", post_result)
-
-            await save_posted_tweet(tweet_with_video["tweet"]["tweet_id"], posted_set)
-
-            await clean_up_file(reencoded_video_path)
-
+            logger.info("Reddit API client initialized successfully")
         except Exception as e:
-            print("Hata:", e)
-
-
-async def main_loop():
-    while True:
+            logger.error(f"Failed to initialize Reddit API: {e}")
+            raise
+    
+    def setup_translation_api(self):
+        """Setup translation API configuration."""
+        self.translation_api_url = os.getenv('TRANSLATION_API_URL')
+        self.translation_api_key = os.getenv('TRANSLATION_API_KEY')
+        self.translation_api_host = os.getenv('TRANSLATION_API_HOST')
+        
+        if not all([self.translation_api_url, self.translation_api_key, self.translation_api_host]):
+            raise ValueError("Translation API credentials not found")
+        
+        logger.info("Translation API configured successfully")
+    
+    def get_last_processed_tweet_id(self) -> Optional[str]:
+        """Get the last processed tweet ID from file."""
         try:
-            await run_cycle()
+            if os.path.exists(self.last_tweet_file):
+                with open(self.last_tweet_file, 'r') as f:
+                    data = json.load(f)
+                    return data.get('last_tweet_id')
         except Exception as e:
-            print("Ana döngüde hata yakalandı, devam ediyor:", e)
-        print("2 saat bekleniyor...")
-        await asyncio.sleep(7200)  # 2 saat
+            logger.warning(f"Could not read last tweet ID: {e}")
+        return None
+    
+    def save_last_processed_tweet_id(self, tweet_id: str):
+        """Save the last processed tweet ID to file."""
+        try:
+            data = {
+                'last_tweet_id': tweet_id,
+                'timestamp': datetime.now().isoformat()
+            }
+            with open(self.last_tweet_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.info(f"Saved last processed tweet ID: {tweet_id}")
+        except Exception as e:
+            logger.error(f"Could not save last tweet ID: {e}")
+    
+    def get_latest_tweet(self) -> Optional[Dict[str, Any]]:
+        """Fetch the latest tweet from user ID 1 using RapidAPI."""
+        try:
+            logger.info(f"Fetching latest tweet from user ID: {self.target_user_id}")
+            
+            headers = {
+                'X-RapidAPI-Key': self.twitter_rapidapi_key,
+                'X-RapidAPI-Host': self.twitter_rapidapi_host
+            }
+            
+            # Use RapidAPI Twitter service to get user timeline
+            params = {
+                'screenname': self.target_user_id,
+                'count': '1'  # Get only the latest tweet
+            }
+            
+            response = requests.get(
+                self.twitter_rapidapi_url,
+                headers=headers,
+                params=params,
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"RapidAPI Twitter error: {response.status_code} - {response.text}")
+                return None
+            
+            data = response.json()
+            
+            # Check if we got tweets
+            if not data or 'timeline' not in data or not data['timeline']:
+                logger.warning("No tweets found for user")
+                return None
+            
+            # Get the latest tweet
+            latest_tweet = data['timeline'][0]
+            tweet_id = str(latest_tweet.get('tweet_id', ''))
+            
+            # Check if we've already processed this tweet
+            last_processed_id = self.get_last_processed_tweet_id()
+            if last_processed_id == tweet_id:
+                logger.info("Latest tweet already processed")
+                return None
+            
+            # Prepare tweet data
+            tweet_data = {
+                'id': tweet_id,
+                'text': latest_tweet.get('text', ''),
+                'created_at': latest_tweet.get('created_at', ''),
+                'author_id': self.target_user_id,
+                'media': []
+            }
+            
+            # Extract media if available
+            if 'media' in latest_tweet and latest_tweet['media']:
+                for media in latest_tweet['media']:
+                    if media.get('type') in ['photo', 'video']:
+                        tweet_data['media'].append({
+                            'type': media.get('type'),
+                            'url': media.get('media_url_https') or media.get('url'),
+                            'preview_url': media.get('media_url_https') or media.get('url')
+                        })
+            
+            logger.info(f"Retrieved tweet: {tweet_data['id']}")
+            return tweet_data
+            
+        except Exception as e:
+            logger.error(f"Error fetching latest tweet: {e}")
+            return None
+    
+    def clean_text_for_translation(self, text: str) -> str:
+        """Clean tweet text by removing descriptions, symbols, and hashtags."""
+        # Remove hashtags
+        text = re.sub(r'#\w+', '', text)
+        
+        # Remove mentions
+        text = re.sub(r'@\w+', '', text)
+        
+        # Remove URLs
+        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+        
+        # Remove extra symbols and emojis (keep basic punctuation)
+        text = re.sub(r'[^\w\s.,!?;:()\-"\']', '', text)
+        
+        # Clean up extra whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        return text
+    
+    def translate_text(self, text: str) -> str:
+        """Translate text using RapidAPI translation service."""
+        try:
+            # Clean text before translation
+            cleaned_text = self.clean_text_for_translation(text)
+            
+            if not cleaned_text.strip():
+                logger.warning("No text to translate after cleaning")
+                return text  # Return original if nothing left after cleaning
+            
+            headers = {
+                'X-RapidAPI-Key': self.translation_api_key,
+                'X-RapidAPI-Host': self.translation_api_host,
+                'Content-Type': 'application/json'
+            }
+            
+            payload = {
+                'text': cleaned_text,
+                'source': 'en',
+                'target': 'tr'
+            }
+            
+            response = requests.post(
+                self.translation_api_url,
+                json=payload,
+                headers=headers,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                translated_text = result.get('translatedText', cleaned_text)
+                logger.info(f"Translation successful: {len(translated_text)} characters")
+                return translated_text
+            else:
+                logger.error(f"Translation API error: {response.status_code} - {response.text}")
+                return cleaned_text
+                
+        except Exception as e:
+            logger.error(f"Translation failed: {e}")
+            return self.clean_text_for_translation(text)  # Return cleaned original text
+    
+    def post_to_reddit(self, tweet_data: Dict[str, Any], translated_text: str) -> bool:
+        """Post tweet content to Reddit."""
+        try:
+            subreddit = self.reddit.subreddit(self.subreddit_name)
+            
+            # Create post title
+            title = translated_text[:250] + "..." if len(translated_text) > 250 else translated_text
+            if not title.strip():
+                title = "Twitter Paylaşımı"
+            
+            # Create post content
+            tweet_url = f"https://twitter.com/i/status/{tweet_data['id']}"
+            content = f"**Çeviri:** {translated_text}\n\n**Orijinal Tweet:** {tweet_url}"
+            
+            # Post to Reddit
+            if tweet_data['media']:
+                # If there's media, try to post as link (first media item)
+                media_url = None
+                for media in tweet_data['media']:
+                    if media.get('url'):
+                        media_url = media['url']
+                        break
+                    elif media.get('preview_url'):
+                        media_url = media['preview_url']
+                        break
+                
+                if media_url:
+                    # Post as link with media
+                    submission = subreddit.submit(
+                        title=title,
+                        url=media_url,
+                        flair_id=os.getenv('REDDIT_FLAIR_ID')
+                    )
+                    # Add comment with translation and original link
+                    submission.reply(content)
+                else:
+                    # Post as text if media URL not available
+                    submission = subreddit.submit(
+                        title=title,
+                        selftext=content,
+                        flair_id=os.getenv('REDDIT_FLAIR_ID')
+                    )
+            else:
+                # Post as text
+                submission = subreddit.submit(
+                    title=title,
+                    selftext=content,
+                    flair_id=os.getenv('REDDIT_FLAIR_ID')
+                )
+            
+            logger.info(f"Successfully posted to Reddit: {submission.url}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to post to Reddit: {e}")
+            return False
+    
+    def process_latest_tweet(self) -> bool:
+        """Process the latest tweet from user ID 1."""
+        try:
+            # Get latest tweet
+            tweet_data = self.get_latest_tweet()
+            if not tweet_data:
+                logger.info("No new tweet to process")
+                return False
+            
+            logger.info(f"Processing tweet: {tweet_data['id']}")
+            
+            # Translate tweet text
+            translated_text = self.translate_text(tweet_data['text'])
+            
+            # Post to Reddit
+            success = self.post_to_reddit(tweet_data, translated_text)
+            
+            if success:
+                # Save processed tweet ID
+                self.save_last_processed_tweet_id(tweet_data['id'])
+                logger.info(f"Successfully processed tweet: {tweet_data['id']}")
+                return True
+            else:
+                logger.error(f"Failed to process tweet: {tweet_data['id']}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error processing tweet: {e}")
+            return False
+    
+    def run_infinite_loop(self):
+        """Run the bot in an infinite loop, checking every 4 hours."""
+        logger.info("Starting Twitter to Reddit bot - infinite loop mode")
+        logger.info(f"Target user ID: {self.target_user_id}")
+        logger.info(f"Target subreddit: {self.subreddit_name}")
+        logger.info("Checking every 4 hours (14400 seconds)")
+        
+        # Process immediately on startup
+        logger.info("Processing initial tweet...")
+        self.process_latest_tweet()
+        
+        # Main loop
+        while True:
+            try:
+                logger.info("Waiting 4 hours until next check...")
+                time.sleep(14400)  # 4 hours = 14400 seconds
+                
+                logger.info("Starting tweet check cycle")
+                self.process_latest_tweet()
+                
+            except KeyboardInterrupt:
+                logger.info("Bot stopped by user")
+                break
+            except Exception as e:
+                logger.error(f"Unexpected error in main loop: {e}")
+                logger.info("Continuing after error...")
+                time.sleep(300)  # Wait 5 minutes before retrying
 
+def main():
+    """Main function to run the bot."""
+    try:
+        bot = TwitterRedditBot()
+        bot.run_infinite_loop()
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+        return 1
+    return 0
 
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    exit(main())
