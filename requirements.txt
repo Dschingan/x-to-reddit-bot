@@ -1,23 +1,24 @@
-# Core dependencies for Twitter to Reddit Bot
+# Twitter to Reddit Bot - Python Dependencies
+# Updated for media download and upload functionality
+
+# Core dependencies
 requests>=2.31.0
-tweepy>=4.14.0
 praw>=7.7.1
 python-dotenv>=1.0.0
 
-# Additional dependencies
+# Media handling (for downloading and processing)
 urllib3>=2.0.4
 
-# Optional but recommended
+# HTTP and authentication
 certifi>=2023.7.22
 charset-normalizer>=3.2.0
 idna>=3.4
 oauthlib>=3.2.2
 requests-oauthlib>=1.3.1
+
+# PRAW dependencies
 websocket-client>=1.6.1
 update-checker>=0.18.0
-aiohttp
-aiofiles
-python-dotenv
 
 # Development and testing (optional)
 # pytest>=7.4.0
