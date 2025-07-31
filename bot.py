@@ -151,24 +151,31 @@ def translate_en_to_tr(text: str) -> str:
 
 def main():
     print("Program başladı.")
-    last_id = get_last_tweet_id()
-    tweet = get_latest_tweet_with_retry()
+    while True:
+        last_id = get_last_tweet_id()
+        tweet = get_latest_tweet_with_retry()
 
-    if not tweet:
-        print("Tweet bulunamadı.")
-        return
+        if not tweet:
+            print("Tweet bulunamadı. 60 sn sonra tekrar denenecek.")
+            time.sleep(60)
+            continue
 
-    # RT (retweet) kontrolü
-    if tweet["text"].strip().startswith("RT @"):
-        print("Bu tweet bir retweet, atlanıyor.")
-        return
+        # RT (retweet) kontrolü
+        if tweet["text"].strip().startswith("RT @"):
+            print("Bu tweet bir retweet, atlanıyor.")
+            time.sleep(10)
+            continue
 
-    # Eğer tweet objesinde retweet'i belirten başka bir alan varsa (ör. referenced_tweets)
-    if "referenced_tweets" in tweet and tweet["referenced_tweets"]:
-        for ref in tweet["referenced_tweets"]:
-            if ref.get("type") == "retweeted":
-                print("Bu tweet bir retweet (referenced_tweets), atlanıyor.")
-                return
+        # Eğer tweet objesinde retweet'i belirten başka bir alan varsa (ör. referenced_tweets)
+        if "referenced_tweets" in tweet and tweet["referenced_tweets"]:
+            for ref in tweet["referenced_tweets"]:
+                if ref.get("type") == "retweeted":
+                    print("Bu tweet bir retweet (referenced_tweets), atlanıyor.")
+                    time.sleep(10)
+                    break
+            else:
+                pass
+            continue
 
     if tweet["id"] == last_id:
         print("Yeni tweet yok.")
