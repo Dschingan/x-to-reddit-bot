@@ -485,167 +485,83 @@ class TwitterRedditBot:
             logger.error(f"Failed to download media from {media_url}: {e}")
             return None
     
-    def _post_images_to_reddit(self, subreddit, title: str, content: str, image_urls: list) -> None:
-        """Helper method to post single image or multiple images as gallery to Reddit."""
+    def _post_single_media_to_reddit(self, subreddit, title: str, content: str, media_url: str, media_type: str) -> bool:
+        """Post single media (image or video) to Reddit. No galleries."""
+        local_media_path = None
         try:
-            if len(image_urls) == 1:
-                # Single image
-                local_media_path = self.download_media(image_urls[0])
-                if local_media_path:
+            # Download media
+            local_media_path = self.download_media(media_url)
+            if not local_media_path:
+                logger.warning(f"Failed to download media: {media_url}")
+                return False
+            
+            # Post based on media type
+            if media_type == 'video':
+                try:
+                    submission = subreddit.submit_video(
+                        title=title,
+                        video_path=local_media_path,
+                        flair_id=os.getenv('REDDIT_FLAIR_ID')
+                    )
+                    logger.info(f"Successfully uploaded video to Reddit: {submission.url}")
+                    return True
+                except Exception as video_error:
+                    logger.error(f"Failed to upload video: {video_error}")
+                    # Try without websockets
                     try:
-                        submission = subreddit.submit_image(
+                        logger.info("Retrying video upload without websockets...")
+                        subreddit.submit_video(
+                            title=title,
+                            video_path=local_media_path,
+                            flair_id=os.getenv('REDDIT_FLAIR_ID'),
+                            without_websockets=True
+                        )
+                        logger.info("Successfully uploaded video to Reddit (without websockets)")
+                        return True
+                    except Exception as retry_error:
+                        logger.error(f"Failed to upload video even without websockets: {retry_error}")
+                        return False
+            else:
+                # Handle as image
+                try:
+                    submission = subreddit.submit_image(
+                        title=title,
+                        image_path=local_media_path,
+                        flair_id=os.getenv('REDDIT_FLAIR_ID')
+                    )
+                    logger.info(f"Successfully uploaded image to Reddit: {submission.url}")
+                    return True
+                except Exception as image_error:
+                    logger.error(f"Failed to upload image: {image_error}")
+                    # Try without websockets
+                    try:
+                        logger.info("Retrying image upload without websockets...")
+                        subreddit.submit_image(
                             title=title,
                             image_path=local_media_path,
-                            flair_id=os.getenv('REDDIT_FLAIR_ID')
+                            flair_id=os.getenv('REDDIT_FLAIR_ID'),
+                            without_websockets=True
                         )
-                        logger.info(f"Successfully uploaded single image to Reddit: {submission.url}")
-                    except Exception as upload_error:
-                        logger.error(f"Failed to upload single image: {upload_error}")
-                        # Try again without websockets (fixes websocket connection errors)
-                        try:
-                            logger.info("Retrying image upload without websockets...")
-                            subreddit.submit_image(
-                                title=title,
-                                image_path=local_media_path,
-                                flair_id=os.getenv('REDDIT_FLAIR_ID'),
-                                without_websockets=True
-                            )
-                            logger.info("Successfully uploaded single image to Reddit (without websockets)")
-                        except Exception as retry_error:
-                            logger.error(f"Failed to upload single image even without websockets: {retry_error}")
-                            # Final fallback to text post
-                            submission = subreddit.submit(
-                                title=title,
-                                selftext=content,
-                                flair_id=os.getenv('REDDIT_FLAIR_ID')
-                            )
-                    finally:
-                        # Clean up temporary file
-                        try:
-                            os.unlink(local_media_path)
-                            logger.info(f"Cleaned up temporary image file: {local_media_path}")
-                        except Exception as cleanup_error:
-                            logger.warning(f"Failed to clean up temporary file: {cleanup_error}")
-                else:
-                    # If download failed, post as text
-                    submission = subreddit.submit(
-                        title=title,
-                        selftext=content,
-                        flair_id=os.getenv('REDDIT_FLAIR_ID')
-                    )
-            else:
-                # Multiple images - try to create gallery
-                logger.info(f"Attempting to create gallery with {len(image_urls)} images")
-                downloaded_images = []
-                
-                # Download all images
-                for i, img_url in enumerate(image_urls):
-                    local_path = self.download_media(img_url)
-                    if local_path:
-                        downloaded_images.append(local_path)
-                        logger.info(f"Downloaded image {i+1}/{len(image_urls)}: {local_path}")
-                    else:
-                        logger.warning(f"Failed to download image {i+1}/{len(image_urls)}: {img_url}")
-                
-                if downloaded_images:
-                    try:
-                        # Try to submit as gallery (PRAW supports this)
-                        if len(downloaded_images) > 1:
-                            submission = subreddit.submit_gallery(
-                                title=title,
-                                images=[
-                                    {'image_path': img_path} for img_path in downloaded_images
-                                ],
-                                flair_id=os.getenv('REDDIT_FLAIR_ID')
-                            )
-                            logger.info(f"Successfully uploaded gallery with {len(downloaded_images)} images to Reddit: {submission.url}")
-                        else:
-                            # Only one image downloaded successfully, post as single image
-                            submission = subreddit.submit_image(
-                                title=title,
-                                image_path=downloaded_images[0],
-                                flair_id=os.getenv('REDDIT_FLAIR_ID')
-                            )
-                            logger.info(f"Successfully uploaded single image to Reddit: {submission.url}")
-                    except Exception as gallery_error:
-                        logger.error(f"Failed to upload gallery: {gallery_error}")
-                        # Try again without websockets
-                        try:
-                            logger.info("Retrying gallery/image upload without websockets...")
-                            if len(downloaded_images) > 1:
-                                subreddit.submit_gallery(
-                                    title=title,
-                                    images=[
-                                        {'image_path': img_path} for img_path in downloaded_images
-                                    ],
-                                    flair_id=os.getenv('REDDIT_FLAIR_ID'),
-                                    without_websockets=True
-                                )
-                                logger.info(f"Successfully uploaded gallery with {len(downloaded_images)} images (without websockets)")
-                            else:
-                                subreddit.submit_image(
-                                    title=title,
-                                    image_path=downloaded_images[0],
-                                    flair_id=os.getenv('REDDIT_FLAIR_ID'),
-                                    without_websockets=True
-                                )
-                                logger.info("Successfully uploaded single image (without websockets)")
-                        except Exception as retry_error:
-                            logger.error(f"Failed to upload even without websockets: {retry_error}")
-                            # Fallback to posting just the first image with websockets
-                            try:
-                                submission = subreddit.submit_image(
-                                    title=title,
-                                    image_path=downloaded_images[0],
-                                    flair_id=os.getenv('REDDIT_FLAIR_ID')
-                                )
-                                logger.info(f"Successfully uploaded first image as fallback: {submission.url}")
-                            except Exception as single_error:
-                                logger.error(f"Failed to upload single image as fallback: {single_error}")
-                                # Try single image without websockets
-                                try:
-                                    subreddit.submit_image(
-                                        title=title,
-                                        image_path=downloaded_images[0],
-                                        flair_id=os.getenv('REDDIT_FLAIR_ID'),
-                                        without_websockets=True
-                                    )
-                                    logger.info("Successfully uploaded first image as fallback (without websockets)")
-                                except Exception as final_error:
-                                    logger.error(f"All image upload methods failed: {final_error}")
-                                    # Final fallback to text post
-                                    submission = subreddit.submit(
-                                        title=title,
-                                        selftext=content,
-                                        flair_id=os.getenv('REDDIT_FLAIR_ID')
-                                    )
-                    finally:
-                        # Clean up all temporary files
-                        for img_path in downloaded_images:
-                            try:
-                                os.unlink(img_path)
-                                logger.info(f"Cleaned up temporary image file: {img_path}")
-                            except Exception as cleanup_error:
-                                logger.warning(f"Failed to clean up temporary file {img_path}: {cleanup_error}")
-                else:
-                    # No images downloaded successfully, post as text
-                    logger.warning("No images downloaded successfully, posting as text")
-                    submission = subreddit.submit(
-                        title=title,
-                        selftext=content,
-                        flair_id=os.getenv('REDDIT_FLAIR_ID')
-                    )
+                        logger.info("Successfully uploaded image to Reddit (without websockets)")
+                        return True
+                    except Exception as retry_error:
+                        logger.error(f"Failed to upload image even without websockets: {retry_error}")
+                        return False
+                        
         except Exception as e:
-            logger.error(f"Error in _post_images_to_reddit: {e}")
-            # Final fallback to text post
-            submission = subreddit.submit(
-                title=title,
-                selftext=content,
-                flair_id=os.getenv('REDDIT_FLAIR_ID')
-            )
-    
+            logger.error(f"Error in _post_single_media_to_reddit: {e}")
+            return False
+        finally:
+            # Clean up temporary file
+            if local_media_path:
+                try:
+                    os.unlink(local_media_path)
+                    logger.info(f"Cleaned up temporary media file: {local_media_path}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to clean up temporary file: {cleanup_error}")
+
     def post_to_reddit(self, tweet_data: Dict[str, Any], translated_text: str) -> bool:
-        """Post tweet content to Reddit."""
+        """Post tweet content to Reddit with optimized single media handling."""
         try:
             # Check rate limit before making API request
             self.check_rate_limit()
@@ -658,132 +574,50 @@ class TwitterRedditBot:
             if not title.strip():
                 title = "Twitter Paylaşımı"
             
-            # Prepare content with media URLs if upload fails
+            # Empty content as requested
             content = ""
-            media_urls = []
-            if tweet_data['media']:
-                for media in tweet_data['media']:
-                    media_url = media.get('url') or media.get('preview_url')
-                    if media_url:
-                        media_urls.append(media_url)
             
-            # Post to Reddit
-            if tweet_data['media']:
-                logger.info(f"Processing {len(tweet_data['media'])} media files")
+            # Check if tweet has media
+            if tweet_data.get('media') and len(tweet_data['media']) > 0:
+                logger.info(f"Tweet has {len(tweet_data['media'])} media files")
                 
-                # Separate images and videos
-                images = []
-                videos = []
+                # Get the first (best) media from the tweet
+                best_media = tweet_data['media'][0]
+                media_type = best_media.get('type', '').lower()
+                media_url = best_media.get('url') or best_media.get('preview_url')
                 
-                for media in tweet_data['media']:
-                    media_type = media.get('type', '').lower()
-                    media_url = media.get('url') or media.get('preview_url')
+                if media_url:
+                    logger.info(f"Processing {media_type} media: {media_url}")
                     
-                    if media_url:
-                        if media_type == 'photo':
-                            images.append(media_url)
-                        elif media_type == 'video':
-                            videos.append(media_url)
-                        else:
-                            # Default to treating as image if type is unclear
-                            images.append(media_url)
-                
-                logger.info(f"Found {len(images)} images and {len(videos)} videos")
-                
-                # Handle media posting based on what we have
-                if videos:
-                    # If there are videos, post the first video (Reddit doesn't support video galleries)
-                    video_url = videos[0]
-                    local_media_path = self.download_media(video_url)
-                    
-                    if local_media_path:
-                        try:
-                            # Try to post as video with websockets first
-                            submission = subreddit.submit_video(
-                                title=title,
-                                video_path=local_media_path,
-                                flair_id=os.getenv('REDDIT_FLAIR_ID')
-                            )
-                            logger.info(f"Successfully uploaded video to Reddit: {submission.url}")
-                        except Exception as video_error:
-                            logger.error(f"Failed to upload video: {video_error}")
-                            # Try again without websockets (fixes websocket connection errors)
-                            try:
-                                logger.info("Retrying video upload without websockets...")
-                                subreddit.submit_video(
-                                    title=title,
-                                    video_path=local_media_path,
-                                    flair_id=os.getenv('REDDIT_FLAIR_ID'),
-                                    without_websockets=True
-                                )
-                                logger.info("Successfully uploaded video to Reddit (without websockets)")
-                                
-                                # Since without_websockets=True doesn't return submission object,
-                                # we need to find the post manually by checking recent posts
-                                time.sleep(2)  # Wait a moment for the post to appear
-                                try:
-                                    for submission in subreddit.new(limit=5):
-                                        if submission.title == title and submission.author == self.reddit.user.me():
-                                            logger.info(f"Found uploaded video post: {submission.url}")
-                                            break
-                                except Exception as find_error:
-                                    logger.warning(f"Could not find uploaded video post: {find_error}")
-                                    
-                            except Exception as retry_error:
-                                logger.error(f"Failed to upload video even without websockets: {retry_error}")
-                                # Final fallback to text post with video URL
-                                fallback_content = f"🎥 Video: {video_url}\n\nOrijinal Tweet: https://twitter.com/TheBFWire/status/{tweet_data['id']}"
-                                submission = subreddit.submit(
-                                    title=title,
-                                    selftext=fallback_content,
-                                    flair_id=os.getenv('REDDIT_FLAIR_ID')
-                                )
-                                logger.info(f"Posted with video URL as fallback: {video_url}")
-                        finally:
-                            # Clean up temporary file
-                            try:
-                                os.unlink(local_media_path)
-                                logger.info(f"Cleaned up temporary video file: {local_media_path}")
-                            except Exception as cleanup_error:
-                                logger.warning(f"Failed to clean up temporary file: {cleanup_error}")
-                    else:
-                        # If video download failed, try images or fallback to text
-                        if images:
-                            logger.info("Video download failed, trying images instead")
-                            self._post_images_to_reddit(subreddit, title, content, images)
-                        else:
-                            # Video download failed, include URL in text post
-                            fallback_content = f"Video: {video_url}\n\nOrijinal Tweet: https://twitter.com/TheBFWire/status/{tweet_data['id']}"
-                            submission = subreddit.submit(
-                                title=title,
-                                selftext=fallback_content,
-                                flair_id=os.getenv('REDDIT_FLAIR_ID')
-                            )
-                            logger.info(f"Posted with video URL (download failed): {video_url}")
-                            
-                elif images:
-                    # Post images (single image or gallery)
-                    self._post_images_to_reddit(subreddit, title, content, images)
-                    
-                else:
-                    # No valid media found, post as text
-                    logger.warning("No valid media URLs found, posting as text")
-                    submission = subreddit.submit(
-                        title=title,
-                        selftext=content,
-                        flair_id=os.getenv('REDDIT_FLAIR_ID')
+                    # Try to post with media
+                    success = self._post_single_media_to_reddit(
+                        subreddit, title, content, media_url, media_type
                     )
-            else:
-                # Post as text with empty content
-                submission = subreddit.submit(
-                    title=title,
-                    selftext=content,  # Empty content
-                    flair_id=os.getenv('REDDIT_FLAIR_ID')
-                )
+                    
+                    if success:
+                        logger.info("Successfully posted with media")
+                        return True
+                    else:
+                        logger.warning("Media posting failed, falling back to text post")
+                        # Fallback to text post
+                        submission = subreddit.submit(
+                            title=title,
+                            selftext=content,
+                            flair_id=os.getenv('REDDIT_FLAIR_ID')
+                        )
+                        logger.info(f"Posted as text fallback: {submission.url}")
+                        return True
+                else:
+                    logger.warning("No valid media URL found")
             
-            logger.info(f"Successfully posted to Reddit: {submission.url}")
-            logger.info(f"Post title: {title}")
-            logger.info(f"Post content: Empty (as requested)")
+            # No media or media failed, post as text
+            logger.info("Posting as text (no media)")
+            submission = subreddit.submit(
+                title=title,
+                selftext=content,
+                flair_id=os.getenv('REDDIT_FLAIR_ID')
+            )
+            logger.info(f"Successfully posted text to Reddit: {submission.url}")
             return True
             
         except Exception as e:
