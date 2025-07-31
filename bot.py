@@ -1,210 +1,169 @@
-import os
-import requests
-import tweepy
-import praw
-import time
-import re
 from dotenv import load_dotenv
+import os
+import time
+import requests
+import praw
 
 load_dotenv()
 
-TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
-TWITTER_USER_ID = os.getenv("TWITTER_USER_ID")
+# Ayarlar
+SUBREDDIT = "bf6_tr"
+
 REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
 REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
 REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
-USER_AGENT = os.getenv("USER_AGENT")
-SUBREDDIT_NAME = os.getenv("SUBREDDIT_NAME")
+REDDIT_USER_AGENT = "script:twitter-post-bot:v1.0 (by /u/BF6_HBR)"
 
-FLAIR_ID = "a3c0f742-22de-11f0-9e24-7a8b08eb260a"
-LAST_TWEET_FILE = "last_tweet_id.txt"
+RAPIDAPI_TWITTER_KEY = os.getenv("RAPIDAPI_KEY")  # Twitter API rapid key
+RAPIDAPI_TRANSLATE_KEY = os.getenv("RAPIDAPI_KEY")  # Aynı key veya farklı olabilir
 
-def get_last_tweet_id():
-    if os.path.exists(LAST_TWEET_FILE):
-        with open(LAST_TWEET_FILE, "r") as f:
-            return f.read().strip()
-    return None
+TWITTER_SCREENNAME = "TheBFWire"
+TWITTER_REST_ID = "1939708158051500032"
 
-def save_last_tweet_id(tweet_id):
-    with open(LAST_TWEET_FILE, "w") as f:
-        f.write(str(tweet_id))
+# Reddit bağlantısı
+reddit = praw.Reddit(
+    client_id=REDDIT_CLIENT_ID,
+    client_secret=REDDIT_CLIENT_SECRET,
+    username=REDDIT_USERNAME,
+    password=REDDIT_PASSWORD,
+    user_agent=REDDIT_USER_AGENT
+)
 
-def download_file(url, filename):
-    r = requests.get(url, stream=True)
-    if r.status_code == 200:
-        with open(filename, 'wb') as f:
-            for chunk in r.iter_content(1024):
-                f.write(chunk)
-        return filename
-    return None
+def get_latest_tweet():
+    url = "https://twitter-api45.p.rapidapi.com/timeline.php"
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_TWITTER_KEY,
+        "x-rapidapi-host": "twitter-api45.p.rapidapi.com"
+    }
+    params = {
+        "screenname": TWITTER_SCREENNAME,
+        "rest_id": TWITTER_REST_ID
+    }
+    response = requests.get(url, headers=headers, params=params)
+    response.raise_for_status()
+    data = response.json()
+    timeline = data.get("timeline")
+    if not timeline:
+        return None
+    return timeline[0]
 
-def reencode_video(input_path, output_path):
-    os.system(f'ffmpeg -y -i "{input_path}" -c:v libx264 -crf 23 -preset fast -c:a aac -b:a 128k "{output_path}"')
+def translate_text(text):
+    translate_url = "https://translateai.p.rapidapi.com/google/translate/json"
+    payload = {
+        "origin_language": "en",
+        "target_language": "tr",
+        "words_not_to_translate": "Battlefield",  # Kelimeleri koru
+        "paths_to_exclude": "product.media.img_desc",
+        "common_keys_to_exclude": "name; price",
+        "json_content": {
+            "product": {
+                "productDesc": text
+            }
+        }
+    }
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_TRANSLATE_KEY,
+        "x-rapidapi-host": "translateai.p.rapidapi.com",
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(translate_url, json=payload, headers=headers)
+    resp.raise_for_status()
+    data = resp.json()
+    try:
+        translated = data['translated_json']['product']['productDesc']
+        return translated
+    except Exception as e:
+        print("Çeviri alınamadı:", e)
+        print("Raw response:", data)
+        return text  # Çeviri olmazsa orijinal metni döndür
 
-def get_latest_tweet_with_retry():
-    client = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN)
-    while True:
-        try:
-            tweets = client.get_users_tweets(
-                id=TWITTER_USER_ID,
-                max_results=5,
-                expansions="attachments.media_keys",
-                tweet_fields=["attachments", "created_at", "text"],
-                media_fields=["url", "type", "variants", "preview_image_url"]
-            )
-            break
-        except tweepy.TooManyRequests as e:
-            reset_time = int(e.response.headers.get("x-rate-limit-reset", 0))
-            wait_seconds = max(reset_time - int(time.time()), 60)
-            for remaining in range(wait_seconds, 0, -1):
-                print(f"\rRate limit aşıldı. {remaining} saniye bekleniyor...   ", end="")
-                time.sleep(1)
-            print()
-    if not tweets.data:
+def download_media(media_url, filename):
+    try:
+        r = requests.get(media_url, stream=True)
+        if r.status_code == 200:
+            with open(filename, "wb") as f:
+                for chunk in r.iter_content(1024):
+                    f.write(chunk)
+            return filename
+        else:
+            print(f"[HATA] Medya indirilemedi: {media_url}")
+            return None
+    except Exception as e:
+        print(f"[HATA] Medya indirirken: {e}")
         return None
 
-    tweet = tweets.data[0]
-    media = {m.media_key: m for m in tweets.includes.get("media", [])}
-
-    tweet_info = {
-        "id": str(tweet.id),
-        "text": tweet.text,
-        "media_urls": [],
-        "video_url": None
-    }
-
-    if tweet.attachments and "media_keys" in tweet.attachments:
-        for key in tweet.attachments["media_keys"]:
-            m = media.get(key)
-            if m:
-                if m.type == "photo":
-                    tweet_info["media_urls"].append(m.url)
-                elif m.type in ["video", "animated_gif"]:
-                    variants = m.variants if hasattr(m, "variants") else m["variants"]
-                    best = sorted(variants, key=lambda x: x.get("bit_rate", 0), reverse=True)
-                    for variant in best:
-                        if "url" in variant:
-                            tweet_info["video_url"] = variant["url"]
-                            break
-    return tweet_info
-
-def clean_title(title):
-    # Tweet içindeki https://t.co/... linklerini tamamen kaldır
-    return re.sub(r'https://t\.co/\S+', '', title).strip()
-
-def post_to_reddit(title, media_path=None):
-    reddit = praw.Reddit(
-        client_id=REDDIT_CLIENT_ID,
-        client_secret=REDDIT_CLIENT_SECRET,
-        username=REDDIT_USERNAME,
-        password=REDDIT_PASSWORD,
-        user_agent=USER_AGENT,  # Reddit uyarısı için
-        ratelimit_seconds=600  # Reddit API kuralına uygun: 10 dakika bekle
-    )
-
-    subreddit = reddit.subreddit(SUBREDDIT_NAME)
-    submission = None
-
-    if media_path:
-        if media_path.lower().endswith(".mp4"):
-            submission = subreddit.submit_video(
-                title=title,
-                video_path=media_path,
-                flair_id=FLAIR_ID
-            )
+def submit_post(title, media_files):
+    subreddit = reddit.subreddit(SUBREDDIT)
+    if media_files:
+        media_path = media_files[0]
+        ext = os.path.splitext(media_path)[1].lower()
+        if ext in [".jpg", ".jpeg", ".png", ".gif"]:
+            print(f"[+] Görsel gönderiliyor: {media_path}")
+            subreddit.submit_image(title=title, image_path=media_path)
+        elif ext in [".mp4", ".mov", ".webm"]:
+            print(f"[+] Video gönderiliyor: {media_path}")
+            subreddit.submit_video(title=title, video_path=media_path)
         else:
-            submission = subreddit.submit_image(
-                title=title,
-                image_path=media_path,
-                flair_id=FLAIR_ID
-            )
+            print("[!] Desteklenmeyen medya türü, sadece başlık gönderiliyor.")
+            subreddit.submit(title=title, selftext="")
     else:
-        submission = subreddit.submit(
-            title=title,
-            selftext="",
-            flair_id=FLAIR_ID
-        )
+        print("[+] Medya yok, sadece başlık gönderiliyor.")
+        subreddit.submit(title=title, selftext="")
 
-TRANSLATION_API_URL = os.getenv("TRANSLATION_API_URL")
-TRANSLATION_API_KEY = os.getenv("TRANSLATION_API_KEY")
-TRANSLATION_API_HOST = os.getenv("TRANSLATION_API_HOST")
-
-def translate_en_to_tr(text: str) -> str:
-    try:
-        headers = {
-            "content-type": "application/json",
-            "X-RapidAPI-Key": TRANSLATION_API_KEY,
-            "X-RapidAPI-Host": TRANSLATION_API_HOST,
-        }
-        data = {
-            "origin_language": "en",
-            "target_language": "tr",
-            "input_text": text,
-        }
-        response = requests.post(TRANSLATION_API_URL, json=data, headers=headers, timeout=10)
-        response.raise_for_status()
-        result = response.json()
-        return result.get("translation") or result.get("translatedText") or "[Çeviri yok]"
-    except Exception as e:
-        return f"[Çeviri Hatası: {e}]"
-
-def main():
-    print("Program başladı.")
+def main_loop():
+    posted_tweet_ids = set()
     while True:
-        last_id = get_last_tweet_id()
-        tweet = get_latest_tweet_with_retry()
+        print("[+] Tweet kontrol ediliyor...")
+        try:
+            tweet = get_latest_tweet()
+        except Exception as e:
+            print("[HATA] Tweet alınamadı:", e)
+            tweet = None
 
         if not tweet:
-            print("Tweet bulunamadı. 60 sn sonra tekrar denenecek.")
-            time.sleep(60)
-            continue
-
-        # RT (retweet) kontrolü
-        if tweet["text"].strip().startswith("RT @"):
-            print("Bu tweet bir retweet, atlanıyor.")
-            time.sleep(10)
-            continue
-
-        # Eğer tweet objesinde retweet'i belirten başka bir alan varsa (ör. referenced_tweets)
-        if "referenced_tweets" in tweet and tweet["referenced_tweets"]:
-            for ref in tweet["referenced_tweets"]:
-                if ref.get("type") == "retweeted":
-                    print("Bu tweet bir retweet (referenced_tweets), atlanıyor.")
-                    time.sleep(10)
-                    break
+            print("[HATA] Tweet bulunamadı.")
+        else:
+            tweet_id = tweet.get("tweet_id")
+            if tweet_id in posted_tweet_ids:
+                print("[!] Yeni tweet yok.")
             else:
-                pass
-            continue
+                text = tweet.get("text", "")
+                print(f"[+] Tweet bulundu: {text}")
+                translated = translate_text(text)
+                print(f"[+] Çeviri: {translated}")
 
-    if tweet["id"] == last_id:
-        print("Yeni tweet yok.")
-        return
+                media_files = []
+                media = tweet.get("media")
+                if media:
+                    if isinstance(media, list):
+                        for m in media:
+                            media_url = m.get("media_url_https") or m.get("media_url")
+                            if media_url:
+                                ext = os.path.splitext(media_url)[1].split("?")[0]
+                                filename = f"temp_media{ext}"
+                                path = download_media(media_url, filename)
+                                if path:
+                                    media_files.append(path)
+                    elif isinstance(media, dict):
+                        media_url = media.get("media_url_https") or media.get("media_url")
+                        if media_url:
+                            ext = os.path.splitext(media_url)[1].split("?")[0]
+                            filename = f"temp_media{ext}"
+                            path = download_media(media_url, filename)
+                            if path:
+                                media_files.append(path)
 
-    print(f"Yeni tweet bulundu: {tweet['text']}")
+                submit_post(translated, media_files)
+                posted_tweet_ids.add(tweet_id)
 
-    raw_title = tweet["text"]
-    title = clean_title(raw_title)
-    translated_title = translate_en_to_tr(title)
-    media_file = None
+                # Medya dosyalarını temizle
+                for fpath in media_files:
+                    if os.path.exists(fpath):
+                        os.remove(fpath)
 
-    if tweet["video_url"]:
-        print("Video indiriliyor...")
-        media_file = download_file(tweet["video_url"], "video.mp4")
-        if media_file:
-            print("Video yeniden kodlanıyor...")
-            reencode_video("video.mp4", "video_final.mp4")
-            media_file = "video_final.mp4"
-
-    elif tweet["media_urls"]:
-        print("Fotoğraf indiriliyor...")
-        media_file = download_file(tweet["media_urls"][0], "image.jpg")
-
-    print("Reddit'e gönderiliyor...")
-    post_to_reddit(title=translated_title, media_path=media_file)
-
-    save_last_tweet_id(tweet["id"])
-    print("İşlem tamamlandı.")
+        print("⏳ 15 dakika bekleniyor..")
+        time.sleep(900)  # 900 saniye = 15 dakika
 
 if __name__ == "__main__":
-    main()
+    main_loop()
