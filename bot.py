@@ -125,10 +125,41 @@ def get_media_urls_from_user_tweets(tweet_id):
             print(f"[+] {len(media_list)} medya bulundu")
             
             for media in media_list:
-                media_url = media.get("media_url_https")
-                if media_url:
-                    print(f"[+] Medya URL'si: {media_url}")
-                    media_urls.append(media_url)
+                media_type = media.get("type", "")
+
+                if media_type == "video":
+                    # Video için video_info.variants'tan en yüksek kaliteyi al
+                    video_info = media.get("video_info", {})
+                    variants = video_info.get("variants", [])
+                    
+                    # En yüksek bitrate'li .mp4 dosyasını bul
+                    best_video = None
+                    highest_bitrate = 0
+                    
+                    for variant in variants:
+                        content_type = variant.get("content_type", "")
+                        if content_type == "video/mp4":
+                            bitrate = variant.get("bitrate", 0)
+                            if bitrate > highest_bitrate:
+                                highest_bitrate = bitrate
+                                best_video = variant
+                    
+                    if best_video:
+                        video_url = best_video.get("url")
+                        if video_url:
+                            print(f"[+] Video URL'si (bitrate: {highest_bitrate}): {video_url}")
+                            media_urls.append(video_url)
+                    else:
+                        print("[UYARI] Video için uygun variant bulunamadı")
+                        
+                elif media_type in ["photo", "animated_gif"]:
+                    # Fotoğraf ve GIF için media_url_https kullan
+                    media_url = media.get("media_url_https")
+                    if media_url:
+                        print(f"[+] {media_type.title()} URL'si: {media_url}")
+                        media_urls.append(media_url)
+                else:
+                    print(f"[UYARI] Bilinmeyen medya türü: {media_type}")
 
     except Exception as e:
         print(f"[HATA] Media parse edilirken hata: {e}")
