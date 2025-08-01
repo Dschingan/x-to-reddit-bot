@@ -5,6 +5,7 @@ import requests
 import praw
 import re
 import subprocess
+import json
 
 load_dotenv()
 
@@ -187,42 +188,133 @@ def download_media(media_url, filename):
 
 def convert_video_to_reddit_format(input_path, output_path):
     try:
+        # Reddit video gereksinimleri için optimize edilmiş ayarlar
         command = [
             "ffmpeg",
-            "-y",
             "-i", input_path,
             "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
+            "-preset", "medium",  # Daha iyi kalite için
+            "-crf", "20",  # Daha düşük CRF değeri
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", "128k",
+            "-ar", "44100",  # Standart ses örnekleme oranı
             "-movflags", "+faststart",
+            "-max_muxing_queue_size", "1024",  # Buffer boyutu artırma
+            "-y",  # Dosya üzerine yazma
             output_path
         ]
-        subprocess.run(command, check=True)
-        return output_path
+        print(f"[+] Video dönüştürülüyor: {input_path} -> {output_path}")
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        
+        # Dosyanın başarıyla oluşturulduğunu kontrol et
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            print(f"[+] Video başarıyla dönüştürüldü. Boyut: {os.path.getsize(output_path)} bytes")
+            return output_path
+        else:
+            print("[HATA] Dönüştürülen video dosyası bulunamadı veya boş")
+            return None
+            
     except subprocess.CalledProcessError as e:
-        print("[HATA] ffmpeg dönüştürmede hata:", e)
+        print(f"[HATA] ffmpeg dönüştürmede hata: {e}")
+        if e.stderr:
+            print(f"[HATA] ffmpeg stderr: {e.stderr}")
+        return None
+    except Exception as e:
+        print(f"[HATA] Video dönüştürme genel hatası: {e}")
         return None
 
 def submit_post(title, media_files):
     subreddit = reddit.subreddit(SUBREDDIT)
     if media_files:
         media_path = media_files[0]
+        
+        # Dosya varlığını ve boyutunu kontrol et
+        if not os.path.exists(media_path):
+            print(f"[HATA] Medya dosyası bulunamadı: {media_path}")
+            return False
+            
+        file_size = os.path.getsize(media_path)
+        if file_size == 0:
+            print(f"[HATA] Medya dosyası boş: {media_path}")
+            return False
+            
+        # Reddit video boyut limiti (1GB)
+        max_size = 1024 * 1024 * 1024  # 1GB
+        if file_size > max_size:
+            print(f"[HATA] Dosya çok büyük ({file_size} bytes). Reddit limiti: {max_size} bytes")
+            return False
+            
+        print(f"[+] Medya dosyası hazır: {media_path} ({file_size} bytes)")
+        
         ext = os.path.splitext(media_path)[1].lower()
-        if ext in [".jpg", ".jpeg", ".png", ".gif"]:
-            print(f"[+] Görsel gönderiliyor: {media_path}")
-            subreddit.submit_image(title=title, image_path=media_path)
-        elif ext in [".mp4", ".mov", ".webm"]:
-            print(f"[+] Video gönderiliyor: {media_path}")
-            subreddit.submit_video(title=title, video_path=media_path)
-        else:
-            print("[!] Desteklenmeyen medya türü, sadece başlık gönderiliyor.")
-            subreddit.submit(title=title, selftext="")
+        
+        try:
+            if ext in [".jpg", ".jpeg", ".png", ".gif"]:
+                print(f"[+] Görsel gönderiliyor: {media_path}")
+                submission = subreddit.submit_image(title=title, image_path=media_path)
+                print(f"[+] Görsel başarıyla gönderildi: {submission.url}")
+                return True
+                
+            elif ext in [".mp4", ".mov", ".webm"]:
+                print(f"[+] Video gönderiliyor: {media_path}")
+                
+                # Video dosyasının geçerli olduğunu kontrol et
+                try:
+                    # ffprobe ile video bilgilerini al
+                    probe_cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", media_path]
+                    probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
+                    video_info = json.loads(probe_result.stdout)
+                    
+                    # Video süresini kontrol et (Reddit max 15 dakika)
+                    duration = float(video_info['format']['duration'])
+                    if duration > 900:  # 15 dakika
+                        print(f"[HATA] Video çok uzun ({duration:.1f}s). Reddit limiti: 900s")
+                        return False
+                        
+                    print(f"[+] Video geçerli - Süre: {duration:.1f}s, Boyut: {file_size} bytes")
+                    
+                except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError) as e:
+                    print(f"[UYARI] Video doğrulama başarısız: {e}. Yine de yüklemeyi deniyorum...")
+                
+                # Reddit'e video yükle
+                submission = subreddit.submit_video(title=title, video_path=media_path)
+                print(f"[+] Video başarıyla gönderildi: {submission.url}")
+                return True
+                
+            else:
+                print("[!] Desteklenmeyen medya türü, sadece başlık gönderiliyor.")
+                submission = subreddit.submit(title=title, selftext="")
+                print(f"[+] Başlık gönderildi: {submission.url}")
+                return True
+                
+        except Exception as e:
+            print(f"[HATA] Reddit'e gönderim başarısız: {e}")
+            
+            # WebSocketException özel durumu
+            if "WebSocketException" in str(e):
+                print("[!] WebSocket hatası - Video dosyası sorunlu olabilir")
+                print("[!] Post yine de oluşturulmuş olabilir, Reddit'i kontrol edin")
+                
+                # Temp dosyaları temizle
+                try:
+                    if os.path.exists(media_path) and "temp_media" in media_path:
+                        os.remove(media_path)
+                        print(f"[+] Geçici dosya temizlendi: {media_path}")
+                except:
+                    pass
+                    
+            return False
+            
     else:
-        print("[+] Medya yok, sadece başlık gönderiliyor.")
-        subreddit.submit(title=title, selftext="")
+        try:
+            print("[+] Medya yok, sadece başlık gönderiliyor.")
+            submission = subreddit.submit(title=title, selftext="")
+            print(f"[+] Başlık gönderildi: {submission.url}")
+            return True
+        except Exception as e:
+            print(f"[HATA] Başlık gönderimi başarısız: {e}")
+            return False
 
 def main_loop():
     posted_tweet_ids = set()
