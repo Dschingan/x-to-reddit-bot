@@ -224,6 +224,62 @@ def convert_video_to_reddit_format(input_path, output_path):
         print(f"[HATA] Video dönüştürme genel hatası: {e}")
         return None
 
+def try_alternative_upload(title, media_path, subreddit):
+    """WebSocket hatası durumunda alternatif yükleme yöntemi"""
+    try:
+        print("[+] Alternatif yöntem: Video'yu daha küçük boyutta yeniden kodluyorum...")
+        
+        # Daha küçük boyutta yeniden kodla
+        alt_output = media_path.replace('.mp4', '_small.mp4')
+        command = [
+            "ffmpeg",
+            "-i", media_path,
+            "-c:v", "libx264",
+            "-preset", "ultrafast",  # Hızlı kodlama
+            "-crf", "28",  # Daha yüksek sıkıştırma
+            "-vf", "scale=854:480",  # 480p'ye düşür
+            "-c:a", "aac",
+            "-b:a", "96k",  # Daha düşük ses kalitesi
+            "-movflags", "+faststart",
+            "-y",
+            alt_output
+        ]
+        
+        subprocess.run(command, check=True, capture_output=True)
+        
+        if os.path.exists(alt_output) and os.path.getsize(alt_output) > 0:
+            print(f"[+] Küçük video oluşturuldu: {os.path.getsize(alt_output)} bytes")
+            
+            # Küçük videoyu yüklemeyi dene
+            submission = subreddit.submit_video(title=title, video_path=alt_output)
+            print(f"[+] Alternatif yöntemle video gönderildi: {submission.url}")
+            
+            # Geçici dosyaları temizle
+            try:
+                os.remove(media_path)
+                os.remove(alt_output)
+                print("[+] Geçici dosyalar temizlendi")
+            except:
+                pass
+                
+            return True
+        else:
+            print("[HATA] Alternatif video oluşturulamadı")
+            return False
+            
+    except Exception as e:
+        print(f"[HATA] Alternatif yükleme başarısız: {e}")
+        
+        # Son çare: Sadece başlık gönder
+        try:
+            print("[!] Son çare: Sadece başlık gönderiliyor...")
+            submission = subreddit.submit(title=title, selftext="Video yüklenemedi - Twitter'dan izleyebilirsiniz")
+            print(f"[+] Başlık gönderildi: {submission.url}")
+            return True
+        except:
+            print("[HATA] Başlık bile gönderilemedi")
+            return False
+
 def submit_post(title, media_files):
     subreddit = reddit.subreddit(SUBREDDIT)
     if media_files:
@@ -277,10 +333,41 @@ def submit_post(title, media_files):
                 except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError) as e:
                     print(f"[UYARI] Video doğrulama başarısız: {e}. Yine de yüklemeyi deniyorum...")
                 
-                # Reddit'e video yükle
-                submission = subreddit.submit_video(title=title, video_path=media_path)
-                print(f"[+] Video başarıyla gönderildi: {submission.url}")
-                return True
+                # Reddit'e video yükle - retry mekanizması ile
+                max_retries = 2
+                for attempt in range(max_retries):
+                    try:
+                        print(f"[+] Video yükleme denemesi {attempt + 1}/{max_retries}")
+                        
+                        # Dosyanın tamamen hazır olması için 2 dakika bekleme
+                        print("[+] Dosyanın tamamen hazır olması için 2 dakika bekleniyor...")
+                        time.sleep(120)
+                        
+                        submission = subreddit.submit_video(title=title, video_path=media_path)
+                        print(f"[+] Video başarıyla gönderildi: {submission.url}")
+                        
+                        # Başarılı yükleme sonrası geçici dosyayı temizle
+                        try:
+                            if "temp_media" in media_path:
+                                os.remove(media_path)
+                                print(f"[+] Geçici dosya temizlendi: {media_path}")
+                        except:
+                            pass
+                            
+                        return True
+                        
+                    except Exception as retry_e:
+                        print(f"[HATA] Deneme {attempt + 1} başarısız: {retry_e}")
+                        
+                        if attempt == max_retries - 1:  # Son deneme
+                            # WebSocket hatası durumunda alternatif yöntem dene
+                            if "WebSocketException" in str(retry_e):
+                                print("[!] WebSocket hatası - Alternatif yöntem deneniyor...")
+                                return try_alternative_upload(title, media_path, subreddit)
+                            raise retry_e
+                        else:
+                            print(f"[!] {5 - attempt * 2} saniye bekleyip tekrar denenecek...")
+                            time.sleep(5 - attempt * 2)
                 
             else:
                 print("[!] Desteklenmeyen medya türü, sadece başlık gönderiliyor.")
