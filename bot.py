@@ -16,43 +16,30 @@ REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
 REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
 REDDIT_USER_AGENT = "script:twitter-post-bot:v1.0 (by /u/BF6_HBR)"
 
-RAPIDAPI_TWITTER_KEY = os.getenv("RAPIDAPI_KEY")  # Twitter API rapid key
-RAPIDAPI_TRANSLATE_KEY = os.getenv("RAPIDAPI_KEY")  # Aynı key veya farklı olabilir
+RAPIDAPI_TWITTER_KEY = os.getenv("RAPIDAPI_KEY")
+RAPIDAPI_TRANSLATE_KEY = os.getenv("RAPIDAPI_KEY")
 
 TWITTER_SCREENNAME = "TheBFWire"
 TWITTER_REST_ID = "1939708158051500032"
 
-# Reddit bağlantısı - API kurallarına uygun konfigürasyon
 reddit = praw.Reddit(
     client_id=REDDIT_CLIENT_ID,
     client_secret=REDDIT_CLIENT_SECRET,
     username=REDDIT_USERNAME,
     password=REDDIT_PASSWORD,
     user_agent=REDDIT_USER_AGENT,
-    ratelimit_seconds=300  # 5 dakikaya kadar otomatik bekle
+    ratelimit_seconds=300
 )
 
 def clean_tweet_text(text):
-    """
-    Tweet metnini temizler: URL'leri, hashtagleri ve "|" sembolünü çıkarır
-    """
     if not text:
         return ""
-    
-    # URL'leri temizle (http://, https://, www. ile başlayanlar ve t.co linkler)
     text = re.sub(r'https?://\S+', '', text)
     text = re.sub(r'www\.\S+', '', text)
     text = re.sub(r't\.co/\S+', '', text)
-    
-    # Hashtagleri temizle (#kelime formatında)
     text = re.sub(r'#\w+', '', text)
-    
-    # "|" sembolünü temizle
     text = text.replace('|', '')
-    
-    # Fazla boşlukları temizle ve başındaki/sonundaki boşlukları kaldır
     text = re.sub(r'\s+', ' ', text).strip()
-    
     return text
 
 def get_latest_tweet():
@@ -90,16 +77,14 @@ def get_media_urls_from_user_tweets(tweet_id):
     media_urls = []
 
     try:
-        # Correct path: {},result,timeline,instructions,1:,entries:,0:,content:,itemContent:,tweet_results:,result:,legacy:,extended_entities:,media:,0:,media_url_https
         result = data.get("result", {})
         timeline = result.get("timeline", {})
         instructions = timeline.get("instructions", [])
-        
+
         if len(instructions) < 2:
             print("[HATA] instructions listesi yetersiz (en az 2 eleman gerekli).")
             return []
 
-        # instructions[1] kullan (index 1)
         entries = instructions[1].get("entries", [])
         if not entries:
             print("[HATA] entries bulunamadı.")
@@ -107,13 +92,11 @@ def get_media_urls_from_user_tweets(tweet_id):
 
         for entry in entries:
             entry_id = entry.get("entryId", "")
-            # Tweet id ile eşleşme kontrolü: entryId "tweet-<tweet_id>" formatında
             if not entry_id.endswith(tweet_id):
                 continue
 
             print(f"[+] Tweet bulundu: {entry_id}")
-            
-            # Doğru path'i takip et
+
             content = entry.get("content", {})
             itemContent = content.get("itemContent", {})
             tweet_results = itemContent.get("tweet_results", {})
@@ -123,43 +106,32 @@ def get_media_urls_from_user_tweets(tweet_id):
             media_list = extended_entities.get("media", [])
 
             print(f"[+] {len(media_list)} medya bulundu")
-            
-            for media in media_list:
-                media_type = media.get("type", "")
 
-                if media_type == "video":
-                    # Video için video_info.variants'tan en yüksek kaliteyi al
-                    video_info = media.get("video_info", {})
-                    variants = video_info.get("variants", [])
-                    
-                    # En yüksek bitrate'li .mp4 dosyasını bul
-                    best_video = None
-                    highest_bitrate = 0
-                    
-                    for variant in variants:
-                        content_type = variant.get("content_type", "")
-                        if content_type == "video/mp4":
-                            bitrate = variant.get("bitrate", 0)
-                            if bitrate > highest_bitrate:
-                                highest_bitrate = bitrate
-                                best_video = variant
-                    
-                    if best_video:
-                        video_url = best_video.get("url")
-                        if video_url:
-                            print(f"[+] Video URL'si (bitrate: {highest_bitrate}): {video_url}")
-                            media_urls.append(video_url)
-                    else:
-                        print("[UYARI] Video için uygun variant bulunamadı")
-                        
-                elif media_type in ["photo", "animated_gif"]:
-                    # Fotoğraf ve GIF için media_url_https kullan
+            for media in media_list:
+                media_type = media.get("type")
+
+                # Fotoğraf
+                if media_type == "photo":
                     media_url = media.get("media_url_https")
                     if media_url:
-                        print(f"[+] {media_type.title()} URL'si: {media_url}")
+                        print(f"[+] Fotoğraf URL'si: {media_url}")
                         media_urls.append(media_url)
-                else:
-                    print(f"[UYARI] Bilinmeyen medya türü: {media_type}")
+
+                # Video veya GIF
+                elif media_type in ["video", "animated_gif"]:
+                    video_info = media.get("video_info", {})
+                    variants = video_info.get("variants", [])
+                    best_variant = None
+                    max_bitrate = -1
+                    for variant in variants:
+                        url = variant.get("url")
+                        bitrate = variant.get("bitrate", 0)
+                        if url and bitrate > max_bitrate:
+                            best_variant = url
+                            max_bitrate = bitrate
+                    if best_variant:
+                        print(f"[+] Video URL'si: {best_variant}")
+                        media_urls.append(best_variant)
 
     except Exception as e:
         print(f"[HATA] Media parse edilirken hata: {e}")
@@ -252,16 +224,10 @@ def main_loop():
             else:
                 text = tweet.get("text", "")
                 print(f"[+] Orijinal Tweet: {text}")
-                
-                # Tweet metnini temizle
                 cleaned_text = clean_tweet_text(text)
                 print(f"[+] Temizlenmiş Tweet: {cleaned_text}")
-                
-                # Temizlenmiş metni çevir
                 translated = translate_text(cleaned_text)
                 print(f"[+] Çeviri: {translated}")
-
-                # Medyayı user-tweets API ile çek
                 media_urls = get_media_urls_from_user_tweets(tweet_id)
                 media_files = []
                 for i, media_url in enumerate(media_urls):
@@ -274,13 +240,12 @@ def main_loop():
                 submit_post(translated, media_files)
                 posted_tweet_ids.add(tweet_id)
 
-                # Medya dosyalarını temizle
                 for fpath in media_files:
                     if os.path.exists(fpath):
                         os.remove(fpath)
 
         print("⏳ 2 saat bekleniyor..")
-        time.sleep(7200)  # 2 saat = 7200 saniye
+        time.sleep(7200)
 
 if __name__ == "__main__":
     main_loop()
