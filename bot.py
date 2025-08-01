@@ -189,6 +189,7 @@ def convert_video_to_reddit_format(input_path, output_path):
     try:
         command = [
             "ffmpeg",
+            "-y",
             "-i", input_path,
             "-c:v", "libx264",
             "-preset", "fast",
