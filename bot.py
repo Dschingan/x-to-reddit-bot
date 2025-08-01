@@ -4,10 +4,10 @@ import time
 import requests
 import praw
 import re
+import subprocess
 
 load_dotenv()
 
-# Ayarlar
 SUBREDDIT = "bf6_tr"
 
 REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
@@ -110,14 +110,12 @@ def get_media_urls_from_user_tweets(tweet_id):
             for media in media_list:
                 media_type = media.get("type")
 
-                # Fotoğraf
                 if media_type == "photo":
                     media_url = media.get("media_url_https")
                     if media_url:
                         print(f"[+] Fotoğraf URL'si: {media_url}")
                         media_urls.append(media_url)
 
-                # Video veya GIF
                 elif media_type in ["video", "animated_gif"]:
                     video_info = media.get("video_info", {})
                     variants = video_info.get("variants", [])
@@ -187,6 +185,26 @@ def download_media(media_url, filename):
         print(f"[HATA] Medya indirirken: {e}")
         return None
 
+def convert_video_to_reddit_format(input_path, output_path):
+    try:
+        command = [
+            "ffmpeg",
+            "-i", input_path,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            output_path
+        ]
+        subprocess.run(command, check=True)
+        return output_path
+    except subprocess.CalledProcessError as e:
+        print("[HATA] ffmpeg dönüştürmede hata:", e)
+        return None
+
 def submit_post(title, media_files):
     subreddit = reddit.subreddit(SUBREDDIT)
     if media_files:
@@ -234,7 +252,14 @@ def main_loop():
                     ext = os.path.splitext(media_url)[1].split("?")[0]
                     filename = f"temp_media_{i}{ext}"
                     path = download_media(media_url, filename)
-                    if path:
+                    if path and ext == ".mp4":
+                        converted = f"converted_{filename}"
+                        converted_path = convert_video_to_reddit_format(filename, converted)
+                        if converted_path:
+                            media_files.append(converted_path)
+                        if os.path.exists(filename):
+                            os.remove(filename)
+                    elif path:
                         media_files.append(path)
 
                 submit_post(translated, media_files)
@@ -244,7 +269,7 @@ def main_loop():
                     if os.path.exists(fpath):
                         os.remove(fpath)
 
-        print("⏳ 2 saat bekleniyor..")
+        print("\u23f3 2 saat bekleniyor..")
         time.sleep(7200)
 
 if __name__ == "__main__":
