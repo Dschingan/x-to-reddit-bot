@@ -71,6 +71,7 @@ except Exception as rw_setup_error:
 def clean_tweet_text(text):
     if not text:
         return ""
+    text = re.sub(r'^RT @TheBFWire:\s*', '', text)
     text = re.sub(r'https?://\S+', '', text)
     text = re.sub(r'www\.\S+', '', text)
     text = re.sub(r't\.co/\S+', '', text)
