@@ -28,7 +28,7 @@ REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
 REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
 REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
-REDDIT_USER_AGENT = "script:twitter-post-bot:v1.0 (by /u/BF6_HBR)"
+REDDIT_USER_AGENT = "script:bf6-twitter-post-bot:v1.0 (by /u/BF6_HBR)"
 
 RAPIDAPI_TWITTER_KEY = os.getenv("RAPIDAPI_KEY")
 RAPIDAPI_TRANSLATE_KEY = os.getenv("RAPIDAPI_KEY")
@@ -71,6 +71,7 @@ except Exception as rw_setup_error:
 def clean_tweet_text(text):
     if not text:
         return ""
+    # RT @TheBFWire: ifadesini kaldır
     text = re.sub(r'^RT @TheBFWire:\s*', '', text)
     text = re.sub(r'https?://\S+', '', text)
     text = re.sub(r'www\.\S+', '', text)
@@ -207,6 +208,98 @@ def translate_text(text):
         print("Çeviri alınamadı:", e)
         print("Raw response:", data)
         return text
+
+# AI-powered flair selection system
+FLAIR_OPTIONS = {
+    "Haberler": "a3c0f742-22de-11f0-9e24-7a8b08eb260a",
+    "Klip": "b6d04ac2-22de-11f0-9536-c6a33f70974b",
+    "Tartışma": "c22e9cfc-22de-11f0-950d-4ee5c0d1016f",
+    "Soru": "ccbc6fb4-22de-11f0-b443-da5b1d3016fa",
+    "İnceleme": "e52aa2a0-22de-11f0-abed-aa5bfc354624",
+    "Kampanya": "26a6deda-68ab-11f0-8584-6a05febc585d",
+    "Arkaplan": "33ea1cfa-69c4-11f0-8376-9a5b50ce03e6",
+    "Sızıntı": "351fe58c-6be0-11f0-bcb4-9e6d710db689"
+}
+
+def select_flair_with_ai(title, original_tweet_text=""):
+    """AI ile otomatik flair seçimi"""
+    try:
+        print("[+] AI ile flair seçimi başlatılıyor...")
+        
+        # GPT-4o API için prompt hazırla
+        content_to_analyze = f"Başlık: {title}"
+        if original_tweet_text:
+            content_to_analyze += f"\nOrijinal Tweet: {original_tweet_text}"
+        
+        prompt = f"""Aşağıdaki Battlefield 6 ile ilgili içeriği analiz et ve en uygun flair'i seç.
+
+İçerik:
+{content_to_analyze}
+
+Mevcut flair seçenekleri:
+1. Haberler - Oyun haberleri, duyurular, resmi açıklamalar
+2. Klip - Video klipler, gameplay videoları
+3. Tartışma - Genel tartışmalar, görüşler
+4. Soru - Sorular ve yardım istekleri
+5. İnceleme - Oyun incelemeleri, değerlendirmeler
+6. Kampanya - Kampanya modu ile ilgili içerik
+7. Arkaplan - Oyun arkaplanı, hikaye, lore
+8. Sızıntı - Sızıntılar, leak'ler, söylentiler
+
+Sadece flair adını yaz (örnek: Haberler). Başka bir şey yazma."""
+        
+        # RapidAPI GPT-4o çağrısı
+        url = "https://gpt-4o.p.rapidapi.com/chat/completions"
+        payload = {
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": 50,
+            "temperature": 0.1
+        }
+        headers = {
+            "x-rapidapi-key": "e2a675a851msha83fe4f1092ea38p114f07jsn51433178e9e0",
+            "x-rapidapi-host": "gpt-4o.p.rapidapi.com",
+            "Content-Type": "application/json"
+        }
+        
+        print("[+] GPT-4o API çağrısı yapılıyor...")
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        # AI yanıtını al
+        if "choices" in result and len(result["choices"]) > 0:
+            ai_suggestion = result["choices"][0]["message"]["content"].strip()
+            print(f"[+] AI flair önerisi: {ai_suggestion}")
+            
+            # Flair adını temizle ve kontrol et
+            ai_suggestion_clean = ai_suggestion.replace(".", "").replace(":", "").strip()
+            
+            # Flair seçeneklerinde ara
+            for flair_name, flair_id in FLAIR_OPTIONS.items():
+                if flair_name.lower() in ai_suggestion_clean.lower() or ai_suggestion_clean.lower() in flair_name.lower():
+                    print(f"[+] Seçilen flair: {flair_name} (ID: {flair_id})")
+                    return flair_id
+            
+            # Tam eşleşme bulunamazsa, varsayılan olarak "Haberler" seç
+            print(f"[!] AI önerisi eşleşmedi ({ai_suggestion_clean}), varsayılan 'Haberler' seçiliyor")
+            return FLAIR_OPTIONS["Haberler"]
+        else:
+            print("[!] AI yanıtı alınamadı, varsayılan 'Haberler' seçiliyor")
+            return FLAIR_OPTIONS["Haberler"]
+            
+    except requests.exceptions.RequestException as req_e:
+        print(f"[HATA] AI API çağrısı başarısız: {req_e}")
+        return FLAIR_OPTIONS["Haberler"]
+    except Exception as e:
+        print(f"[HATA] Flair seçimi hatası: {e}")
+        return FLAIR_OPTIONS["Haberler"]
 
 def download_media(media_url, filename):
     try:
@@ -513,7 +606,7 @@ def upload_video_via_redditwarp(title, media_path, subreddit_name):
             except Exception as cleanup_e:
                 print(f"[UYARI] Thumbnail temizleme hatası: {cleanup_e}")
 
-def upload_video_via_reddit_api(title, media_path, subreddit_name):
+def upload_video_via_reddit_api(title, media_path, subreddit_name, flair_id=None):
     """Video yükleme - önce RedditWarp, sonra PRAW fallback"""
     
     # Önce RedditWarp dene
@@ -649,15 +742,19 @@ def try_alternative_upload(title, media_path, subreddit):
         print(f"[HATA] Text post bile gönderilemedi: {text_e}")
         return False
 
-def submit_post(title, media_files):
-    """Geliştirilmiş post gönderme fonksiyonu"""
+def submit_post(title, media_files, original_tweet_text=""):
+    """Geliştirilmiş post gönderme fonksiyonu - AI flair seçimi ile"""
     subreddit = reddit.subreddit(SUBREDDIT)
+    
+    # AI ile flair seçimi
+    selected_flair_id = select_flair_with_ai(title, original_tweet_text)
+    print(f"[+] Seçilen flair ID: {selected_flair_id}")
     
     if not media_files:
         # Medya yoksa sadece text post
         try:
             print("[+] Medya yok, text post gönderiliyor.")
-            submission = subreddit.submit(title=title, selftext="")
+            submission = subreddit.submit(title=title, selftext="", flair_id=selected_flair_id)
             print(f"[+] Text post gönderildi: {submission.url}")
             return True
         except Exception as e:
@@ -684,7 +781,7 @@ def submit_post(title, media_files):
         if ext in [".jpg", ".jpeg", ".png", ".gif"]:
             # Resim yükleme
             print(f"[+] Resim gönderiliyor: {media_path}")
-            submission = subreddit.submit_image(title=title, image_path=media_path)
+            submission = subreddit.submit_image(title=title, image_path=media_path, flair_id=selected_flair_id)
             print(f"[+] Resim başarıyla gönderildi: {submission.url}")
             return True
             
@@ -697,12 +794,12 @@ def submit_post(title, media_files):
             if file_size > max_video_size:
                 print(f"[HATA] Video çok büyük ({file_size} bytes). Limit: {max_video_size} bytes")
                 # Büyük video için text post gönder
-                submission = subreddit.submit(title=title + " [Video çok büyük - Twitter linkini kontrol edin]", selftext="")
+                submission = subreddit.submit(title=title + " [Video çok büyük - Twitter linkini kontrol edin]", selftext="", flair_id=selected_flair_id)
                 print(f"[+] Text post gönderildi: {submission.url}")
                 return True
             
             # Video upload denemesi
-            success = upload_video_via_reddit_api(title, media_path, SUBREDDIT)
+            success = upload_video_via_reddit_api(title, media_path, SUBREDDIT, selected_flair_id)
             
             if success:
                 print("[+] Video başarıyla yüklendi!")
@@ -716,13 +813,13 @@ def submit_post(title, media_files):
                 else:
                     # Son çare text post
                     print("[!] Tüm yöntemler başarısız, text post gönderiliyor...")
-                    submission = subreddit.submit(title=title + " [Video yüklenemedi - Twitter linkini kontrol edin]", selftext="")
+                    submission = subreddit.submit(title=title + " [Video yüklenemedi - Twitter linkini kontrol edin]", selftext="", flair_id=selected_flair_id)
                     print(f"[+] Alternatif text post gönderildi: {submission.url}")
                     return True
                 
         else:
             print(f"[!] Desteklenmeyen dosya türü: {ext}")
-            submission = subreddit.submit(title=title, selftext="")
+            submission = subreddit.submit(title=title, selftext="", flair_id=selected_flair_id)
             print(f"[+] Text post gönderildi: {submission.url}")
             return True
             
@@ -732,7 +829,7 @@ def submit_post(title, media_files):
         # Hata durumunda bile text post göndermeyi dene
         try:
             print("[!] Hata sonrası text post deneniyor...")
-            submission = subreddit.submit(title=title + " [Medya yüklenemedi]", selftext="")
+            submission = subreddit.submit(title=title + " [Medya yüklenemedi]", selftext="", flair_id=selected_flair_id)
             print(f"[+] Hata sonrası text post gönderildi: {submission.url}")
             return True
         except Exception as text_e:
@@ -825,7 +922,7 @@ def main_loop():
                     
                     # Post gönderme
                     print("[+] Reddit'e post gönderiliyor...")
-                    success = submit_post(translated, media_files)
+                    success = submit_post(translated, media_files, tweet_text)
                     
                     if success:
                         posted_tweet_ids.add(tweet_id)
