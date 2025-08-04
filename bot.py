@@ -253,10 +253,47 @@ FLAIR_OPTIONS = {
 
 def select_flair_with_ai(title, original_tweet_text=""):
     """AI ile otomatik flair seçimi"""
+    print("[+] AI ile flair seçimi başlatılıyor...")
+    print(f"[DEBUG] Başlık: {title}")
+    print(f"[DEBUG] Orijinal tweet: {original_tweet_text[:100]}..." if original_tweet_text else "[DEBUG] Orijinal tweet yok")
+    
+    # Önce basit kural tabanlı flair seçimi deneyelim
+    title_lower = title.lower()
+    tweet_lower = original_tweet_text.lower() if original_tweet_text else ""
+    combined_text = f"{title_lower} {tweet_lower}"
+    
+    print(f"[DEBUG] Analiz edilen metin: {combined_text[:200]}...")
+    
+    # Kural tabanlı flair seçimi
+    if any(word in combined_text for word in ["klip", "gameplay"]):
+        selected_flair = "Klip"
+    elif any(word in combined_text for word in ["leak", "sızıntı", "rumor", "söylenti"]):
+        selected_flair = "Sızıntı"
+    elif any(word in combined_text for word in ["campaign", "kampanya", "single player"]):
+        selected_flair = "Kampanya"
+    elif any(word in combined_text for word in ["review", "inceleme", "değerlendirme"]):
+        selected_flair = "İnceleme"
+    elif any(word in combined_text for word in ["question", "soru", "help", "yardım"]):
+        selected_flair = "Soru"
+    elif any(word in combined_text for word in ["discussion", "tartışma", "opinion", "görüş"]):
+        selected_flair = "Tartışma"
+    elif any(word in combined_text for word in ["arkaplan", "background"]):
+        selected_flair = "Arkaplan"
+    else:
+        selected_flair = "Haberler"  # Varsayılan
+    
+    selected_flair_id = FLAIR_OPTIONS[selected_flair]
+    print(f"[+] Kural tabanlı flair seçimi: {selected_flair} (ID: {selected_flair_id})")
+    
+    # OpenAI API'yi dene (opsiyonel)
     try:
-        print("[+] AI ile flair seçimi başlatılıyor...")
+        # API key kontrolü
+        ai_api_key = os.getenv("OPENAI_API_KEY")
+        if not ai_api_key:
+            print("[!] OPENAI_API_KEY bulunamadı, kural tabanlı seçim kullanılıyor")
+            return selected_flair_id
         
-        # GPT-4o API için prompt hazırla
+        # OpenAI API için prompt hazırla
         content_to_analyze = f"Başlık: {title}"
         if original_tweet_text:
             content_to_analyze += f"\nOrijinal Tweet: {original_tweet_text}"
@@ -278,10 +315,10 @@ Mevcut flair seçenekleri:
 
 Sadece flair adını yaz (örnek: Haberler). Başka bir şey yazma."""
         
-        # RapidAPI GPT-4o çağrısı
-        url = "https://gpt-4o.p.rapidapi.com/chat/completions"
+        # OpenAI API çağrısı
+        url = "https://api.openai.com/v1/chat/completions"
         payload = {
-            "model": "gpt-4o",
+            "model": "gpt-4o-mini",  # Daha ekonomik model
             "messages": [
                 {
                     "role": "user",
@@ -292,16 +329,22 @@ Sadece flair adını yaz (örnek: Haberler). Başka bir şey yazma."""
             "temperature": 0.1
         }
         headers = {
-            "x-rapidapi-key": "e2a675a851msha83fe4f1092ea38p114f07jsn51433178e9e0",
-            "x-rapidapi-host": "gpt-4o.p.rapidapi.com",
+            "Authorization": f"Bearer {ai_api_key}",
             "Content-Type": "application/json"
         }
         
-        print("[+] GPT-4o API çağrısı yapılıyor...")
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
+        print("[+] OpenAI API çağrısı yapılıyor...")
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        
+        print(f"[DEBUG] API Response Status: {response.status_code}")
+        
+        if response.status_code != 200:
+            print(f"[!] OpenAI API hatası (Status: {response.status_code}): {response.text}")
+            print(f"[+] Kural tabanlı seçim kullanılıyor: {selected_flair}")
+            return selected_flair_id
         
         result = response.json()
+        print(f"[DEBUG] OpenAI Response: {result}")
         
         # AI yanıtını al
         if "choices" in result and len(result["choices"]) > 0:
@@ -314,22 +357,29 @@ Sadece flair adını yaz (örnek: Haberler). Başka bir şey yazma."""
             # Flair seçeneklerinde ara
             for flair_name, flair_id in FLAIR_OPTIONS.items():
                 if flair_name.lower() in ai_suggestion_clean.lower() or ai_suggestion_clean.lower() in flair_name.lower():
-                    print(f"[+] Seçilen flair: {flair_name} (ID: {flair_id})")
+                    print(f"[+] AI seçilen flair: {flair_name} (ID: {flair_id})")
                     return flair_id
             
-            # Tam eşleşme bulunamazsa, varsayılan olarak "Haberler" seç
-            print(f"[!] AI önerisi eşleşmedi ({ai_suggestion_clean}), varsayılan 'Haberler' seçiliyor")
-            return FLAIR_OPTIONS["Haberler"]
+            # Tam eşleşme bulunamazsa, kural tabanlı seçimi kullan
+            print(f"[!] AI önerisi eşleşmedi ({ai_suggestion_clean}), kural tabanlı seçim kullanılıyor: {selected_flair}")
+            return selected_flair_id
         else:
-            print("[!] AI yanıtı alınamadı, varsayılan 'Haberler' seçiliyor")
-            return FLAIR_OPTIONS["Haberler"]
+            print("[!] AI yanıtı alınamadı, kural tabanlı seçim kullanılıyor")
+            return selected_flair_id
             
+    except requests.exceptions.Timeout:
+        print("[!] AI API timeout, kural tabanlı seçim kullanılıyor")
+        return selected_flair_id
     except requests.exceptions.RequestException as req_e:
-        print(f"[HATA] AI API çağrısı başarısız: {req_e}")
-        return FLAIR_OPTIONS["Haberler"]
+        print(f"[!] AI API çağrısı başarısız: {req_e}")
+        print(f"[+] Kural tabanlı seçim kullanılıyor: {selected_flair}")
+        return selected_flair_id
     except Exception as e:
-        print(f"[HATA] Flair seçimi hatası: {e}")
-        return FLAIR_OPTIONS["Haberler"]
+        print(f"[!] Flair seçimi hatası: {e}")
+        print(f"[+] Kural tabanlı seçim kullanılıyor: {selected_flair}")
+        import traceback
+        traceback.print_exc()
+        return selected_flair_id
 
 def download_media(media_url, filename):
     try:
