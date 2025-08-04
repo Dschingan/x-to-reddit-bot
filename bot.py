@@ -924,13 +924,46 @@ def submit_post(title, media_files, original_tweet_text=""):
         except:
             pass
 
+def load_posted_tweet_ids():
+    """Daha önce gönderilmiş tweet ID'lerini dosyadan yükle"""
+    posted_ids_file = "posted_tweet_ids.txt"
+    posted_ids = set()
+    
+    try:
+        if os.path.exists(posted_ids_file):
+            with open(posted_ids_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    tweet_id = line.strip()
+                    if tweet_id:
+                        posted_ids.add(tweet_id)
+            print(f"[+] {len(posted_ids)} adet önceki tweet ID'si yüklendi")
+        else:
+            print("[+] Yeni posted_tweet_ids.txt dosyası oluşturulacak")
+    except Exception as e:
+        print(f"[UYARI] Posted tweet IDs yüklenirken hata: {e}")
+    
+    return posted_ids
+
+def save_posted_tweet_id(tweet_id):
+    """Yeni gönderilmiş tweet ID'sini dosyaya kaydet"""
+    posted_ids_file = "posted_tweet_ids.txt"
+    
+    try:
+        with open(posted_ids_file, 'a', encoding='utf-8') as f:
+            f.write(f"{tweet_id}\n")
+        print(f"[+] Tweet ID kaydedildi: {tweet_id}")
+    except Exception as e:
+        print(f"[UYARI] Tweet ID kaydedilirken hata: {e}")
+
 def main_loop():
-    posted_tweet_ids = set()
+    # Persistent storage ile posted tweet IDs'leri yükle
+    posted_tweet_ids = load_posted_tweet_ids()
     
     print("[+] Reddit Bot başlatılıyor...")
     print(f"[+] Subreddit: r/{SUBREDDIT}")
     print(f"[+] Twitter: @{TWITTER_SCREENNAME}")
     print("[+] Retweet'ler otomatik olarak atlanacak")
+    print(f"[+] Şu ana kadar {len(posted_tweet_ids)} tweet işlenmiş")
     
     while True:
         try:
@@ -1011,6 +1044,7 @@ def main_loop():
                     
                     if success:
                         posted_tweet_ids.add(tweet_id)
+                        save_posted_tweet_id(tweet_id)  # Dosyaya da kaydet
                         print(f"[+] Tweet başarıyla işlendi: {tweet_id}")
                     else:
                         print(f"[HATA] Tweet işlenemedi: {tweet_id}")
@@ -1029,9 +1063,9 @@ def main_loop():
             import traceback
             traceback.print_exc()
         
-        print(f"\n[+] Sonraki kontrol: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() + 7200))}")
+        print(f"\n[+] Sonraki kontrol: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() + 5160))}")
         print("⏳ 1 saat 26 dakika bekleniyor...")
-        time.sleep(5184)  # 2 saat
+        time.sleep(5160)  # 1 saat 26 dakika (5160 saniye)
 
 if __name__ == "__main__":
     try:
