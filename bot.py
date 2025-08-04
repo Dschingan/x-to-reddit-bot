@@ -81,25 +81,8 @@ def clean_tweet_text(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def get_latest_tweet():
-    url = "https://twitter-api45.p.rapidapi.com/timeline.php"
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_TWITTER_KEY,
-        "x-rapidapi-host": "twitter-api45.p.rapidapi.com"
-    }
-    params = {
-        "screenname": TWITTER_SCREENNAME,
-        "rest_id": TWITTER_REST_ID
-    }
-    response = requests.get(url, headers=headers, params=params)
-    response.raise_for_status()
-    data = response.json()
-    timeline = data.get("timeline")
-    if not timeline:
-        return None
-    return timeline[0]
-
-def get_media_urls_from_user_tweets(tweet_id):
+def get_latest_tweet_with_retweet_check():
+    """Tek API çağrısı ile en son tweet'i al ve retweet kontrolü yap"""
     url = "https://twitter241.p.rapidapi.com/user-tweets"
     headers = {
         "x-rapidapi-key": RAPIDAPI_TWITTER_KEY,
@@ -107,75 +90,122 @@ def get_media_urls_from_user_tweets(tweet_id):
     }
     params = {
         "user": TWITTER_REST_ID,
-        "count": "20"
+        "count": "5"  # En son 5 tweet'i al
     }
-    r = requests.get(url, headers=headers, params=params)
-    r.raise_for_status()
-    data = r.json()
-
-    media_urls = []
-
+    
     try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json()
+        
         result = data.get("result", {})
         timeline = result.get("timeline", {})
         instructions = timeline.get("instructions", [])
-
+        
         if len(instructions) < 2:
             print("[HATA] instructions listesi yetersiz (en az 2 eleman gerekli).")
-            return []
-
+            return None
+            
         entries = instructions[1].get("entries", [])
         if not entries:
             print("[HATA] entries bulunamadı.")
-            return []
-
+            return None
+            
+        # En son tweet'i bul (retweet olmayan)
         for entry in entries:
             entry_id = entry.get("entryId", "")
-            if not entry_id.endswith(tweet_id):
+            if not entry_id.startswith("tweet-"):
                 continue
-
-            print(f"[+] Tweet bulundu: {entry_id}")
-
+                
             content = entry.get("content", {})
             itemContent = content.get("itemContent", {})
             tweet_results = itemContent.get("tweet_results", {})
             result_tweet = tweet_results.get("result", {})
             legacy = result_tweet.get("legacy", {})
-            extended_entities = legacy.get("extended_entities", {})
-            media_list = extended_entities.get("media", [])
+            
+            # Retweet kontrolü - retweeted_status_result varsa bu bir retweet
+            is_retweet = "retweeted_status_result" in legacy
+            
+            if is_retweet:
+                print(f"[!] Retweet atlandı: {entry_id}")
+                continue
+                
+            # Normal tweet bulundu
+            tweet_id = entry_id.replace("tweet-", "")
+            tweet_text = legacy.get("full_text", "")
+            
+            print(f"[+] Normal tweet bulundu: {tweet_id}")
+            
+            return {
+                "tweet_id": tweet_id,
+                "text": tweet_text,
+                "data": data,  # Medya URL'leri için tüm data'yı sakla
+                "entry": entry  # Entry'yi de sakla
+            }
+            
+        print("[!] Retweet olmayan tweet bulunamadı")
+        return {"is_all_retweets": True}  # Tüm tweet'ler retweet
+        
+    except Exception as e:
+        print(f"[HATA] Tweet alınırken hata: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
-            print(f"[+] {len(media_list)} medya bulundu")
-
-            for media in media_list:
-                media_type = media.get("type")
-
-                if media_type == "photo":
-                    media_url = media.get("media_url_https")
-                    if media_url:
-                        print(f"[+] Fotoğraf URL'si: {media_url}")
-                        media_urls.append(media_url)
-
-                elif media_type in ["video", "animated_gif"]:
-                    video_info = media.get("video_info", {})
-                    variants = video_info.get("variants", [])
-                    best_variant = None
-                    max_bitrate = -1
-                    for variant in variants:
-                        url = variant.get("url")
-                        bitrate = variant.get("bitrate", 0)
-                        if url and bitrate > max_bitrate:
-                            best_variant = url
-                            max_bitrate = bitrate
-                    if best_variant:
-                        print(f"[+] Video URL'si: {best_variant}")
-                        media_urls.append(best_variant)
-
+def get_media_urls_from_tweet_data(tweet_data):
+    """Zaten çekilmiş tweet verisinden medya URL'lerini çıkar"""
+    media_urls = []
+    
+    if not tweet_data or "entry" not in tweet_data:
+        print("[HATA] Tweet verisi bulunamadı")
+        return []
+    
+    try:
+        entry = tweet_data["entry"]
+        tweet_id = tweet_data["tweet_id"]
+        
+        print(f"[+] Tweet medyası aranıyor: {tweet_id}")
+        
+        content = entry.get("content", {})
+        itemContent = content.get("itemContent", {})
+        tweet_results = itemContent.get("tweet_results", {})
+        result_tweet = tweet_results.get("result", {})
+        legacy = result_tweet.get("legacy", {})
+        extended_entities = legacy.get("extended_entities", {})
+        media_list = extended_entities.get("media", [])
+        
+        print(f"[+] {len(media_list)} medya bulundu")
+        
+        for media in media_list:
+            media_type = media.get("type")
+            
+            if media_type == "photo":
+                media_url = media.get("media_url_https")
+                if media_url:
+                    print(f"[+] Fotoğraf URL'si: {media_url}")
+                    media_urls.append(media_url)
+            
+            elif media_type in ["video", "animated_gif"]:
+                video_info = media.get("video_info", {})
+                variants = video_info.get("variants", [])
+                best_variant = None
+                max_bitrate = -1
+                for variant in variants:
+                    url = variant.get("url")
+                    bitrate = variant.get("bitrate", 0)
+                    if url and bitrate > max_bitrate:
+                        best_variant = url
+                        max_bitrate = bitrate
+                if best_variant:
+                    print(f"[+] Video URL'si: {best_variant}")
+                    media_urls.append(best_variant)
+    
     except Exception as e:
         print(f"[HATA] Media parse edilirken hata: {e}")
         import traceback
         traceback.print_exc()
         return []
-
+    
     print(f"[+] Toplam {len(media_urls)} medya URL'si bulundu")
     return media_urls
 
@@ -850,25 +880,30 @@ def main_loop():
     print("[+] Reddit Bot başlatılıyor...")
     print(f"[+] Subreddit: r/{SUBREDDIT}")
     print(f"[+] Twitter: @{TWITTER_SCREENNAME}")
+    print("[+] Retweet'ler otomatik olarak atlanacak")
     
     while True:
         try:
             print("\n" + "="*50)
             print(f"[+] Tweet kontrol ediliyor... ({time.strftime('%Y-%m-%d %H:%M:%S')})")
             
-            tweet = get_latest_tweet()
+            # Tek API çağrısı ile tweet al ve retweet kontrolü yap
+            tweet_data = get_latest_tweet_with_retweet_check()
             
-            if not tweet:
-                print("[!] Tweet bulunamadı.")
+            if not tweet_data:
+                print("[!] Tweet bulunamadı veya API hatası.")
+            elif tweet_data.get("is_all_retweets"):
+                print("[!] En son tweet'ler retweet - 2 saat bekleniyor...")
+                # Retweet durumunda döngüye devam et (2 saat bekle)
             else:
-                tweet_id = tweet.get("tweet_id")
+                tweet_id = tweet_data.get("tweet_id")
                 if tweet_id in posted_tweet_ids:
-                    print("[!] Yeni tweet yok.")
+                    print("[!] Bu tweet zaten işlendi.")
                 else:
-                    print(f"[+] Yeni tweet bulundu: {tweet_id}")
+                    print(f"[+] Yeni normal tweet bulundu: {tweet_id}")
                     
                     # Tweet işleme
-                    text = tweet.get("text", "")
+                    text = tweet_data.get("text", "")
                     print(f"[+] Orijinal Tweet: {text[:100]}{'...' if len(text) > 100 else ''}")
                     
                     cleaned_text = clean_tweet_text(text)
@@ -877,9 +912,9 @@ def main_loop():
                     translated = translate_text(cleaned_text)
                     print(f"[+] Çeviri: {translated[:100]}{'...' if len(translated) > 100 else ''}")
                     
-                    # Medya işleme
-                    print("[+] Medya URL'leri alınıyor...")
-                    media_urls = get_media_urls_from_user_tweets(tweet_id)
+                    # Medya işleme - zaten çekilmiş veriden
+                    print("[+] Medya URL'leri çıkarılıyor...")
+                    media_urls = get_media_urls_from_tweet_data(tweet_data)
                     media_files = []
                     
                     for i, media_url in enumerate(media_urls):
@@ -922,7 +957,7 @@ def main_loop():
                     
                     # Post gönderme
                     print("[+] Reddit'e post gönderiliyor...")
-                    success = submit_post(translated, media_files, tweet_text)
+                    success = submit_post(translated, media_files, text)  # Orijinal tweet text'i kullan
                     
                     if success:
                         posted_tweet_ids.add(tweet_id)
@@ -945,8 +980,8 @@ def main_loop():
             traceback.print_exc()
         
         print(f"\n[+] Sonraki kontrol: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() + 7200))}")
-        print("⏳ 2 saat bekleniyor...")
-        time.sleep(7200)  # 2 saat
+        print("⏳ 1 saat 26 dakika bekleniyor...")
+        time.sleep(5184)  # 2 saat
 
 if __name__ == "__main__":
     try:
