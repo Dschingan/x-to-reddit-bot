@@ -980,10 +980,17 @@ def main_loop():
                 # Retweet durumunda döngüye devam et (2 saat bekle)
             else:
                 tweet_id = tweet_data.get("tweet_id")
-                if tweet_id in posted_tweet_ids:
-                    print("[!] Bu tweet zaten işlendi.")
+                if not tweet_id:
+                    print("[HATA] Tweet ID bulunamadı!")
+                elif tweet_id in posted_tweet_ids:
+                    print(f"[!] Bu tweet zaten işlendi: {tweet_id}")
                 else:
                     print(f"[+] Yeni normal tweet bulundu: {tweet_id}")
+                    
+                    # Tweet ID'sini hemen kaydet (işlem başlamadan önce)
+                    posted_tweet_ids.add(tweet_id)
+                    save_posted_tweet_id(tweet_id)
+                    print(f"[+] Tweet ID kaydedildi (işlem öncesi): {tweet_id}")
                     
                     # Tweet işleme
                     text = tweet_data.get("text", "")
@@ -1043,11 +1050,9 @@ def main_loop():
                     success = submit_post(translated, media_files, text)  # Orijinal tweet text'i kullan
                     
                     if success:
-                        posted_tweet_ids.add(tweet_id)
-                        save_posted_tweet_id(tweet_id)  # Dosyaya da kaydet
                         print(f"[+] Tweet başarıyla işlendi: {tweet_id}")
                     else:
-                        print(f"[HATA] Tweet işlenemedi: {tweet_id}")
+                        print(f"[UYARI] Tweet işlenemedi ama ID zaten kaydedildi: {tweet_id}")
                     
                     # Geçici dosyaları temizle
                     for fpath in media_files:
