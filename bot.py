@@ -68,6 +68,11 @@ except Exception as rw_setup_error:
     print(f"[UYARI] RedditWarp setup hatası: {rw_setup_error}")
     redditwarp_client = None
 
+def extract_tweet_id_from_url(url):
+    """t.co linkinden tweet ID'sini çıkar"""
+    match = re.search(r"/status/(\d+)", url)
+    return match.group(1) if match else None
+
 def clean_tweet_text(text):
     if not text:
         return ""
@@ -171,34 +176,86 @@ def get_media_urls_from_tweet_data(tweet_data):
         tweet_results = itemContent.get("tweet_results", {})
         result_tweet = tweet_results.get("result", {})
         legacy = result_tweet.get("legacy", {})
-        extended_entities = legacy.get("extended_entities", {})
-        media_list = extended_entities.get("media", [])
         
-        print(f"[+] {len(media_list)} medya bulundu")
+        # t.co link kontrolü - eğer tweet'te t.co linki varsa farklı endpoint kullan
+        tweet_text = legacy.get("full_text", "")
+        t_co_links = re.findall(r'https://t\.co/\w+', tweet_text)
         
-        for media in media_list:
-            media_type = media.get("type")
+        if t_co_links:
+            print(f"[+] t.co linki tespit edildi: {t_co_links[0]}")
+            print("[+] Alternatif endpoint kullanılıyor...")
             
-            if media_type == "photo":
-                media_url = media.get("media_url_https")
-                if media_url:
-                    print(f"[+] Fotoğraf URL'si: {media_url}")
-                    media_urls.append(media_url)
+            # twitter-api45.p.rapidapi.com endpoint'ini kullan
+            url = "https://twitter-api45.p.rapidapi.com/tweet.php"
+            headers = {
+                "x-rapidapi-key": RAPIDAPI_TWITTER_KEY,
+                "x-rapidapi-host": "twitter-api45.p.rapidapi.com"
+            }
+            querystring = {"id": tweet_id}
             
-            elif media_type in ["video", "animated_gif"]:
-                video_info = media.get("video_info", {})
-                variants = video_info.get("variants", [])
-                best_variant = None
-                max_bitrate = -1
-                for variant in variants:
-                    url = variant.get("url")
-                    bitrate = variant.get("bitrate", 0)
-                    if url and bitrate > max_bitrate:
-                        best_variant = url
-                        max_bitrate = bitrate
-                if best_variant:
-                    print(f"[+] Video URL'si: {best_variant}")
-                    media_urls.append(best_variant)
+            response = requests.get(url, headers=headers, params=querystring)
+            response.raise_for_status()
+            alt_data = response.json()
+            
+            # Alternatif endpoint'ten medya URL'lerini çıkar
+            extended_entities = alt_data.get("extended_entities", {})
+            media_list = extended_entities.get("media", [])
+            
+            print(f"[+] Alternatif endpoint'ten {len(media_list)} medya bulundu")
+            
+            for media in media_list:
+                media_type = media.get("type")
+                
+                if media_type == "photo":
+                    media_url = media.get("media_url_https")
+                    if media_url:
+                        print(f"[+] Fotoğraf URL'si (alt endpoint): {media_url}")
+                        media_urls.append(media_url)
+                
+                elif media_type in ["video", "animated_gif"]:
+                    video_info = media.get("video_info", {})
+                    variants = video_info.get("variants", [])
+                    best_variant = None
+                    max_bitrate = -1
+                    for variant in variants:
+                        url = variant.get("url")
+                        bitrate = variant.get("bitrate", 0)
+                        if url and bitrate > max_bitrate:
+                            best_variant = url
+                            max_bitrate = bitrate
+                    if best_variant:
+                        print(f"[+] Video URL'si (alt endpoint): {best_variant}")
+                        media_urls.append(best_variant)
+        else:
+            # Normal endpoint kullan (mevcut kod)
+            extended_entities = legacy.get("extended_entities", {})
+            media_list = extended_entities.get("media", [])
+            
+            print(f"[+] {len(media_list)} medya bulundu")
+            
+            for media in media_list:
+                media_type = media.get("type")
+                
+                if media_type == "photo":
+                    media_url = media.get("media_url_https")
+                    if media_url:
+                        print(f"[+] Fotoğraf URL'si: {media_url}")
+                        media_urls.append(media_url)
+                
+                elif media_type in ["video", "animated_gif"]:
+                    video_info = media.get("video_info", {})
+                    variants = video_info.get("variants", [])
+                    best_variant = None
+                    max_bitrate = -1
+                    for variant in variants:
+                        url = variant.get("url")
+                        bitrate = variant.get("bitrate", 0)
+                        if url and bitrate > max_bitrate:
+                            best_variant = url
+                            max_bitrate = bitrate
+                    if best_variant:
+                        print(f"[+] Video URL'si: {best_variant}")
+                        media_urls.append(best_variant)
     
     except Exception as e:
         print(f"[HATA] Media parse edilirken hata: {e}")
