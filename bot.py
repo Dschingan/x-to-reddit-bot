@@ -448,32 +448,32 @@ def convert_video_to_reddit_format(input_path, output_path):
         except Exception as probe_e:
             print(f"[UYARI] Video bilgisi alınamadı: {probe_e}")
         
-        # DAHA UYUMLU FFmpeg komutu - Reddit'in kabul edeceği format
+        # OPTIMIZE EDİLMİŞ FFmpeg komutu - 4K video ve bellek sorunları için
         cmd = [
             "ffmpeg",
             "-i", input_path,
             "-c:v", "libx264",
-            "-profile:v", "main",  # baseline yerine main (daha iyi uyumluluk)
-            "-level", "4.0",  # Daha yüksek level
-            "-preset", "medium",  # slow yerine medium (daha hızlı)
-            "-crf", "23",  # 20 yerine 23 (daha küçük dosya)
-            "-maxrate", "5M",  # 8M yerine 5M (daha güvenli)
-            "-bufsize", "10M",
-            "-g", "60",  # 30 yerine 60 (daha verimli)
-            "-keyint_min", "60",
+            "-profile:v", "baseline",  # En uyumlu profil
+            "-level", "3.1",  # Daha düşük level (daha az bellek)
+            "-preset", "fast",  # Hızlı işlem için
+            "-crf", "28",  # Daha yüksek CRF (küçük dosya)
+            "-maxrate", "2M",  # Düşük bitrate
+            "-bufsize", "4M",  # Küçük buffer
+            "-g", "30",
+            "-keyint_min", "30",
             "-sc_threshold", "0",
             "-c:a", "aac",
-            "-b:a", "128k",  # 96k yerine 128k (standart)
-            "-ar", "48000",  # 44100 yerine 48000 (standart)
+            "-b:a", "96k",  # Düşük audio bitrate
+            "-ar", "44100",
             "-ac", "2",
-            "-movflags", "+faststart",  # rtphint kaldırıldı
+            "-movflags", "+faststart",
             "-pix_fmt", "yuv420p",
-            "-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2,fps=30",  # Daha güvenli scaling
-            "-r", "30",
+            "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=ceil(iw/2)*2:ceil(ih/2)*2,fps=24",  # 720p max, 24fps
+            "-r", "24",  # Düşük framerate
             "-avoid_negative_ts", "make_zero",
-            "-fflags", "+genpts",  # igndts kaldırıldı
+            "-fflags", "+genpts",
             "-map_metadata", "-1",
-            "-threads", "4",  # CPU kullanımını sınırla
+            "-threads", "2",  # Daha az thread
             "-y",
             output_path
         ]
