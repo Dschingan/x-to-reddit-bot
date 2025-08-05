@@ -28,7 +28,7 @@ REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
 REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
 REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
-REDDIT_USER_AGENT = "python:auto-gaming-news-sharing-bot:v3.1.1 (by /u/BF6HBR)"
+REDDIT_USER_AGENT = "python:bf6-gaming-news-bot:v1.1.0 (by /u/BFHaber_Bot)"
 
 RAPIDAPI_TWITTER_KEY = os.getenv("RAPIDAPI_KEY")
 RAPIDAPI_TRANSLATE_KEY = os.getenv("RAPIDAPI_KEY")
