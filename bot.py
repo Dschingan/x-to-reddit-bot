@@ -102,56 +102,58 @@ def get_latest_tweets_with_retweet_check(count=3):
         timeline = result.get("timeline", {})
         instructions = timeline.get("instructions", [])
         
+        # API yapısına uygun şekilde instructions kontrolü
+        if len(instructions) < 2:
+            print("[HATA] instructions listesi yetersiz (en az 2 eleman gerekli).")
+            return None
+            
+        entries = instructions[1].get("entries", [])
+        if not entries:
+            print("[HATA] entries bulunamadı.")
+            return None
+        
         tweets = []
         
-        for instruction in instructions:
-            if instruction.get("type") == "TimelineAddEntries":
-                entries = instruction.get("entries", [])
+        # En son tweet'leri bul (retweet olmayan)
+        for entry in entries:
+            entry_id = entry.get("entryId", "")
+            if not entry_id.startswith("tweet-"):
+                continue
                 
-                for entry in entries:
-                    entry_id = entry.get("entryId", "")
-                    if not entry_id.startswith("tweet-"):
-                        continue
-                    
-                    # Tweet ID'sini çıkar
-                    tweet_id = entry_id.replace("tweet-", "")
-                    
-                    # Tweet içeriğini al
-                    content = entry.get("content", {})
-                    itemContent = content.get("itemContent", {})
-                    tweet_results = itemContent.get("tweet_results", {})
-                    result_tweet = tweet_results.get("result", {})
-                    
-                    # Retweet kontrolü
-                    legacy = result_tweet.get("legacy", {})
-                    full_text = legacy.get("full_text", "")
-                    
-                    # Retweet'leri atla
-                    if full_text.startswith("RT @"):
-                        print(f"[!] Retweet atlandı: {tweet_id}")
-                        continue
-                    
-                    # Retweeted_status kontrolü (başka retweet türleri için)
-                    if "retweeted_status_result" in result_tweet:
-                        print(f"[!] Retweet (retweeted_status) atlandı: {tweet_id}")
-                        continue
-                    
-                    tweet_text = clean_tweet_text(full_text)
-                    print(f"[+] Normal tweet bulundu: {tweet_id}")
-                    
-                    tweets.append({
-                        "tweet_id": tweet_id,
-                        "text": tweet_text,
-                        "data": data,  # Medya URL'leri için tüm data'yı sakla
-                        "entry": entry  # Entry'yi de sakla
-                    })
-                    
-                    # İstenen sayıda tweet bulunca dur
-                    if len(tweets) >= count:
-                        break
+            content = entry.get("content", {})
+            itemContent = content.get("itemContent", {})
+            tweet_results = itemContent.get("tweet_results", {})
+            result_tweet = tweet_results.get("result", {})
+            legacy = result_tweet.get("legacy", {})
+            
+            # Retweet kontrolü - retweeted_status_result varsa bu bir retweet
+            is_retweet = "retweeted_status_result" in legacy
+            
+            # Ek retweet kontrolü - text RT @ ile başlıyorsa
+            full_text = legacy.get("full_text", "")
+            if full_text.startswith("RT @"):
+                is_retweet = True
+            
+            if is_retweet:
+                print(f"[!] Retweet atlandı: {entry_id}")
+                continue
                 
-                if len(tweets) >= count:
-                    break
+            # Normal tweet bulundu
+            tweet_id = entry_id.replace("tweet-", "")
+            tweet_text = clean_tweet_text(full_text)
+            
+            print(f"[+] Normal tweet bulundu: {tweet_id}")
+            
+            tweets.append({
+                "tweet_id": tweet_id,
+                "text": tweet_text,
+                "data": data,  # Medya URL'leri için tüm data'yı sakla
+                "entry": entry  # Entry'yi de sakla
+            })
+            
+            # İstenen sayıda tweet bulunca dur
+            if len(tweets) >= count:
+                break
         
         if len(tweets) == 0:
             print("[!] Retweet olmayan tweet bulunamadı")
