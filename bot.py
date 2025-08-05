@@ -1023,6 +1023,7 @@ def main_loop():
                     
                     if tweet_id in posted_tweet_ids:
                         print(f"[!] Tweet {tweet_index}/3 zaten işlendi: {tweet_id}")
+                        continue  # Bu tweet'i atla ve sonrakine geç
                     else:
                         print(f"[+] Tweet {tweet_index}/3 işleniyor: {tweet_id}")
                         
