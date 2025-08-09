@@ -873,6 +873,89 @@ def submit_post(title, media_files, original_tweet_text=""):
             return False
     
     # Medya var
+    # Birden fazla resim varsa Reddit galerisi gönder (RedditWarp öncelikli)
+    image_exts = [".jpg", ".jpeg", ".png", ".gif"]
+    if all(os.path.splitext(p)[1].lower() in image_exts for p in media_files) and len(media_files) > 1:
+        print(f"[+] {len(media_files)} resim tespit edildi. Reddit galerisi oluşturuluyor (RedditWarp).")
+
+        # RedditWarp ile galeriyi dene, başarısız olursa PRAW fallback
+        def upload_gallery_via_redditwarp(title, image_paths, subreddit_name, flair_id=None):
+            if not redditwarp_client:
+                print("[UYARI] RedditWarp client yok, PRAW fallback denenecek")
+                return False
+            try:
+                print("[+] RedditWarp Gallery: media upload başlatılıyor...")
+                # Her resim için upload lease al
+                leases = []
+                for idx, img_path in enumerate(image_paths, 1):
+                    if not os.path.exists(img_path) or os.path.getsize(img_path) == 0:
+                        print(f"[HATA] Geçersiz resim dosyası: {img_path}")
+                        return False
+                    with open(img_path, 'rb') as f:
+                        lease = redditwarp_client.p.submission.media_uploading.upload(f)
+                        leases.append(lease)
+                        print(f"[+] ({idx}/{len(image_paths)}) Upload lease alındı: media_id={getattr(lease, 'media_id', 'N/A')}")
+
+                # Gallery items oluştur (dokümantasyona uygun)
+                # RedditWarp genelde strongly-typed GalleryItem bekler; pratikte dict kabul eder.
+                items = []
+                for i, lease in enumerate(leases):
+                    media_id = getattr(lease, 'media_id', None)
+                    if not media_id:
+                        print("[HATA] media_id alınamadı")
+                        return False
+                    items.append({
+                        "media_id": media_id,
+                        "caption": "",
+                        "outbound_url": ""
+                    })
+
+                # Galeri oluştur
+                print("[+] RedditWarp ile gallery submission oluşturuluyor...")
+                redditwarp_client.p.submission.create.gallery(
+                    sr=subreddit_name,
+                    title=title,
+                    items=items
+                )
+
+                # Başarılıysa id36 almak için last_value kullanılabilir
+                try:
+                    id36 = redditwarp_client.last_value['json']['data']['id'][3:]
+                    print(f"[+] Gallery oluşturuldu: https://reddit.com/r/{subreddit_name}/comments/{id36}")
+                except Exception:
+                    print("[UYARI] Gallery id alınamadı ancak işlem başarılı görünüyor")
+                
+                return True
+            except Exception as e:
+                print(f"[HATA] RedditWarp gallery hatası: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+
+        rw_ok = upload_gallery_via_redditwarp(title, media_files, SUBREDDIT, selected_flair_id)
+        if rw_ok:
+            return True
+
+        # PRAW fallback: submit_gallery
+        try:
+            print("[+] PRAW fallback: gallery gönderiliyor...")
+            images = [{"image_path": p, "caption": ""} for p in media_files]
+            submission = subreddit.submit_gallery(title=title, images=images, flair_id=selected_flair_id)
+            print(f"[+] Gallery gönderildi: {submission.url}")
+            return True
+        except Exception as praw_g_e:
+            print(f"[HATA] PRAW gallery hatası: {praw_g_e}")
+            # Son çare text post
+            try:
+                print("[!] Son çare: Gallery yerine text post gönderiliyor...")
+                submission = subreddit.submit(title=title + " [Görseller yüklenemedi]", selftext="", flair_id=selected_flair_id)
+                print(f"[+] Text post gönderildi: {submission.url}")
+                return True
+            except Exception as text_e:
+                print(f"[HATA] Text post bile gönderilemedi: {text_e}")
+                return False
+
+    # Tek bir medya dosyası işleme mantığı (önceki davranış korunur)
     media_path = media_files[0]
     
     if not os.path.exists(media_path):
