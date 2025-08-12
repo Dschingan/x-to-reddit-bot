@@ -316,15 +316,15 @@ def select_flair_with_ai(title, original_tweet_text=""):
     selected_flair_id = FLAIR_OPTIONS[selected_flair]
     print(f"[+] Kural tabanlı flair seçimi: {selected_flair} (ID: {selected_flair_id})")
     
-    # Gemini API'yi dene (opsiyonel)
+    # OpenAI API'yi dene (opsiyonel)
     try:
         # API key kontrolü
-        gemini_api_key = os.getenv("GEMINI_API_KEY")
-        if not gemini_api_key or gemini_api_key == "YOUR_GEMINI_API_KEY_HERE":
-            print("[!] GEMINI_API_KEY bulunamadı, kural tabanlı seçim kullanılıyor")
+        ai_api_key = os.getenv("OPENAI_API_KEY")
+        if not ai_api_key:
+            print("[!] OPENAI_API_KEY bulunamadı, kural tabanlı seçim kullanılıyor")
             return selected_flair_id
         
-        # Gemini API için prompt hazırla
+        # OpenAI API için prompt hazırla
         content_to_analyze = f"Başlık: {title}"
         if original_tweet_text:
             content_to_analyze += f"\nOrijinal Tweet: {original_tweet_text}"
@@ -346,73 +346,63 @@ Mevcut flair seçenekleri:
 
 Sadece flair adını yaz (örnek: Haberler). Başka bir şey yazma."""
         
-        # Gemini API çağrısı
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        # OpenAI API çağrısı
+        url = "https://api.openai.com/v1/chat/completions"
         payload = {
-            "contents": [
+            "model": "gpt-4o-mini",  # Daha ekonomik model
+            "messages": [
                 {
-                    "parts": [
-                        {
-                            "text": prompt
-                        }
-                    ]
+                    "role": "user",
+                    "content": prompt
                 }
             ],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 50,
-                "topP": 0.8,
-                "topK": 10
-            }
+            "max_tokens": 50,
+            "temperature": 0.1
         }
         headers = {
-            "Content-Type": "application/json",
-            "X-goog-api-key": gemini_api_key
+            "Authorization": f"Bearer {ai_api_key}",
+            "Content-Type": "application/json"
         }
         
-        print("[+] Gemini API çağrısı yapılıyor...")
+        print("[+] OpenAI API çağrısı yapılıyor...")
         response = requests.post(url, json=payload, headers=headers, timeout=15)
         
         print(f"[DEBUG] API Response Status: {response.status_code}")
         
         if response.status_code != 200:
-            print(f"[!] Gemini API hatası (Status: {response.status_code}): {response.text}")
+            print(f"[!] OpenAI API hatası (Status: {response.status_code}): {response.text}")
             print(f"[+] Kural tabanlı seçim kullanılıyor: {selected_flair}")
             return selected_flair_id
         
         result = response.json()
-        print(f"[DEBUG] Gemini Response: {result}")
+        print(f"[DEBUG] OpenAI Response: {result}")
         
         # AI yanıtını al
-        if "candidates" in result and len(result["candidates"]) > 0:
-            if "content" in result["candidates"][0] and "parts" in result["candidates"][0]["content"]:
-                ai_suggestion = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                print(f"[+] Gemini flair önerisi: {ai_suggestion}")
-                
-                # Flair adını temizle ve kontrol et
-                ai_suggestion_clean = ai_suggestion.replace(".", "").replace(":", "").strip()
-                
-                # Flair seçeneklerinde ara
-                for flair_name, flair_id in FLAIR_OPTIONS.items():
-                    if flair_name.lower() in ai_suggestion_clean.lower() or ai_suggestion_clean.lower() in flair_name.lower():
-                        print(f"[+] Gemini seçilen flair: {flair_name} (ID: {flair_id})")
-                        return flair_id
-                
-                # Tam eşleşme bulunamazsa, kural tabanlı seçimi kullan
-                print(f"[!] Gemini önerisi eşleşmedi ({ai_suggestion_clean}), kural tabanlı seçim kullanılıyor: {selected_flair}")
-                return selected_flair_id
-            else:
-                print("[!] Gemini yanıtı formatı hatalı, kural tabanlı seçim kullanılıyor")
-                return selected_flair_id
+        if "choices" in result and len(result["choices"]) > 0:
+            ai_suggestion = result["choices"][0]["message"]["content"].strip()
+            print(f"[+] AI flair önerisi: {ai_suggestion}")
+            
+            # Flair adını temizle ve kontrol et
+            ai_suggestion_clean = ai_suggestion.replace(".", "").replace(":", "").strip()
+            
+            # Flair seçeneklerinde ara
+            for flair_name, flair_id in FLAIR_OPTIONS.items():
+                if flair_name.lower() in ai_suggestion_clean.lower() or ai_suggestion_clean.lower() in flair_name.lower():
+                    print(f"[+] AI seçilen flair: {flair_name} (ID: {flair_id})")
+                    return flair_id
+            
+            # Tam eşleşme bulunamazsa, kural tabanlı seçimi kullan
+            print(f"[!] AI önerisi eşleşmedi ({ai_suggestion_clean}), kural tabanlı seçim kullanılıyor: {selected_flair}")
+            return selected_flair_id
         else:
-            print("[!] Gemini yanıtı alınamadı, kural tabanlı seçim kullanılıyor")
+            print("[!] AI yanıtı alınamadı, kural tabanlı seçim kullanılıyor")
             return selected_flair_id
             
     except requests.exceptions.Timeout:
-        print("[!] Gemini API timeout, kural tabanlı seçim kullanılıyor")
+        print("[!] AI API timeout, kural tabanlı seçim kullanılıyor")
         return selected_flair_id
     except requests.exceptions.RequestException as req_e:
-        print(f"[!] Gemini API çağrısı başarısız: {req_e}")
+        print(f"[!] AI API çağrısı başarısız: {req_e}")
         print(f"[+] Kural tabanlı seçim kullanılıyor: {selected_flair}")
         return selected_flair_id
     except Exception as e:
