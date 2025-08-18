@@ -1097,7 +1097,7 @@ def upload_video_via_redditwarp(title, media_path, subreddit_name):
         try:
             if thumb_lease:
                 # Thumbnail ile video post - doğru RedditWarp metodu ve parametreler
-                redditwarp_client.p.submission.create.video(
+                created = redditwarp_client.p.submission.create.video(
                     sr=subreddit_name,
                     title=title,
                     link=video_lease.location,
@@ -1106,7 +1106,7 @@ def upload_video_via_redditwarp(title, media_path, subreddit_name):
             else:
                 # Sadece video ile post (thumbnail olmadan)
                 # RedditWarp dokümantasyonuna göre thumbnail gerekli, bu durumda hata verebilir
-                redditwarp_client.p.submission.create.video(
+                created = redditwarp_client.p.submission.create.video(
                     sr=subreddit_name,
                     title=title,
                     link=video_lease.location,
@@ -1115,14 +1115,48 @@ def upload_video_via_redditwarp(title, media_path, subreddit_name):
             
             # If we reach here without exception, the submission was successful
             print("[+] RedditWarp video submission başarılı!")
-            print("[+] Video submission başarılı")
-            print("[+] URL: https://reddit.com/r/{}/comments/{}".format(subreddit_name, "id"))
+            
+            # Oluşan gönderinin ID'sini elde etmeyi dene
+            submission_id = None
+            try:
+                # Olası alan adları: id / id36 / post_id / submission_id / fullname (t3_xxxxx)
+                if isinstance(created, str):
+                    # Bazı sürümler fullname (t3_xxxxx) döndürebilir
+                    if created.startswith("t3_"):
+                        submission_id = created.split("t3_")[-1]
+                    else:
+                        submission_id = created
+                elif hasattr(created, "id"):
+                    submission_id = getattr(created, "id")
+                elif hasattr(created, "id36"):
+                    submission_id = getattr(created, "id36")
+                elif hasattr(created, "submission_id"):
+                    submission_id = getattr(created, "submission_id")
+                elif hasattr(created, "post_id"):
+                    submission_id = getattr(created, "post_id")
+                elif hasattr(created, "fullname"):
+                    fullname = getattr(created, "fullname")
+                    if isinstance(fullname, str) and fullname.startswith("t3_"):
+                        submission_id = fullname.split("t3_")[-1]
+                elif hasattr(created, "get"):
+                    # dict benzeri
+                    submission_id = created.get("id") or created.get("id36") or created.get("submission_id") or created.get("post_id")
+            except Exception as id_e:
+                print(f"[UYARI] RedditWarp dönen nesneden ID çıkarılamadı: {id_e}")
+
+            if submission_id:
+                print(f"[+] Oluşan gönderi ID: {submission_id}")
+                print(f"[+] URL: https://reddit.com/r/{subreddit_name}/comments/{submission_id}")
+            else:
+                print("[UYARI] RedditWarp oluşturulan gönderi ID'si alınamadı")
+                submission_id = ""
                 
             # Video processing bekle
             print("[+] Video processing için 30 saniye bekleniyor...")
             time.sleep(30)
             
-            return True
+            # Deterministik yorum için ID döndür
+            return submission_id or True
                 
         except Exception as submission_e:
             print(f"[HATA] Video submission hatası: {submission_e}")
@@ -1185,8 +1219,10 @@ def upload_video_via_reddit_api(title, media_path, subreddit_name, flair_id=None
     # Önce RedditWarp dene
     if redditwarp_client:
         print("[+] RedditWarp yöntemi deneniyor...")
-        if upload_video_via_redditwarp(title, media_path, subreddit_name):
-            return True
+        warp_result = upload_video_via_redditwarp(title, media_path, subreddit_name)
+        if warp_result:
+            # ID string dönebilir veya True olabilir
+            return warp_result
         else:
             print("[!] RedditWarp başarısız, PRAW fallback deneniyor...")
     
@@ -1229,7 +1265,8 @@ def upload_video_via_reddit_api(title, media_path, subreddit_name, flair_id=None
         if submission:
             print(f"[+] PRAW video yüklemesi başarılı - ID: {submission.id}")
             print(f"[+] URL: https://reddit.com/r/{subreddit_name}/comments/{submission.id}")
-            return True
+            # Başarılıysa Submission nesnesini döndür
+            return submission
         else:
             print("[HATA] PRAW submission oluşturulamadı")
             return False
@@ -1315,7 +1352,27 @@ def try_alternative_upload(title, media_path, subreddit):
         print(f"[HATA] Text post bile gönderilemedi: {text_e}")
         return False
 
-def submit_post(title, media_files, original_tweet_text=""):
+def smart_split_title(text: str, max_len: int = 300):
+    """Metni başlık ve kalan olarak akıllıca ayırır.
+    - max_len sınırını aşmayacak şekilde son boşlukta keser.
+    - Kesme olduysa başlığa "…" ekler ve kalan kısmı döndürür.
+    """
+    text = (text or "").strip()
+    if len(text) <= max_len:
+        return text, ""
+    # Son boşluğu bul (maks uzunluk içinde)
+    cutoff = text.rfind(" ", 0, max_len)
+    if cutoff == -1:
+        cutoff = max_len
+    title = text[:cutoff].rstrip()
+    remainder = text[cutoff:].lstrip()
+    # Başlığa ellipsis ekle
+    if title and not title.endswith("…"):
+        title = (title + " …")[:max_len]
+    return title, remainder
+
+
+def submit_post(title, media_files, original_tweet_text="", remainder_text: str = ""):
     """Geliştirilmiş post gönderme fonksiyonu - AI flair seçimi ile"""
     subreddit = reddit.subreddit(SUBREDDIT)
     
@@ -1339,7 +1396,7 @@ def submit_post(title, media_files, original_tweet_text=""):
         # Medya yoksa sadece text post
         try:
             print("[+] Medya yok, text post gönderiliyor.")
-            submission = subreddit.submit(title=title, selftext="", flair_id=selected_flair_id)
+            submission = subreddit.submit(title=title, selftext=(remainder_text or ""), flair_id=selected_flair_id)
             print(f"[+] Text post gönderildi: {submission.url}")
             return True
         except Exception as e:
@@ -1368,6 +1425,13 @@ def submit_post(title, media_files, original_tweet_text=""):
             print(f"[+] Resim gönderiliyor: {media_path}")
             submission = subreddit.submit_image(title=title, image_path=media_path, flair_id=selected_flair_id)
             print(f"[+] Resim başarıyla gönderildi: {submission.url}")
+            # Uzun metnin kalanı yorum olarak ekle
+            try:
+                if remainder_text:
+                    submission.reply(remainder_text)
+                    print("[+] Başlığın kalan kısmı yorum olarak eklendi")
+            except Exception as ce:
+                print(f"[UYARI] Kalan metin yorum olarak eklenemedi: {ce}")
             return True
             
         elif ext in [".mp4", ".mov", ".webm"]:
@@ -1379,15 +1443,41 @@ def submit_post(title, media_files, original_tweet_text=""):
             if file_size > max_video_size:
                 print(f"[HATA] Video çok büyük ({file_size} bytes). Limit: {max_video_size} bytes")
                 # Büyük video için text post gönder
-                submission = subreddit.submit(title=title + " [Video çok büyük - Twitter linkini kontrol edin]", selftext="", flair_id=selected_flair_id)
+                submission = subreddit.submit(title=title + " [Video çok büyük - Twitter linkini kontrol edin]", selftext=(remainder_text or ""), flair_id=selected_flair_id)
                 print(f"[+] Text post gönderildi: {submission.url}")
                 return True
             
             # Video upload denemesi
-            success = upload_video_via_reddit_api(title, media_path, SUBREDDIT, selected_flair_id)
+            result = upload_video_via_reddit_api(title, media_path, SUBREDDIT, selected_flair_id)
             
-            if success:
+            if result:
                 print("[+] Video başarıyla yüklendi!")
+                # Eğer Submission nesnesi geldiyse kalan metni yorum olarak ekle
+                try:
+                    if hasattr(result, "reply") and remainder_text:
+                        result.reply(remainder_text)
+                        print("[+] Başlığın kalan kısmı video gönderisine yorum olarak eklendi")
+                    elif isinstance(result, str) and remainder_text:
+                        # Deterministik: RedditWarp ID döndü
+                        try:
+                            praw_sub = reddit.submission(id=result)
+                            praw_sub.reply(remainder_text)
+                            print("[+] Başlığın kalan kısmı (ID ile) video gönderisine yorum olarak eklendi")
+                        except Exception as idc_e:
+                            print(f"[UYARI] ID ile yorum ekleme başarısız: {idc_e}")
+                    elif remainder_text:
+                        # RedditWarp yolu: Submission nesnesi yok. Son gönderiyi bulup yorum eklemeyi dene.
+                        try:
+                            for s in subreddit.new(limit=10):
+                                author_name = getattr(s.author, 'name', '') or ''
+                                if author_name.lower() == (REDDIT_USERNAME or '').lower() and s.title == title:
+                                    s.reply(remainder_text)
+                                    print("[+] Başlığın kalan kısmı (RedditWarp) video gönderisine yorum olarak eklendi")
+                                    break
+                        except Exception as se:
+                            print(f"[UYARI] RedditWarp sonrası yorum ekleme başarısız: {se}")
+                except Exception as ve:
+                    print(f"[UYARI] Video yorum ekleme başarısız: {ve}")
                 return True
             else:
                 print("[!] Video yüklenemedi, alternatif yöntemler deneniyor...")
@@ -1398,13 +1488,13 @@ def submit_post(title, media_files, original_tweet_text=""):
                 else:
                     # Son çare text post
                     print("[!] Tüm yöntemler başarısız, text post gönderiliyor...")
-                    submission = subreddit.submit(title=title + " [Video yüklenemedi - Twitter linkini kontrol edin]", selftext="", flair_id=selected_flair_id)
+                    submission = subreddit.submit(title=title + " [Video yüklenemedi - Twitter linkini kontrol edin]", selftext=(remainder_text or ""), flair_id=selected_flair_id)
                     print(f"[+] Alternatif text post gönderildi: {submission.url}")
                     return True
                 
         else:
             print(f"[!] Desteklenmeyen dosya türü: {ext}")
-            submission = subreddit.submit(title=title, selftext="", flair_id=selected_flair_id)
+            submission = subreddit.submit(title=title, selftext=(remainder_text or ""), flair_id=selected_flair_id)
             print(f"[+] Text post gönderildi: {submission.url}")
             return True
             
@@ -1414,7 +1504,7 @@ def submit_post(title, media_files, original_tweet_text=""):
         # Hata durumunda bile text post göndermeyi dene
         try:
             print("[!] Hata sonrası text post deneniyor...")
-            submission = subreddit.submit(title=title + " [Medya yüklenemedi]", selftext="", flair_id=selected_flair_id)
+            submission = subreddit.submit(title=title + " [Medya yüklenemedi]", selftext=(remainder_text or ""), flair_id=selected_flair_id)
             print(f"[+] Hata sonrası text post gönderildi: {submission.url}")
             return True
         except Exception as text_e:
@@ -1578,14 +1668,16 @@ def main_loop():
                         (cleaned_text or "").strip(),
                         (text or "").strip(),
                     ]
-                    title_to_use = next((c for c in candidates if c), "")
-                    if not title_to_use:
-                        title_to_use = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
-                    if len(title_to_use) > 300:
-                        title_to_use = title_to_use[:300]
+                    chosen_text = next((c for c in candidates if c), "")
+                    if not chosen_text:
+                        chosen_text = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
+                    # Uzun metni başlık + kalan olarak böl
+                    title_to_use, remainder_to_post = smart_split_title(chosen_text, 300)
                     print(f"[+] Kullanılacak başlık ({len(title_to_use)}): {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
+                    if remainder_to_post:
+                        print(f"[+] Başlığın kalan kısmı ({len(remainder_to_post)} karakter) gönderi açıklaması/yorum olarak eklenecek")
                     print("[+] Reddit'e post gönderiliyor...")
-                    success = submit_post(title_to_use, media_files, text)  # Orijinal tweet text'i yedek olarak gönder
+                    success = submit_post(title_to_use, media_files, text, remainder_text=remainder_to_post)  # Orijinal tweet text'i yedek olarak gönder
                     
                     if success:
                         print(f"[+] Tweet başarıyla işlendi: {tweet_id}")
