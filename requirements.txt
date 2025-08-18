@@ -8,7 +8,7 @@ python-dotenv>=1.0.0
 
 # Media handling (for downloading and processing)
 urllib3==1.26.18
-beautifulsoup4==4.11.1
+beautifulsoup4>=4.11.1
 lxml>=5.1.0
 
 # HTTP and authentication
