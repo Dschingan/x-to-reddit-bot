@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 import os
+import random
 import time
 import requests
 import praw
@@ -9,6 +10,9 @@ import json
 import sys
 import asyncio
 from pathlib import Path
+from bs4 import BeautifulSoup
+from base64 import b64decode
+from urllib.parse import unquote
 
 # RedditWarp imports
 import redditwarp.SYNC
@@ -29,12 +33,32 @@ REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
 REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
 REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
 REDDIT_USER_AGENT = "python:bf6-gaming-news-bot:v1.1.0 (by /u/BFHaber_Bot)"
+RAPIDAPI_TRANSLATE_KEY = os.getenv("RAPIDAPI_TRANSLATE_KEY")
 
-RAPIDAPI_TWITTER_KEY = os.getenv("RAPIDAPI_KEY")
-RAPIDAPI_TRANSLATE_KEY = os.getenv("RAPIDAPI_KEY")
-
+# Nitter configuration
+_DEFAULT_NITTER_INSTANCES = [
+    "https://twitt.re",             # Prefer first
+    "https://nitter.net",
+    "https://nitter.poast.org",
+    "https://nitter.privacydev.net",
+    "https://nitter.fdn.fr",
+    "https://nitter.esmailelbob.xyz",
+    "https://nitter.kavin.rocks",
+    "https://n.func.dev",
+    "https://nitter.moomoo.me",
+    "https://nitter.namazso.eu",
+    "https://nitter.1d4.us",
+]
+# Allow override via env: NITTER_INSTANCES=https://a,https://b
+_env_instances = os.getenv("NITTER_INSTANCES", "").strip()
+if _env_instances:
+    NITTER_INSTANCES = [u.strip() for u in _env_instances.split(",") if u.strip()]
+else:
+    NITTER_INSTANCES = _DEFAULT_NITTER_INSTANCES[:]
+CURRENT_NITTER_INDEX = 0
 TWITTER_SCREENNAME = "TheBFWire"
-TWITTER_REST_ID = "1939708158051500032"
+NITTER_REQUEST_DELAY = 5  # seconds between requests
+MAX_RETRIES = 3  # Maximum number of retries for failed requests
 
 # PRAW konfigürasyonunu Reddit API kurallarına uygun şekilde optimize et
 reddit = praw.Reddit(
@@ -81,166 +105,599 @@ def clean_tweet_text(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def get_latest_tweets_with_retweet_check(count=3):
-    """Tek API çağrısı ile en son 3 tweet'i al ve retweet kontrolü yap"""
-    url = "https://twitter241.p.rapidapi.com/user-tweets"
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_TWITTER_KEY,
-        "x-rapidapi-host": "twitter241.p.rapidapi.com"
-    }
-    params = {
-        "user": TWITTER_REST_ID,
-        "count": "10"  # Daha fazla tweet al ki 3 normal tweet bulabilelim
-    }
-    
+def get_latest_tweets_with_retweet_check(count=3, retry_count=0):
+    """Nitter üzerinden son tweet'leri al, retweet/pin'leri atla, medya URL'lerini çıkar.
+    Öncelik: nitter-scraper (twitt.re -> nitter.net), başarısız olursa mevcut RSS fallback.
+    """
+    global CURRENT_NITTER_INDEX
+
+    def _normalize_urls(seq):
+        urls = []
+        for v in (seq or []):
+            if isinstance(v, str):
+                urls.append(v)
+            elif isinstance(v, dict):
+                for k in ("url", "src", "href"):
+                    if k in v:
+                        urls.append(v[k])
+                        break
+        return urls
+
+    # 1) Pnytter ile dene (instance'ları tek tek dene, sırayı karıştır ama tercih edilenleri öncele)
     try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        data = response.json()
-        
-        result = data.get("result", {})
-        timeline = result.get("timeline", {})
-        instructions = timeline.get("instructions", [])
-        
-        # API yapısına uygun şekilde instructions kontrolü
-        if len(instructions) < 2:
-            print("[HATA] instructions listesi yetersiz (en az 2 eleman gerekli).")
-            return None
-            
-        entries = instructions[1].get("entries", [])
-        if not entries:
-            print("[HATA] entries bulunamadı.")
-            return None
-        
+        from pnytter import Pnytter
+        print("[+] Pnytter ile tweetler çekiliyor")
+        # Prefer first two, then randomize the rest
+        preferred = NITTER_INSTANCES[:2]
+        others = NITTER_INSTANCES[2:]
+        random.shuffle(others)
+        try_order = [*preferred, *others]
+
+        from datetime import datetime, timedelta
+        to_dt = datetime.utcnow()
+        from_dt = to_dt - timedelta(days=3)  # even smaller window to reduce search workload
+
         tweets = []
-        
-        # En son tweet'leri bul (retweet olmayan)
-        for entry in entries:
-            entry_id = entry.get("entryId", "")
-            if not entry_id.startswith("tweet-"):
+
+        def _is_reply_text(txt: str) -> bool:
+            t = (txt or "").strip()
+            # Yanıt tespiti: @ ile başlayan veya yaygın yanıt kalıpları
+            if not t:
+                return False
+            if t.startswith('@'):
+                return True
+            low = t.lower()
+            reply_markers = [
+                'replying to', 'in reply to', 'yanıt olarak', 'yanit olarak',
+                'cevap olarak', 'yanıtladı', 'cevapladı', 'replied to'
+            ]
+            return any(m in low for m in reply_markers)
+
+        def _is_quote_text(txt: str) -> bool:
+            low = (txt or '').lower()
+            quote_markers = ['quote tweet', 'quoted tweet', 'alıntı', 'alinti']
+            return any(m in low for m in quote_markers)
+        for inst in try_order:
+            try:
+                print(f"[+] Pnytter instance deneniyor: {inst}")
+                pny = Pnytter(nitter_instances=[inst])
+                # Try a couple of times per instance to bypass transient 429/403
+                per_inst_attempts = 0
+                pny_tweets = None
+                while per_inst_attempts < 2 and pny_tweets is None:
+                    per_inst_attempts += 1
+                    try:
+                        # Some versions require a range
+                        try:
+                            pny_tweets = pny.get_user_tweets_list(TWITTER_SCREENNAME)
+                        except TypeError:
+                            pny_tweets = pny.get_user_tweets_list(
+                                TWITTER_SCREENNAME,
+                                filter_from=from_dt.strftime('%Y-%m-%d'),
+                                filter_to=to_dt.strftime('%Y-%m-%d'),
+                            )
+                    except Exception as inner_e:
+                        msg = str(inner_e)
+                        if '429' in msg or 'Forbidden' in msg or '403' in msg:
+                            sleep_s = 3 + per_inst_attempts * 2 + random.uniform(0, 2)
+                            print(f"[UYARI] {inst} yanıtı: {msg} -> {int(sleep_s)} sn bekle ve yeniden dene")
+                            time.sleep(sleep_s)
+                        else:
+                            raise
+
+                slice_count = max(count * 3, 10)
+                for t in pny_tweets[:slice_count]:
+                    tid = str(getattr(t, 'tweet_id', '') or '')
+                    txt = getattr(t, 'text', '') or ''
+                    if not tid:
+                        continue
+                    # Pinned kontrolü (varsa atla)
+                    if getattr(t, 'is_pinned', False):
+                        print(f"[INFO] Pinned tweet atlandı: {tid}")
+                        continue
+                    # Retweet heuristics (Pnytter explicit flag yok)
+                    if txt.strip().startswith('RT @'):
+                        # Metinden retweet sinyali -> kesin atla
+                        print(f"[INFO] Retweet (RT @ ile başlıyor) atlandı: {tid}")
+                        continue
+                    # Retweet alan/flag kontrolleri -> herhangi biri varsa kesin atla
+                    try:
+                        is_retweet_flag = False
+                        for rattr in (
+                            'is_retweet', 'retweet', 'retweeted', 'retweeted_status_id',
+                            'retweeted_status', 'retweeted_by', 'rt', 'is_rt'
+                        ):
+                            rval = getattr(t, rattr, None)
+                            if isinstance(rval, bool) and rval:
+                                is_retweet_flag = True
+                                break
+                            if rval not in (None, '', 0, False):
+                                is_retweet_flag = True
+                                break
+                        if is_retweet_flag:
+                            print(f"[INFO] Retweet bayrakları tespit edildi, atlandı: {tid}")
+                            continue
+                    except Exception:
+                        pass
+                    # Pnytter nesnesinde yanıtla ilgili alanlar varsa kontrol et
+                    is_reply_flag = False
+                    for attr in (
+                        'is_reply', 'is_reply_to', 'reply_to',
+                        'in_reply_to_status_id', 'in_reply_to_user_id', 'in_reply_to_screen_name'
+                    ):
+                        val = getattr(t, attr, None)
+                        if isinstance(val, bool) and val:
+                            is_reply_flag = True
+                            break
+                        if val not in (None, '', 0, False):
+                            is_reply_flag = True
+                            break
+                    # YANIT/ALINTI TESPİTİ: KESİN ATLA
+                    # Metin '@' ile başlıyorsa doğrudan yanıt kabul et
+                    if txt.strip().startswith('@'):
+                        print(f"[INFO] Reply (metin '@' ile başlıyor) atlandı: {tid}")
+                        continue
+                    # Alan/flag kontrolleri + metin sezgileri -> herhangi biri varsa atla
+                    if is_reply_flag or _is_reply_text(txt) or _is_quote_text(txt):
+                        print(f"[INFO] Yanıt/alıntı olduğundan atlandı: {tid}")
+                        continue
+                    # Ek kural: Kısa ve bağlamsız (URL/hashtag yok) metinler genelde yanıttır
+                    raw_txt = txt or ''
+                    has_url = bool(re.search(r'https?://\S+', raw_txt))
+                    has_hashtag = bool(re.search(r'#\w+', raw_txt))
+                    has_punct = any(ch in raw_txt for ch in [':', '-', '—', '!', '?', '“', '”', '"', '\''])
+                    has_domain_terms = any(k in raw_txt for k in ['BF', 'Battlefield', 'battlefield', 'BF6'])
+                    short_len_threshold = 50
+                    if (len(raw_txt.strip()) < short_len_threshold) and not (has_url or has_hashtag or has_punct or has_domain_terms):
+                        print(f"[INFO] Kısa/bağlamsız tweet atlandı (muhtemel yanıt): {tid} -> '{raw_txt[:80]}'")
+                        continue
+                    # Nitter HTML'den medya URL'leri topla (çoklu instance dene)
+                    media_urls = _fetch_media_from_nitter_html_multi(TWITTER_SCREENNAME, tid, preferred=inst) or []
+                    tweets.append({
+                        'tweet_id': tid,
+                        'text': clean_tweet_text(txt),
+                        'media_urls': media_urls,
+                        'link': f"https://x.com/{TWITTER_SCREENNAME}/status/{tid}",
+                    })
+                    if len(tweets) >= count:
+                        break
+                if tweets:
+                    print(f"[+] Pnytter ile {len(tweets)} tweet bulundu ({inst})")
+                    return {"tweets": tweets}
+            except Exception as _per_inst_err:
+                print(f"[UYARI] Pnytter instance başarısız: {inst} -> {_per_inst_err}")
+                time.sleep(1)
+        print("[!] Pnytter ile uygun tweet bulunamadı, RSS fallback deneniyor")
+    except Exception as e:
+        print(f"[UYARI] Pnytter kullanımı başarısız veya mevcut değil: {e}. RSS fallback deneniyor")
+
+    # 2) RSS fallback (mevcut mantık, instance fallback ve retry ile)
+    nitter_instance = NITTER_INSTANCES[CURRENT_NITTER_INDEX]
+    url = f"{nitter_instance}/{TWITTER_SCREENNAME}/rss"
+    try:
+        print(f"[+] RSS ile çekiliyor: {nitter_instance}")
+        ua_pool = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36',
+        ]
+        headers = {
+            'User-Agent': random.choice(ua_pool),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(response.content)
+        items = root.findall('.//item') or root.findall('.//{http://www.w3.org/2005/Atom}item')
+
+        tweets = []
+        slice_count = max(count * 3, 10)
+        for item in items[:slice_count]:
+            title_elem = item.find('title') or item.find('{http://www.w3.org/2005/Atom}title')
+            link_elem = item.find('link') or item.find('{http://www.w3.org/2005/Atom}link')
+            desc_elem = item.find('description') or item.find('{http://www.w3.org/2005/Atom}description')
+            if not all([title_elem, link_elem]):
                 continue
-                
-            content = entry.get("content", {})
-            itemContent = content.get("itemContent", {})
-            tweet_results = itemContent.get("tweet_results", {})
-            result_tweet = tweet_results.get("result", {})
-            legacy = result_tweet.get("legacy", {})
-            
-            # Retweet kontrolü - retweeted_status_result varsa bu bir retweet
-            is_retweet = "retweeted_status_result" in legacy
-            
-            # Ek retweet kontrolü - text RT @ ile başlıyorsa
-            full_text = legacy.get("full_text", "")
-            if full_text.startswith("RT @"):
-                is_retweet = True
-            
-            if is_retweet:
-                print(f"[!] Retweet atlandı: {entry_id}")
+            title = (title_elem.text or '').strip()
+            link = link_elem.text
+            description = desc_elem.text if desc_elem is not None else ''
+            # Retweet heuristics
+            if title.startswith('RT @') or 'retweeted' in description.lower():
                 continue
-                
-            # Normal tweet bulundu
-            tweet_id = entry_id.replace("tweet-", "")
-            tweet_text = clean_tweet_text(full_text)
-            
-            print(f"[+] Normal tweet bulundu: {tweet_id}")
-            
+            # Reply/Quote heuristics: @ ile başlıyorsa ya da yaygın kalıpları içeriyorsa
+            desc_low = (description or '').lower()
+            if (
+                title.startswith('@') or desc_low.startswith('@') or
+                any(m in desc_low for m in ['replying to', 'in reply to', 'yanıt olarak', 'yanit olarak', 'cevap olarak', 'replied to']) or
+                any(m in desc_low for m in ['quote tweet', 'quoted tweet', 'alıntı', 'alinti'])
+            ):
+                print(f"[INFO] Yanıt/alıntı olduğundan atlandı (RSS)")
+                continue
+            # Ek kural: Kısa ve bağlamsız metinler genelde yanıttır
+            raw_text = description or ''
+            has_url = bool(re.search(r'https?://\S+', raw_text))
+            has_hashtag = bool(re.search(r'#\w+', raw_text))
+            has_punct = any(ch in raw_text for ch in [':', '-', '—', '!', '?', '“', '”', '"', '\''])
+            has_domain_terms = any(k in raw_text for k in ['BF', 'Battlefield', 'battlefield', 'BF6'])
+            short_len_threshold = 50
+            cleaned_len = len(clean_tweet_text(raw_text))
+            if (cleaned_len < short_len_threshold) and not (has_url or has_hashtag or has_punct or has_domain_terms):
+                print(f"[INFO] Kısa ve bağlamsız tweet atlandı (muhtemel yanıt, RSS)")
+                continue
+            tweet_id = link.split('/')[-1].split('#')[0]
+            tweet_text = clean_tweet_text(description)
+            # Nitter HTML'den medya URL'leri topla (öncelikli, çoklu instance dene)
+            media_urls = _fetch_media_from_nitter_html_multi(TWITTER_SCREENNAME, tweet_id, preferred=nitter_instance) or []
+            if not media_urls and 'pic.twitter.com' in description:
+                media_matches = re.findall(r'pic\.twitter\.com/[\w]+', description)
+                media_urls = [f"https://{m}" for m in media_matches]
             tweets.append({
-                "tweet_id": tweet_id,
-                "text": tweet_text,
-                "data": data,  # Medya URL'leri için tüm data'yı sakla
-                "entry": entry  # Entry'yi de sakla
+                'tweet_id': tweet_id,
+                'text': tweet_text,
+                'media_urls': media_urls,
+                'link': link,
             })
-            
-            # İstenen sayıda tweet bulunca dur
             if len(tweets) >= count:
                 break
-        
-        if len(tweets) == 0:
-            print("[!] Retweet olmayan tweet bulunamadı")
-            return {"is_all_retweets": True}  # Tüm tweet'ler retweet
-        
-        print(f"[+] {len(tweets)} normal tweet bulundu")
-        # Tweets'leri ters çevir ki en eski başta olsun (oldest to newest)
-        tweets.reverse()
         return {"tweets": tweets}
-        
+    except requests.exceptions.RequestException as e:
+        print(f"[HATA] RSS istek hatası ({nitter_instance}): {e}")
+        # 429 özel backoff
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        if status == 429:
+            jitter = random.uniform(0, 3)
+            backoff = min(300, (retry_count + 1) * NITTER_REQUEST_DELAY * 2 + jitter)
+            print(f"[!] 429 Too Many Requests - {int(backoff)} sn bekleniyor...")
+            time.sleep(backoff)
+        # Sonraki instance'a geç
+        if retry_count < MAX_RETRIES and (CURRENT_NITTER_INDEX + 1) < len(NITTER_INSTANCES):
+            CURRENT_NITTER_INDEX += 1
+            print(f"[!] Bir sonraki Nitter instance'ı deneniyor: {NITTER_INSTANCES[CURRENT_NITTER_INDEX]}")
+            time.sleep(NITTER_REQUEST_DELAY)
+            return get_latest_tweets_with_retweet_check(count, retry_count + 1)
+        # Son şans da başarısızsa boş liste dön (sürekli gürültü yapmamak için)
+        return {"tweets": []}
     except Exception as e:
-        print(f"[HATA] Tweet alınırken hata: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+        print(f"[HATA] RSS fallback beklenmeyen hata: {e}")
+        return {"tweets": []}
 
 def get_media_urls_from_tweet_data(tweet_data):
-    """Zaten çekilmiş tweet verisinden medya URL'lerini çıkar (paylaşılan videolar dahil)"""
-    media_urls = []
-    
-    if not tweet_data or "entry" not in tweet_data:
-        print("[HATA] Tweet verisi bulunamadı")
+    """Nitter'dan alınan tweet verisinden medya URL'lerini çıkar"""
+    if not tweet_data or "media_urls" not in tweet_data:
+        print("[HATA] Geçersiz tweet verisi veya medya URL'leri yok")
         return []
     
     try:
-        entry = tweet_data["entry"]
-        tweet_id = tweet_data["tweet_id"]
+        tweet_id = tweet_data.get("tweet_id", "")
+        media_urls = tweet_data.get("media_urls", [])
         
-        print(f"[+] Tweet medyası aranıyor: {tweet_id}")
+        print(f"[+] {len(media_urls)} medya URL'si bulundu: {media_urls}")
+        return media_urls
         
-        content = entry.get("content", {})
-        itemContent = content.get("itemContent", {})
-        tweet_results = itemContent.get("tweet_results", {})
-        result_tweet = tweet_results.get("result", {})
-        legacy = result_tweet.get("legacy", {})
-        extended_entities = legacy.get("extended_entities", {})
-        media_list = extended_entities.get("media", [])
-        
-        print(f"[+] {len(media_list)} medya bulundu")
-        
-        for media in media_list:
-            media_type = media.get("type")
-            
-            # Paylaşılan video kontrolü
-            source_status_id = media.get("source_status_id_str")
-            source_user_id = media.get("source_user_id_str")
-            
-            if source_status_id and source_user_id:
-                print(f"[+] Paylaşılan medya tespit edildi - Orijinal tweet: {source_status_id}, Orijinal kullanıcı: {source_user_id}")
-            
-            if media_type == "photo":
-                media_url = media.get("media_url_https")
-                if media_url:
-                    if source_status_id:
-                        print(f"[+] Paylaşılan fotoğraf URL'si: {media_url}")
-                    else:
-                        print(f"[+] Fotoğraf URL'si: {media_url}")
-                    media_urls.append(media_url)
-            
-            elif media_type in ["video", "animated_gif"]:
-                video_info = media.get("video_info", {})
-                variants = video_info.get("variants", [])
-                best_variant = None
-                max_bitrate = -1
-                for variant in variants:
-                    url = variant.get("url")
-                    bitrate = variant.get("bitrate", 0)
-                    if url and bitrate > max_bitrate:
-                        best_variant = url
-                        max_bitrate = bitrate
-                if best_variant:
-                    if source_status_id:
-                        print(f"[+] Paylaşılan video URL'si: {best_variant} (Orijinal: {source_status_id})")
-                    else:
-                        print(f"[+] Video URL'si: {best_variant}")
-                    media_urls.append(best_variant)
-    
     except Exception as e:
-        print(f"[HATA] Media parse edilirken hata: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[HATA] Medya URL'leri alınırken hata: {e}")
         return []
-    
-    print(f"[+] Toplam {len(media_urls)} medya URL'si bulundu")
-    return media_urls
+
+def _fetch_media_from_nitter_html(instance_base: str, screen_name: str, tweet_id: str):
+    """Nitter tekil tweet HTML'inden medya URL'leri çıkar (BS4 + enc/base64 desteği).
+    Resim (.jpg/.jpeg/.png/.webp) ve video (.mp4) döndürür. HLS (.m3u8) dışlanır.
+    """
+    try:
+        if not instance_base or not screen_name or not tweet_id:
+            return []
+
+        base = instance_base.rstrip('/')
+        url = f"{base}/{screen_name}/status/{tweet_id}"
+
+        # Session + header + cookie (hlsPlayback bazı instance'larda mp4 kaynağını açar)
+        s = requests.Session()
+        ua_pool = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
+        ]
+        s.headers.update({
+            'User-Agent': random.choice(ua_pool),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Host': base.split('://', 1)[1],
+        })
+
+        resp = s.get(url, cookies={'hlsPlayback': 'on'}, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, 'lxml')
+
+        # Encoded medya kullanılıyor mu?
+        def _instance_uses_enc() -> bool:
+            try:
+                avatar = soup.find('a', class_='profile-card-avatar')
+                img = avatar and avatar.find('img')
+                return bool(img and '/enc/' in (img.get('src') or ''))
+            except Exception:
+                return False
+
+        is_enc = _instance_uses_enc()
+
+        def _decode_enc_path(path: str) -> str:
+            try:
+                enc = path.split('/enc/', 1)[1].split('/', 1)[-1]
+                return b64decode(enc.encode('utf-8')).decode('utf-8')
+            except Exception:
+                return ''
+
+        def _norm_image_src(src: str) -> str:
+            if not src:
+                return ''
+            if is_enc and '/enc/' in src:
+                decoded = _decode_enc_path(src)
+                if decoded:
+                    # pbs path tam gelir (pbs.twimg.com/..)
+                    if decoded.startswith('http'):
+                        return decoded.split('?')[0]
+                    return ('https://' + decoded).split('?')[0]
+                return ''
+            # Normal instance: /pic/... -> pbs
+            if '/pic/' in src:
+                try:
+                    return ('https://pbs.twimg.com' + unquote(src.split('/pic', 1)[1])).split('?')[0]
+                except Exception:
+                    return ''
+            # Bazı durumlarda zaten https pbs olabilir
+            if src.startswith('http'):
+                return src.split('?')[0]
+            # Göreli ise instance ile birleştir
+            return (base + src).split('?')[0]
+
+        def _norm_video_src(video_tag) -> str:
+            if not video_tag:
+                return ''
+            # Öncelik data-url, sonra <source src>
+            if video_tag.has_attr('data-url'):
+                v = video_tag['data-url']
+                if is_enc and '/enc/' in v:
+                    v = _decode_enc_path(v)
+                if v:
+                    v = (('https://' + v) if not v.startswith('http') else v)
+                    v = v.split('?')[0]
+                    return v
+            src_el = video_tag.find('source')
+            v = src_el.get('src') if src_el else ''
+            if is_enc and v and '/enc/' in v:
+                v = _decode_enc_path(v)
+            if v:
+                v = (('https://' + v) if not v.startswith('http') else v)
+                v = v.split('?')[0]
+                return v
+            return ''
+
+        out = []
+
+        # Eğer bu sayfa bir 'retweet' veya 'reply' ise medyayı hiç toplama (sıkı politika)
+        try:
+            # Retweet tespiti: Nitter arayüzünde genelde 'retweet-header' veya 'Retweeted by' görülür
+            rt_header = soup.find(class_='retweet-header')
+            rt_text_hit = soup.find(string=lambda s: isinstance(s, str) and ('Retweeted by' in s or 'Retweetledi' in s))
+            if rt_header or rt_text_hit:
+                print(f"[INFO] Tekil sayfa retweet olarak tespit edildi, medya toplanmayacak: {url}")
+                return []
+            # Reply tespiti: "Replying to" ibaresi veya 'replying-to' sınıfı
+            reply_banner = soup.find(class_='replying-to')
+            reply_text_hit = soup.find(string=lambda s: isinstance(s, str) and ('Replying to' in s or 'Yanıt olarak' in s or 'Yanit olarak' in s))
+            if reply_banner or reply_text_hit:
+                print(f"[INFO] Tekil sayfa reply olarak tespit edildi, medya toplanmayacak: {url}")
+                return []
+        except Exception:
+            pass
+
+        # Ana tweet attachments
+        body = soup.find('div', class_='tweet-body')
+        attach = body.find('div', class_='attachments', recursive=False) if body else None
+        if attach:
+            # images
+            for img in attach.find_all('img'):
+                u = _norm_image_src(img.get('src'))
+                if u:
+                    out.append(u)
+            # videos (gif olmayan)
+            for vid in attach.find_all('video', class_=''):
+                u = _norm_video_src(vid)
+                if u:
+                    out.append(u)
+            # gifs
+            for gif in attach.find_all('video', class_='gif'):
+                src_el = gif.find('source')
+                u = _norm_image_src(src_el.get('src') if src_el else '')
+                if u:
+                    out.append(u)
+
+        # Alıntı (quote) içi medya DAHİL EDİLMEZ: sadece ana tweet'in medyası isteniyor
+        # quote = soup.find('div', class_='quote')
+        # if quote:
+        #     q_attach = quote.find('div', class_='attachments')
+        #     if q_attach:
+        #         for img in q_attach.find_all('img'):
+        #             u = _norm_image_src(img.get('src'))
+        #             if u:
+        #                 out.append(u)
+        #         for vid in q_attach.find_all('video', class_=''):
+        #             u = _norm_video_src(vid)
+        #             if u:
+        #                 out.append(u)
+        #         for gif in q_attach.find_all('video', class_='gif'):
+        #             src_el = gif.find('source')
+        #             u = _norm_image_src(src_el.get('src') if src_el else '')
+        #             if u:
+        #                 out.append(u)
+
+        # Filtre: yalnızca resim ve mp4, m3u8'i çıkar
+        def _acceptable(u: str) -> bool:
+            if not u:
+                return False
+            ul = u.lower()
+            if ul.endswith('.m3u8'):
+                return False
+            return any(ul.endswith(ext) for ext in ('.jpg', '.jpeg', '.png', '.webp', '.mp4')) or \
+                   ('pbs.twimg.com/media' in ul) or ('video.twimg.com' in ul)
+
+        # unique sırayı koru
+        seen = set()
+        unique = []
+        for u in out:
+            if _acceptable(u) and u not in seen:
+                seen.add(u)
+                unique.append(u)
+        return unique
+    except Exception as e:
+        print(f"[UYARI] Nitter HTML medya çıkarma hatası: {e}")
+        return []
+
+def _is_tweet_reply_or_retweet_html(instance_base: str, screen_name: str, tweet_id: str) -> bool:
+    """Tekil tweet HTML'inden reply/retweet olup olmadığını hızlıca tespit et.
+    Reply/retweet ise True döner, aksi halde False.
+    """
+    try:
+        if not instance_base or not screen_name or not tweet_id:
+            return False
+        base = instance_base.rstrip('/')
+        url = f"{base}/{screen_name}/status/{tweet_id}"
+        s = requests.Session()
+        s.headers.update({'User-Agent': 'Mozilla/5.0'})
+        r = s.get(url, timeout=15)
+        if r.status_code != 200:
+            return False
+        soup = BeautifulSoup(r.text, 'html.parser')
+        # Retweet sinyalleri
+        rt_header = soup.find(class_='retweet-header')
+        rt_text_hit = soup.find(string=lambda s: isinstance(s, str) and ('Retweeted by' in s or 'Retweetledi' in s))
+        if rt_header or rt_text_hit:
+            return True
+        # Reply sinyalleri
+        reply_banner = soup.find(class_='replying-to')
+        reply_text_hit = soup.find(string=lambda s: isinstance(s, str) and ('Replying to' in s or 'Yanıt olarak' in s or 'Yanit olarak' in s))
+        if reply_banner or reply_text_hit:
+            return True
+        return False
+    except Exception:
+        return False
+
+def _fetch_media_from_nitter_html_multi(screen_name: str, tweet_id: str, preferred: str = None):
+    """Birden fazla Nitter instance'ını deneyerek HTML'den medya URL'leri çıkarmayı dener."""
+    try_list = []
+    if preferred:
+        try_list.append(preferred)
+    # Kalanları ekle (tekrar olmasın)
+    for inst in NITTER_INSTANCES:
+        if inst not in try_list:
+            try_list.append(inst)
+
+    for inst in try_list:
+        try:
+            media = _fetch_media_from_nitter_html(inst, screen_name, tweet_id)
+            if media:
+                return media
+        except Exception as e:
+            # 4xx durumlarında sıradaki instance'a geç
+            msg = str(e)
+            if any(code in msg for code in ['403', '404', '418', '429']):
+                continue
+    # Hepsi başarısızsa: Önce tweet reply/retweet mi diye kontrol et, öyleyse fallback'i devre dışı bırak
+    try:
+        inspect_base = preferred or (try_list[0] if try_list else (NITTER_INSTANCES[0] if NITTER_INSTANCES else None))
+        if inspect_base and _is_tweet_reply_or_retweet_html(inspect_base, screen_name, tweet_id):
+            print(f"[INFO] Tweet reply/retweet olarak tespit edildi, gallery-dl fallback atlandı: {screen_name}/{tweet_id}")
+            return []
+    except Exception:
+        pass
+
+    # Reply/retweet değilse gallery-dl fallback dene
+    try:
+        urls = _fetch_media_with_gallery_dl(screen_name, tweet_id, preferred or (try_list[0] if try_list else None))
+        if urls:
+            return urls
+    except Exception as _gde:
+        print(f"[UYARI] gallery-dl fallback başarısız: {_gde}")
+    return []
+
+def _fetch_media_with_gallery_dl(screen_name: str, tweet_id: str, instance_base: str = None):
+    """gallery-dl aracılığıyla medya URL'lerini çıkar (indirMEdEN -g)."""
+    try:
+        # Önce Nitter URL, sonra x.com URL dene
+        urls_to_try = []
+        if instance_base:
+            base = instance_base.rstrip('/')
+            urls_to_try.append(f"{base}/{screen_name}/status/{tweet_id}")
+        urls_to_try.append(f"https://x.com/{screen_name}/status/{tweet_id}")
+
+        out_urls = []
+        for tu in urls_to_try:
+            try:
+                proc = subprocess.run(
+                    [sys.executable, '-m', 'gallery_dl', '-g', tu],
+                    capture_output=True, text=True, timeout=25
+                )
+                if proc.returncode == 0:
+                    raw_lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+                    # gallery-dl alternatif boyutları '|' prefiksi ile yazar; indirilebilir URL için temizle
+                    lines = []
+                    for ln in raw_lines:
+                        if ln.startswith('| '):
+                            lines.append(ln[2:].strip())
+                        elif ln.startswith('|'):
+                            lines.append(ln[1:].strip())
+                        else:
+                            lines.append(ln)
+                    # Filtre: m3u8 çıkar, jpg/png/webp/mp4 bırak
+                    acc = []
+                    for u in lines:
+                        ul = u.lower()
+                        if ul.endswith('.m3u8'):
+                            continue
+                        if (
+                            any(ul.endswith(ext) for ext in ('.jpg', '.jpeg', '.png', '.webp', '.mp4'))
+                            or 'pbs.twimg.com/media' in ul
+                            or 'video.twimg.com' in ul
+                        ):
+                            acc.append(u)
+                    # En kaliteli varyantı seç: aynı medyanın (soru işaretinden önceki kısım) ilk görülenini koru (genelde 'orig' ilk gelir)
+                    best_only = []
+                    seen_base = set()
+                    for u in acc:
+                        base_no_q = u.split('?', 1)[0]
+                        if base_no_q in seen_base:
+                            continue
+                        seen_base.add(base_no_q)
+                        best_only.append(u)
+                    if best_only:
+                        out_urls.extend(best_only)
+                        break  # İlk başarılı kaynaktan çık
+            except Exception as _inner:
+                print(f"[UYARI] gallery-dl denemesi başarısız: {tu} -> {_inner}")
+                continue
+        # benzersiz sırayı koru
+        seen = set()
+        uniq = []
+        for u in out_urls:
+            if u not in seen:
+                seen.add(u)
+                uniq.append(u)
+        return uniq
+    except Exception as e:
+        print(f"[UYARI] gallery-dl fallback genel hata: {e}")
+        return []
 
 def translate_text(text):
+    # Boş metin veya API anahtarı yoksa çevirmeden geri döndür
+    if not text or not text.strip():
+        return ""
+    if not RAPIDAPI_TRANSLATE_KEY:
+        print("[!] RAPIDAPI_TRANSLATE_KEY bulunamadı, çeviri atlanıyor")
+        return text
+
     translate_url = "https://translateai.p.rapidapi.com/google/translate/json"
     payload = {
         "origin_language": "en",
@@ -259,15 +716,20 @@ def translate_text(text):
         "x-rapidapi-host": "translateai.p.rapidapi.com",
         "Content-Type": "application/json"
     }
-    resp = requests.post(translate_url, json=payload, headers=headers)
-    resp.raise_for_status()
-    data = resp.json()
     try:
-        translated = data['translated_json']['product']['productDesc']
-        return translated
+        resp = requests.post(translate_url, json=payload, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        translated = data.get('translated_json', {}).get('product', {}).get('productDesc')
+        if translated:
+            return translated
+        print("[UYARI] Çeviri boş döndü, orijinal metin kullanılacak")
+        return text
+    except requests.exceptions.RequestException as rexc:
+        print(f"[UYARI] Çeviri servisine ulaşılamadı: {rexc}")
+        return text
     except Exception as e:
         print("Çeviri alınamadı:", e)
-        print("Raw response:", data)
         return text
 
 # AI-powered flair selection system
@@ -1001,98 +1463,110 @@ def main_loop():
             print("\n" + "="*50)
             print(f"[+] Tweet kontrol ediliyor... ({time.strftime('%Y-%m-%d %H:%M:%S')})")
             
-            # Son 3 tweet'i al ve retweet kontrolü yap
-            tweets_data = get_latest_tweets_with_retweet_check(3)
+            # Son 5 tweet'i al ve retweet kontrolü yap
+            tweets_data = get_latest_tweets_with_retweet_check(5)
             
-            if not tweets_data:
+            if "error" in tweets_data:
+                print(f"[!] Hata oluştu: {tweets_data['error']}")
+                print(f"[!] {NITTER_REQUEST_DELAY} saniye sonra tekrar denenecek...")
+                time.sleep(NITTER_REQUEST_DELAY)
+                continue
+            elif not tweets_data:
                 print("[!] Tweet bulunamadı veya API hatası.")
-            elif tweets_data.get("is_all_retweets"):
-                print("[!] En son tweet'ler retweet - 1 saat 26 dakika bekleniyor...")
-                # Retweet durumunda döngüye devam et
-            else:
-                tweets = tweets_data.get("tweets", [])
-                print(f"[+] {len(tweets)} tweet bulundu, eskiden yeniye doğru işlenecek...")
+                time.sleep(NITTER_REQUEST_DELAY)
+                continue
+            # Tüm öğeler retweet ise artık uzun bekleme yok, kısa bekleme ile devam
                 
-                # Her tweet'i eskiden yeniye doğru işle
-                for tweet_index, tweet_data in enumerate(tweets, 1):
-                    tweet_id = tweet_data.get("tweet_id")
+            tweets = tweets_data.get("tweets", [])
+            if not tweets:
+                print("[!] İşlenecek tweet bulunamadı.")
+                time.sleep(NITTER_REQUEST_DELAY)
+                continue
+            
+            # Eskiden yeniye işle
+            tweets = list(reversed(tweets))
+            print(f"[+] {len(tweets)} tweet bulundu, eskiden yeniye doğru işlenecek...")
+            
+            # Her tweet'i eskiden yeniye doğru işle
+            for tweet_index, tweet_data in enumerate(tweets, 1):
+                tweet_id = tweet_data.get("tweet_id")
+                
+                if not tweet_id:
+                    print(f"[HATA] Tweet {tweet_index}/3 - Tweet ID bulunamadı!")
+                    continue
+                
+                if tweet_id in posted_tweet_ids:
+                    print(f"[!] Tweet {tweet_index}/3 zaten işlendi: {tweet_id}")
+                    continue  # Bu tweet'i atla ve sonrakine geç
+                else:
+                    print(f"[+] Tweet {tweet_index}/3 işleniyor: {tweet_id}")
                     
-                    if not tweet_id:
-                        print(f"[HATA] Tweet {tweet_index}/3 - Tweet ID bulunamadı!")
-                        continue
+                    # Tweet ID'sini hemen kaydet (işlem başlamadan önce)
+                    posted_tweet_ids.add(tweet_id)
+                    save_posted_tweet_id(tweet_id)
+                    print(f"[+] Tweet ID kaydedildi (işlem öncesi): {tweet_id}")
                     
-                    if tweet_id in posted_tweet_ids:
-                        print(f"[!] Tweet {tweet_index}/3 zaten işlendi: {tweet_id}")
-                        continue  # Bu tweet'i atla ve sonrakine geç
-                    else:
-                        print(f"[+] Tweet {tweet_index}/3 işleniyor: {tweet_id}")
-                        
-                        # Tweet ID'sini hemen kaydet (işlem başlamadan önce)
-                        posted_tweet_ids.add(tweet_id)
-                        save_posted_tweet_id(tweet_id)
-                        print(f"[+] Tweet ID kaydedildi (işlem öncesi): {tweet_id}")
-                        
-                        # Tweet işleme
-                        text = tweet_data.get("text", "")
-                        print(f"[+] Orijinal Tweet: {text[:100]}{'...' if len(text) > 100 else ''}")
-                        
-                        cleaned_text = clean_tweet_text(text)
-                        print(f"[+] Temizlenmiş Tweet: {cleaned_text[:100]}{'...' if len(cleaned_text) > 100 else ''}")
-                        
-                        translated = translate_text(cleaned_text)
-                        print(f"[+] Çeviri: {translated[:100]}{'...' if len(translated) > 100 else ''}")
-                        
-                        # Medya işleme - zaten çekilmiş veriden
-                        print("[+] Medya URL'leri çıkarılıyor...")
-                        media_urls = get_media_urls_from_tweet_data(tweet_data)
-                        media_files = []
-                        
-                        for i, media_url in enumerate(media_urls):
-                            try:
-                                ext = os.path.splitext(media_url)[1].split("?")[0]
-                                if not ext:
-                                    ext = ".jpg"  # Default extension
-                                filename = f"temp_media_{tweet_id}_{i}{ext}"
-                                
-                                print(f"[+] Medya indiriliyor ({i+1}/{len(media_urls)}): {media_url[:50]}...")
-                                path = download_media(media_url, filename)
-                                
-                                if path:
-                                    if ext.lower() == ".mp4":
-                                        # Video dönüştürme
-                                        converted = f"converted_{filename}"
-                                        print(f"[+] Video dönüştürülüyor: {path} -> {converted}")
-                                        converted_path = convert_video_to_reddit_format(path, converted)
-                                        
-                                        if converted_path:
-                                            media_files.append(converted_path)
-                                            print(f"[+] Video dönüştürme başarılı: {converted_path}")
-                                        else:
-                                            print("[!] Video dönüştürme başarısız")
-                                        
-                                        # Orijinal dosyayı sil
-                                        if os.path.exists(path):
-                                            os.remove(path)
-                                    else:
-                                        # Resim dosyası
-                                        media_files.append(path)
-                                        print(f"[+] Medya hazır: {path}")
-                                else:
-                                    print(f"[!] Medya indirilemedi: {media_url}")
+                    # Tweet işleme
+                    text = tweet_data.get("text", "")
+                    print(f"[+] Orijinal Tweet: {text[:100]}{'...' if len(text) > 100 else ''}")
+                    
+                    cleaned_text = clean_tweet_text(text)
+                    print(f"[+] Temizlenmiş Tweet: {cleaned_text[:100]}{'...' if len(cleaned_text) > 100 else ''}")
+                    
+                    translated = translate_text(cleaned_text)
+                    print(f"[+] Çeviri: {translated[:100]}{'...' if len(translated) > 100 else ''}")
+                    
+                    # Medya işleme - zaten çekilmiş veriden
+                    print("[+] Medya URL'leri çıkarılıyor...")
+                    media_urls = get_media_urls_from_tweet_data(tweet_data)
+                    media_files = []
+                    
+                    for i, media_url in enumerate(media_urls):
+                        try:
+                            ext = os.path.splitext(media_url)[1].split("?")[0]
+                            if not ext:
+                                ext = ".jpg"  # Default extension
+                            filename = f"temp_media_{tweet_id}_{i}{ext}"
+                            
+                            print(f"[+] Medya indiriliyor ({i+1}/{len(media_urls)}): {media_url[:50]}...")
+                            path = download_media(media_url, filename)
+                            
+                            if path:
+                                if ext.lower() == ".mp4":
+                                    # Video dönüştürme
+                                    converted = f"converted_{filename}"
+                                    print(f"[+] Video dönüştürülüyor: {path} -> {converted}")
+                                    converted_path = convert_video_to_reddit_format(path, converted)
                                     
-                            except Exception as media_e:
-                                print(f"[HATA] Medya işleme hatası: {media_e}")
+                                    if converted_path:
+                                        media_files.append(converted_path)
+                                        print(f"[+] Video dönüştürme başarılı: {converted_path}")
+                                    else:
+                                        print("[!] Video dönüştürme başarısız")
+                                    
+                                    # Orijinal dosyayı sil
+                                    if os.path.exists(path):
+                                        os.remove(path)
+                                else:
+                                    # Resim dosyası
+                                    media_files.append(path)
+                                    print(f"[+] Medya hazır: {path}")
+                            else:
+                                print(f"[!] Medya indirilemedi: {media_url}")
+                                
+                        except Exception as media_e:
+                            print(f"[HATA] Medya işleme hatası: {media_e}")
                         
-                        print(f"[+] Toplam {len(media_files)} medya dosyası hazır")
-                        
-                        # Post gönderme
-                        print("[+] Reddit'e post gönderiliyor...")
-                        success = submit_post(translated, media_files, text)  # Orijinal tweet text'i kullan
-                        
-                        if success:
-                            print(f"[+] Tweet başarıyla işlendi: {tweet_id}")
-                        else:
-                            print(f"[UYARI] Tweet işlenemedi ama ID zaten kaydedildi: {tweet_id}")
+                    print(f"[+] Toplam {len(media_files)} medya dosyası hazır")
+                    
+                    # Post gönderme
+                    print("[+] Reddit'e post gönderiliyor...")
+                    success = submit_post(translated, media_files, text)  # Orijinal tweet text'i kullan
+                    
+                    if success:
+                        print(f"[+] Tweet başarıyla işlendi: {tweet_id}")
+                    else:
+                        print(f"[UYARI] Tweet işlenemedi ama ID zaten kaydedildi: {tweet_id}")
                         
                         # Geçici dosyaları temizle
                         for fpath in media_files:
