@@ -1323,6 +1323,18 @@ def submit_post(title, media_files, original_tweet_text=""):
     selected_flair_id = select_flair_with_ai(title, original_tweet_text)
     print(f"[+] Seçilen flair ID: {selected_flair_id}")
     
+    # Başlık doğrulama ve yedekler (Reddit 'Post title is required' hatasını önlemek için)
+    raw_title = (title or "").strip()
+    if not raw_title:
+        # Yedek: orijinal tweet metni veya sabit başlık
+        fallback = (original_tweet_text or "").strip()
+        if fallback:
+            raw_title = fallback
+        else:
+            raw_title = "Twitter medyası"
+    # Reddit başlık limiti ~300 karakter
+    title = raw_title[:300]
+    
     if not media_files:
         # Medya yoksa sadece text post
         try:
@@ -1560,8 +1572,20 @@ def main_loop():
                     print(f"[+] Toplam {len(media_files)} medya dosyası hazır")
                     
                     # Post gönderme
+                    # Başlık oluşturma ve doğrulama (çeviri -> temizlenmiş -> orijinal -> varsayılan)
+                    candidates = [
+                        (translated or "").strip(),
+                        (cleaned_text or "").strip(),
+                        (text or "").strip(),
+                    ]
+                    title_to_use = next((c for c in candidates if c), "")
+                    if not title_to_use:
+                        title_to_use = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
+                    if len(title_to_use) > 300:
+                        title_to_use = title_to_use[:300]
+                    print(f"[+] Kullanılacak başlık ({len(title_to_use)}): {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
                     print("[+] Reddit'e post gönderiliyor...")
-                    success = submit_post(translated, media_files, text)  # Orijinal tweet text'i kullan
+                    success = submit_post(title_to_use, media_files, text)  # Orijinal tweet text'i yedek olarak gönder
                     
                     if success:
                         print(f"[+] Tweet başarıyla işlendi: {tweet_id}")
