@@ -8,6 +8,8 @@ import re
 import sys
 import time
 import json
+import os
+import base64
 import random
 import hashlib
 import requests
@@ -27,6 +29,39 @@ except Exception:
     PNYTTER_AVAILABLE = False
 from google import genai
 from google.genai import types
+
+# Ensure accounts.db exists (for Railway/containers without shell)
+def _ensure_accounts_db():
+    try:
+        db_path = Path(os.environ.get("ACCOUNTS_DB_PATH", "accounts.db"))
+        if db_path.exists():
+            return
+        b64 = os.environ.get("ACCOUNTS_DB_B64")
+        if not b64:
+            # Nothing to do; twscrape will log "No active accounts" later if required
+            print("[INFO] ACCOUNTS_DB_B64 bulunamadı; accounts.db oluşturulmadı")
+            return
+        try:
+            data = base64.b64decode(b64)
+        except Exception:
+            # Handle potential newlines/spaces
+            data = base64.b64decode(b64.encode("ascii"))
+        db_path.write_bytes(data)
+        try:
+            # Best-effort chown in Linux containers; ignore on Windows
+            import pwd, grp  # type: ignore
+            import os as _os
+            uid = _os.getuid() if hasattr(_os, "getuid") else None
+            gid = _os.getgid() if hasattr(_os, "getgid") else None
+            if uid is not None and gid is not None:
+                _os.chown(str(db_path), uid, gid)
+        except Exception:
+            pass
+        print(f"[+] accounts.db oluşturuldu: {db_path}")
+    except Exception as e:
+        print(f"[UYARI] accounts.db oluşturulamadı: {e}")
+
+_ensure_accounts_db()
 
 # User-Agent rotation pool
 USER_AGENTS = [
