@@ -5,14 +5,20 @@ import time
 import requests
 import praw
 import re
-import subprocess
-import json
 import sys
-import asyncio
+import time
+import json
+import random
+import hashlib
+import requests
+import subprocess
 from pathlib import Path
+from urllib.parse import unquote
+from PIL import Image
+import io
+import asyncio
 from bs4 import BeautifulSoup
 from base64 import b64decode
-from urllib.parse import unquote
 
 # RedditWarp imports
 import redditwarp.SYNC
@@ -889,6 +895,59 @@ def download_media(media_url, filename):
         print(f"[HATA] Medya indirirken: {e}")
         return None
 
+def get_image_hash(image_path):
+    """Resim dosyasının hash'ini hesapla (duplicate detection için)"""
+    try:
+        with open(image_path, 'rb') as f:
+            image_data = f.read()
+            return hashlib.md5(image_data).hexdigest()
+    except Exception as e:
+        print(f"[HATA] Hash hesaplanırken: {e}")
+        return None
+
+def download_multiple_images(media_urls, tweet_id):
+    """Birden fazla resmi indir ve duplicate'leri filtrele"""
+    downloaded_images = []
+    image_hashes = set()
+    
+    print(f"[+] {len(media_urls)} medya URL'si işleniyor...")
+    
+    for i, media_url in enumerate(media_urls):
+        try:
+            # Sadece resim dosyalarını işle
+            if not any(ext in media_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
+                print(f"[!] Resim olmayan medya atlanıyor: {media_url}")
+                continue
+                
+            ext = os.path.splitext(media_url)[1].split("?")[0]
+            if not ext:
+                ext = ".jpg"  # Default extension
+            
+            filename = f"temp_image_{tweet_id}_{i}{ext}"
+            print(f"[+] Resim indiriliyor ({i+1}/{len(media_urls)}): {media_url[:50]}...")
+            
+            path = download_media(media_url, filename)
+            if path and os.path.exists(path):
+                # Hash kontrolü ile duplicate detection
+                image_hash = get_image_hash(path)
+                if image_hash and image_hash not in image_hashes:
+                    image_hashes.add(image_hash)
+                    downloaded_images.append(path)
+                    print(f"[+] Benzersiz resim eklendi: {path}")
+                else:
+                    print(f"[!] Duplicate resim atlandı: {path}")
+                    # Duplicate dosyayı sil
+                    if os.path.exists(path):
+                        os.remove(path)
+            else:
+                print(f"[!] Resim indirilemedi: {media_url}")
+                
+        except Exception as e:
+            print(f"[HATA] Resim işleme hatası ({media_url}): {e}")
+    
+    print(f"[+] Toplam {len(downloaded_images)} benzersiz resim indirildi")
+    return downloaded_images
+
 def convert_video_to_reddit_format(input_path, output_path):
     """Reddit için optimize edilmiş video dönüştürme"""
     try:
@@ -981,6 +1040,84 @@ def convert_video_to_reddit_format(input_path, output_path):
     except Exception as e:
         print(f"[HATA] Video dönüştürme hatası: {e}")
         return None
+
+def upload_gallery_via_redditwarp(title, image_paths, subreddit_name):
+    """RedditWarp ile birden fazla resmi gallery olarak yükle"""
+    if not redditwarp_client:
+        print("[HATA] RedditWarp client mevcut değil")
+        return False
+        
+    if not image_paths:
+        print("[HATA] Yüklenecek resim yok")
+        return False
+        
+    try:
+        print(f"[+] {len(image_paths)} resim için gallery oluşturuluyor...")
+        
+        # Her resim için upload lease al
+        image_leases = []
+        for i, image_path in enumerate(image_paths):
+            print(f"[+] Resim {i+1}/{len(image_paths)} yükleniyor: {os.path.basename(image_path)}")
+            
+            if not os.path.exists(image_path):
+                print(f"[HATA] Resim dosyası bulunamadı: {image_path}")
+                continue
+                
+            try:
+                with open(image_path, 'rb') as image_file:
+                    # RedditWarp ile resim upload
+                    image_lease = redditwarp_client.p.submission.media_uploading.upload(image_file)
+                    image_leases.append({
+                        'media_id': image_lease.media_id,
+                        'location': image_lease.location,
+                        'caption': f"Resim {i+1}"
+                    })
+                    print(f"[+] Resim lease alındı - Media ID: {image_lease.media_id}")
+                    
+            except Exception as upload_e:
+                print(f"[HATA] Resim yükleme hatası ({image_path}): {upload_e}")
+                continue
+        
+        if not image_leases:
+            print("[HATA] Hiçbir resim yüklenemedi")
+            return False
+            
+        print(f"[+] {len(image_leases)} resim başarıyla yüklendi, gallery oluşturuluyor...")
+        
+        # Gallery post oluştur
+        try:
+            # RedditWarp gallery creation
+            gallery_items = []
+            for lease in image_leases:
+                gallery_items.append({
+                    'media_id': lease['media_id'],
+                    'caption': lease['caption']
+                })
+            
+            created = redditwarp_client.p.submission.create.gallery(
+                sr=subreddit_name,
+                title=title,
+                items=gallery_items
+            )
+            
+            if created:
+                submission_id = getattr(created, 'id', str(created))
+                print(f"[+] Gallery başarıyla oluşturuldu - ID: {submission_id}")
+                print(f"[+] URL: https://reddit.com/r/{subreddit_name}/comments/{submission_id}")
+                return created
+            else:
+                print("[HATA] Gallery oluşturulamadı")
+                return False
+                
+        except Exception as gallery_e:
+            print(f"[HATA] Gallery oluşturma hatası: {gallery_e}")
+            return False
+            
+    except Exception as e:
+        print(f"[HATA] RedditWarp gallery yükleme genel hatası: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 def upload_video_via_redditwarp(title, media_path, subreddit_name):
     """RedditWarp dokümantasyonuna göre video yükleme - Media Upload Protocol"""
@@ -1376,6 +1513,38 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
     """Geliştirilmiş post gönderme fonksiyonu - AI flair seçimi ile"""
     subreddit = reddit.subreddit(SUBREDDIT)
     
+    # Medya dosyalarını türlerine göre ayır
+    image_files = []
+    video_files = []
+    
+    for media_file in media_files:
+        if media_file.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')):
+            image_files.append(media_file)
+        elif media_file.lower().endswith('.mp4'):
+            video_files.append(media_file)
+    
+    print(f"[+] Medya analizi: {len(image_files)} resim, {len(video_files)} video")
+    
+    # Önce resimleri gallery olarak yükle (eğer birden fazla resim varsa)
+    if len(image_files) > 1:
+        print(f"[+] {len(image_files)} resim gallery olarak yükleniyor...")
+        gallery_result = upload_gallery_via_redditwarp(title, image_files, SUBREDDIT)
+        if gallery_result:
+            print("[+] Gallery başarıyla yüklendi")
+            # Geçici resim dosyalarını temizle
+            for img_path in image_files:
+                try:
+                    if os.path.exists(img_path):
+                        os.remove(img_path)
+                        print(f"[+] Geçici resim silindi: {img_path}")
+                except Exception as cleanup_e:
+                    print(f"[UYARI] Resim silinirken hata: {cleanup_e}")
+            return True
+        else:
+            print("[!] Gallery yüklenemedi, tekil resim yükleme deneniyor...")
+    
+    # Tekil resim veya video yükleme (mevcut kod)
+    
     # AI ile flair seçimi
     selected_flair_id = select_flair_with_ai(title, original_tweet_text)
     print(f"[+] Seçilen flair ID: {selected_flair_id}")
@@ -1623,41 +1792,63 @@ def main_loop():
                     media_urls = get_media_urls_from_tweet_data(tweet_data)
                     media_files = []
                     
-                    for i, media_url in enumerate(media_urls):
+                    # Resimleri ve videoları ayır
+                    image_urls = []
+                    video_urls = []
+                    
+                    for media_url in media_urls:
+                        if any(ext in media_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
+                            image_urls.append(media_url)
+                        elif '.mp4' in media_url.lower():
+                            video_urls.append(media_url)
+                    
+                    print(f"[+] Medya analizi: {len(image_urls)} resim, {len(video_urls)} video")
+                    
+                    # Birden fazla resim varsa toplu indirme kullan
+                    if len(image_urls) > 1:
+                        print("[+] Birden fazla resim tespit edildi, toplu indirme başlatılıyor...")
+                        downloaded_images = download_multiple_images(image_urls, tweet_id)
+                        media_files.extend(downloaded_images)
+                    elif len(image_urls) == 1:
+                        # Tek resim için normal indirme
+                        media_url = image_urls[0]
+                        ext = os.path.splitext(media_url)[1].split("?")[0] or ".jpg"
+                        filename = f"temp_image_{tweet_id}_0{ext}"
+                        print(f"[+] Tek resim indiriliyor: {media_url[:50]}...")
+                        path = download_media(media_url, filename)
+                        if path:
+                            media_files.append(path)
+                            print(f"[+] Resim hazır: {path}")
+                    
+                    # Videoları işle (mevcut kod)
+                    for i, media_url in enumerate(video_urls):
                         try:
-                            ext = os.path.splitext(media_url)[1].split("?")[0]
-                            if not ext:
-                                ext = ".jpg"  # Default extension
-                            filename = f"temp_media_{tweet_id}_{i}{ext}"
+                            ext = ".mp4"
+                            filename = f"temp_video_{tweet_id}_{i}{ext}"
                             
-                            print(f"[+] Medya indiriliyor ({i+1}/{len(media_urls)}): {media_url[:50]}...")
+                            print(f"[+] Video indiriliyor ({i+1}/{len(video_urls)}): {media_url[:50]}...")
                             path = download_media(media_url, filename)
                             
                             if path:
-                                if ext.lower() == ".mp4":
-                                    # Video dönüştürme
-                                    converted = f"converted_{filename}"
-                                    print(f"[+] Video dönüştürülüyor: {path} -> {converted}")
-                                    converted_path = convert_video_to_reddit_format(path, converted)
-                                    
-                                    if converted_path:
-                                        media_files.append(converted_path)
-                                        print(f"[+] Video dönüştürme başarılı: {converted_path}")
-                                    else:
-                                        print("[!] Video dönüştürme başarısız")
-                                    
-                                    # Orijinal dosyayı sil
-                                    if os.path.exists(path):
-                                        os.remove(path)
+                                # Video dönüştürme
+                                converted = f"converted_{filename}"
+                                print(f"[+] Video dönüştürülüyor: {path} -> {converted}")
+                                converted_path = convert_video_to_reddit_format(path, converted)
+                                
+                                if converted_path:
+                                    media_files.append(converted_path)
+                                    print(f"[+] Video dönüştürme başarılı: {converted_path}")
                                 else:
-                                    # Resim dosyası
-                                    media_files.append(path)
-                                    print(f"[+] Medya hazır: {path}")
+                                    print("[!] Video dönüştürme başarısız")
+                                
+                                # Orijinal dosyayı sil
+                                if os.path.exists(path):
+                                    os.remove(path)
                             else:
-                                print(f"[!] Medya indirilemedi: {media_url}")
+                                print(f"[!] Video indirilemedi: {media_url}")
                                 
                         except Exception as media_e:
-                            print(f"[HATA] Medya işleme hatası: {media_e}")
+                            print(f"[HATA] Video işleme hatası: {media_e}")
                         
                     print(f"[+] Toplam {len(media_files)} medya dosyası hazır")
                     
