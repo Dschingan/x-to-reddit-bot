@@ -19,7 +19,12 @@ import io
 from bs4 import BeautifulSoup
 import asyncio
 from twscrape import API, gather
-from pnytter import Pnytter
+# Pnytter opsiyonel (pydantic çakışması nedeniyle requirements dışına alındı)
+try:
+    from pnytter import Pnytter
+    PNYTTER_AVAILABLE = True
+except Exception:
+    PNYTTER_AVAILABLE = False
 from google import genai
 from google.genai import types
 
@@ -384,7 +389,10 @@ def _fallback_pnytter_tweets(count=3, retry_count=0):
     print("[+] Pnytter fallback başlatılıyor...")
     
     try:
-        # Ana instance'ları ekle
+        # Ana instance'ları ekle (opsiyonel)
+        if not PNYTTER_AVAILABLE:
+            print("[INFO] Pnytter mevcut değil, fallback atlanıyor")
+            return []
         pnytter = Pnytter(nitter_instances=[NITTER_INSTANCES[0]])
         
         # Diğer instance'ları ekle (times parametresi ile güvenilirlik artır)
@@ -541,6 +549,8 @@ def _fallback_rss_tweets(count=3, retry_count=0):
             return any(m in low for m in quote_markers)
         for inst in try_order:
             try:
+                if not PNYTTER_AVAILABLE:
+                    raise RuntimeError("Pnytter mevcut değil")
                 print(f"[+] Pnytter instance deneniyor: {inst}")
                 pny = Pnytter(nitter_instances=[inst])
                 # Try a couple of times per instance to bypass transient 429/403
