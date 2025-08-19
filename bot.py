@@ -16,8 +16,47 @@ from pathlib import Path
 from urllib.parse import unquote
 from PIL import Image
 import io
-import asyncio
 from bs4 import BeautifulSoup
+import asyncio
+from twscrape import API, gather
+from pnytter import Pnytter
+from google import genai
+from google.genai import types
+
+# User-Agent rotation pool
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0'
+]
+
+# Session pool için global değişkenler
+SESSION_POOL = {}
+SESSION_LAST_USED = {}
+MAX_SESSION_AGE = 1800  # 30 dakika
+
+# Proxy ayarları
+PROXY_LIST = [
+    # Ücretsiz HTTP proxy'ler - çalışanları ekleyin
+    # {'http': 'http://proxy1:port', 'https': 'http://proxy1:port'},
+    # {'http': 'http://proxy2:port', 'https': 'http://proxy2:port'},
+]
+
+# Tor proxy (eğer kuruluysa)
+TOR_PROXY = {
+    'http': 'socks5://127.0.0.1:9050',
+    'https': 'socks5://127.0.0.1:9050'
+}
+
+CURRENT_PROXY_INDEX = 0
+USE_PROXY = os.getenv("USE_PROXY", "false").lower() == "true"
+USE_TOR = os.getenv("USE_TOR", "false").lower() == "true"
+
+# twscrape API instance
+twscrape_api = None
 from base64 import b64decode
 
 # RedditWarp imports
@@ -41,21 +80,15 @@ REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
 REDDIT_USER_AGENT = "python:bf6-gaming-news-bot:v1.1.0 (by /u/BFHaber_Bot)"
 RAPIDAPI_TRANSLATE_KEY = os.getenv("RAPIDAPI_TRANSLATE_KEY")
 
-# Nitter configuration - Updated with more reliable instances
+# Nitter configuration - Using twiiit.com for dynamic instance selection + working instances
 _DEFAULT_NITTER_INSTANCES = [
-    "https://xcancel.com",          # Primary - most reliable RSS
-    "https://twitt.re",             # Secondary - usually stable
-    "https://nitter.cz",            # Czech Republic - often reliable
-    "https://nitter.it",            # Italy - good uptime
-    "https://nitter.net",           # Original domain - sometimes works
-    "https://nitter.unixfox.eu",    # European instance - stable
-    "https://nitter.poast.org",     # Working as of 2025
-    "https://nitter.privacydev.net", # Working as of 2025
-    "https://nitter.fdn.fr",        # French instance
-    "https://nitter.kavin.rocks",   # Working as of 2025
-    "https://nitter.mint.lgbt",     # Alternative instance
-    "https://nitter.ktachibana.party", # Backup instance
-    "https://nitter.riverside.rocks", # Backup instance
+    "https://twiiit.com",           # Dynamic service that redirects to working instances
+    "https://xcancel.com",          # Backup - most reliable RSS
+    "https://nitter.privacydev.net", # Often working
+    "https://nitter.poast.org",     # Alternative instance
+    "https://nitter.it",            # Italian instance
+    "https://nitter.cz",            # Czech instance
+    "https://nitter.net",           # Original domain fallback
 ]
 
 # Circuit breaker for failing instances
@@ -70,8 +103,10 @@ else:
     NITTER_INSTANCES = _DEFAULT_NITTER_INSTANCES[:]
 CURRENT_NITTER_INDEX = 0
 TWITTER_SCREENNAME = "TheBFWire"
-NITTER_REQUEST_DELAY = 5  # seconds between requests
-MAX_RETRIES = 3  # Maximum number of retries for failed requests
+NITTER_REQUEST_DELAY = 15  # seconds between requests (artırıldı)
+MAX_RETRIES = 2  # Maximum number of retries for failed requests (azaltıldı)
+MIN_REQUEST_INTERVAL = 30  # Minimum seconds between any requests
+LAST_REQUEST_TIME = 0  # Son istek zamanı
 
 # PRAW konfigürasyonunu Reddit API kurallarına uygun şekilde optimize et
 reddit = praw.Reddit(
@@ -105,6 +140,91 @@ except Exception as rw_setup_error:
     print(f"[UYARI] RedditWarp setup hatası: {rw_setup_error}")
     redditwarp_client = None
 
+def get_random_user_agent():
+    """Rastgele User-Agent döndür"""
+    return random.choice(USER_AGENTS)
+
+def get_proxy():
+    """Aktif proxy ayarlarını döndür"""
+    global CURRENT_PROXY_INDEX
+    
+    if USE_TOR:
+        print("[+] Tor proxy kullanılıyor")
+        return TOR_PROXY
+    elif USE_PROXY and PROXY_LIST:
+        proxy = PROXY_LIST[CURRENT_PROXY_INDEX % len(PROXY_LIST)]
+        CURRENT_PROXY_INDEX += 1
+        print(f"[+] HTTP proxy kullanılıyor: {proxy}")
+        return proxy
+    else:
+        return None
+
+def test_proxy(proxy):
+    """Proxy'nin çalışıp çalışmadığını test et"""
+    try:
+        response = requests.get('http://httpbin.org/ip', proxies=proxy, timeout=10)
+        if response.status_code == 200:
+            ip_info = response.json()
+            print(f"[+] Proxy çalışıyor - IP: {ip_info.get('origin', 'Unknown')}")
+            return True
+    except Exception as e:
+        print(f"[UYARI] Proxy test başarısız: {e}")
+    return False
+
+def get_or_create_session(instance_url):
+    """Instance için session al veya yeni oluştur"""
+    global SESSION_POOL, SESSION_LAST_USED
+    
+    current_time = time.time()
+    
+    # Eski session'ları temizle
+    expired_keys = []
+    for key, last_used in SESSION_LAST_USED.items():
+        if current_time - last_used > MAX_SESSION_AGE:
+            expired_keys.append(key)
+    
+    for key in expired_keys:
+        if key in SESSION_POOL:
+            SESSION_POOL[key].close()
+            del SESSION_POOL[key]
+        del SESSION_LAST_USED[key]
+    
+    # Mevcut session'ı kullan veya yeni oluştur
+    if instance_url not in SESSION_POOL:
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': get_random_user_agent(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        })
+        
+        # Proxy ayarlarını ekle
+        proxy = get_proxy()
+        if proxy:
+            if test_proxy(proxy):
+                session.proxies.update(proxy)
+                print(f"[+] Session proxy ayarlandı: {instance_url}")
+            else:
+                print(f"[UYARI] Proxy başarısız, direkt bağlantı kullanılıyor")
+        
+        SESSION_POOL[instance_url] = session
+    
+    SESSION_LAST_USED[instance_url] = current_time
+    return SESSION_POOL[instance_url]
+
+def clean_text(text):
+    """Metni temizle ve kısalt"""
+    text = re.sub(r'http[s]?://\S+', '', text)
+    text = re.sub(r't\.co/\S+', '', text)
+    text = re.sub(r'#\w+', '', text)
+    text = text.replace('|', '')
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
 def clean_tweet_text(text):
     if not text:
         return ""
@@ -118,12 +238,261 @@ def clean_tweet_text(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def get_latest_tweets_with_retweet_check(count=3, retry_count=0):
-    """Nitter üzerinden son tweet'leri al, retweet/pin'leri atla, medya URL'lerini çıkar.
-    Öncelik: nitter-scraper (twitt.re -> nitter.net), başarısız olursa mevcut RSS fallback.
-    """
-    global CURRENT_NITTER_INDEX
+async def init_twscrape_api():
+    """twscrape API'yi başlat"""
+    global twscrape_api
+    if twscrape_api is None:
+        twscrape_api = API("accounts.db")
+        print("[+] twscrape API başlatıldı")
+    return twscrape_api
 
+def get_latest_tweets_with_retweet_check(count=3, retry_count=0):
+    """twscrape kullanarak son tweet'leri al, retweet/pin'leri atla, medya URL'lerini çıkar."""
+    global CURRENT_NITTER_INDEX, LAST_REQUEST_TIME
+    
+    # Rate limiting - son istekten beri yeterli zaman geçti mi?
+    current_time = time.time()
+    time_since_last_request = current_time - LAST_REQUEST_TIME
+    if time_since_last_request < MIN_REQUEST_INTERVAL:
+        wait_time = MIN_REQUEST_INTERVAL - time_since_last_request
+        print(f"[+] Rate limiting: {int(wait_time)} saniye bekleniyor...")
+        time.sleep(wait_time)
+    
+    LAST_REQUEST_TIME = time.time()
+    
+    # twscrape ile tweet'leri çek
+    try:
+        print("[+] twscrape ile tweet'ler çekiliyor...")
+        
+        # Async fonksiyonu çalıştır
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            tweets = loop.run_until_complete(get_latest_tweets_twscrape(count))
+        finally:
+            loop.close()
+        
+        if not tweets:
+            print("[UYARI] twscrape ile tweet bulunamadı, Pnytter fallback'e geçiliyor...")
+            return _fallback_pnytter_tweets(count, retry_count)
+        
+        print(f"[+] twscrape ile {len(tweets)} tweet bulundu")
+        return tweets
+        
+    except Exception as e:
+        print(f"[HATA] twscrape hatası: {e}")
+        print("[+] Pnytter fallback'e geçiliyor...")
+        return _fallback_pnytter_tweets(count, retry_count)
+
+async def get_latest_tweets_twscrape(count=3, retry_count=0):
+    """twscrape ile tweet'leri çek"""
+    try:
+        print("[+] twscrape ile tweet'ler çekiliyor...")
+        
+        # API'yi başlat
+        api = API("accounts.db")
+        print("[+] twscrape API başlatıldı")
+        
+        # Kullanıcı bilgilerini al
+        user = await api.user_by_login(TWITTER_SCREENNAME)
+        if not user:
+            print(f"[HATA] Kullanıcı bulunamadı: {TWITTER_SCREENNAME}")
+            return []
+        
+        # Tweet'leri çek (son gönderiler). Medya eksik çıkarsa tweet_details ile zenginleştir.
+        tweets_list = []
+        async for tweet in api.user_tweets(user.id, limit=count * 6):
+            tweets_list.append(tweet)
+        
+        print(f"[+] twscrape ile {len(tweets_list)} tweet bulundu")
+        
+        # Tweet'leri filtrele ve medya çıkar
+        filtered_tweets = []
+        for i, tweet in enumerate(tweets_list):
+            # Debug: tweet obje yapısını göster (sadece ilk tweet için)
+            if i == 0:
+                print(f"[DEBUG] twscrape Tweet type: {type(tweet)}")
+                print(f"[DEBUG] twscrape Tweet attributes: {[attr for attr in dir(tweet) if not attr.startswith('_')]}")
+                
+            if hasattr(tweet, 'rawContent') and tweet.rawContent:
+                if tweet.rawContent.startswith('RT @') or 'RT @' in tweet.rawContent:
+                    print(f"[SKIP] Retweet atlandı: {tweet.id}")
+                    continue
+            
+            # Medya URL'lerini çıkar (gerekirse detay çağrısı ile zenginleştir)
+            media_urls = []
+            t_media = getattr(tweet, 'media', None)
+            # Eğer media boşsa, tweet_details ile tekrar dene
+            if not t_media or (
+                len(getattr(t_media, 'photos', []) or []) == 0 and
+                len(getattr(t_media, 'videos', []) or []) == 0 and
+                len(getattr(t_media, 'animated', []) or []) == 0
+            ):
+                try:
+                    detailed = await api.tweet_details(tweet.id)
+                    if detailed and getattr(detailed, 'media', None):
+                        t_media = detailed.media
+                except Exception as _detail_err:
+                    print(f"[UYARI] tweet_details alınamadı {tweet.id}: {_detail_err}")
+
+            if t_media:
+                # Fotoğraflar
+                for photo in getattr(t_media, 'photos', []) or []:
+                    url = getattr(photo, 'url', None)
+                    if url:
+                        media_urls.append(url)
+                # Videolar
+                for video in getattr(t_media, 'videos', []) or []:
+                    variants = getattr(video, 'variants', []) or []
+                    if variants:
+                        # bitrate'e göre en iyi MP4 seç
+                        best = max(variants, key=lambda x: getattr(x, 'bitrate', 0))
+                        vurl = getattr(best, 'url', None)
+                        if vurl:
+                            media_urls.append(vurl)
+                # GIF (animated)
+                for gif in getattr(t_media, 'animated', []) or []:
+                    vurl = getattr(gif, 'videoUrl', None)
+                    if vurl:
+                        media_urls.append(vurl)
+
+            # Medyası olmayanları atla (istek: medya yoksa gerek yok)
+            if not media_urls:
+                continue
+
+            # Tweet objesini uygun formata çevir
+            tweet_data = {
+                'id': str(tweet.id),
+                'text': tweet.rawContent,
+                'created_at': tweet.date,
+                'media_urls': media_urls,
+                'url': tweet.url
+            }
+
+            filtered_tweets.append(tweet_data)
+            if len(filtered_tweets) >= count:
+                break
+        
+        return filtered_tweets
+        
+    except Exception as e:
+        print(f"[HATA] twscrape async hatası: {e}")
+        return []
+
+def _fallback_pnytter_tweets(count=3, retry_count=0):
+    """Pnytter fallback fonksiyonu - Twint başarısız olursa kullanılır"""
+    print("[+] Pnytter fallback başlatılıyor...")
+    
+    try:
+        # Ana instance'ları ekle
+        pnytter = Pnytter(nitter_instances=[NITTER_INSTANCES[0]])
+        
+        # Diğer instance'ları ekle (times parametresi ile güvenilirlik artır)
+        for instance in NITTER_INSTANCES[1:]:
+            pnytter.add_instance(instance, times=2)
+        
+        print(f"[+] Pnytter başlatıldı, {len(NITTER_INSTANCES)} instance kullanılıyor")
+        
+        # Tweet'leri çek (filter_from ve filter_to parametreleri ekle)
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        week_ago = today - timedelta(days=7)
+        tweets = pnytter.get_user_tweets_list(TWITTER_SCREENNAME, 
+                                            filter_from=week_ago.strftime("%Y-%m-%d"),
+                                            filter_to=today.strftime("%Y-%m-%d"))
+        
+        if not tweets:
+            print("[UYARI] Pnytter ile tweet bulunamadı, RSS fallback'e geçiliyor...")
+            return _fallback_rss_tweets(count, retry_count)
+        
+        print(f"[+] Pnytter ile {len(tweets)} tweet bulundu")
+        
+        # Tweet'leri filtrele ve medya URL'lerini çıkar
+        filtered_tweets = []
+        for i, tweet in enumerate(tweets[:count * 2]):  # Daha fazla tweet al, filtreleme için
+            # Debug: tweet obje yapısını göster (sadece ilk tweet için)
+            if i == 0:
+                print(f"[DEBUG] twscrape Tweet {i+1} type: {type(tweet)}")
+                print(f"[DEBUG] twscrape Tweet {i+1} attributes: {[attr for attr in dir(tweet) if not attr.startswith('_')]}")
+                if hasattr(tweet, '__dict__'):
+                    print(f"[DEBUG] twscrape Tweet {i+1} dict keys: {list(tweet.__dict__.keys())}")
+                elif isinstance(tweet, dict):
+                    print(f"[DEBUG] twscrape Tweet {i+1} dict keys: {list(tweet.keys())}")
+                    
+                # Test farklı ID alanları
+                id_fields = ['id', 'id_str', 'tweetId', 'tweet_id', 'restId', 'rest_id']
+                for field in id_fields:
+                    if hasattr(tweet, field):
+                        value = getattr(tweet, field)
+                        print(f"[DEBUG] Found {field}: {value}")
+                    elif isinstance(tweet, dict) and field in tweet:
+                        print(f"[DEBUG] Found {field}: {tweet[field]}")
+                    print(f"[DEBUG] twscrape Tweet {i+1} keys: {tweet.keys()}")
+                    print(f"[DEBUG] twscrape Tweet {i+1} sample: {list(tweet.items())[:5]}")
+            # Debug: tweet obje yapısını göster (sadece ilk tweet için)
+            if i == 0:
+                print(f"[DEBUG] Tweet {i+1} attributes: {dir(tweet)}")
+                print(f"[DEBUG] Tweet {i+1} type: {type(tweet)}")
+                if hasattr(tweet, '__dict__'):
+                    print(f"[DEBUG] Tweet {i+1} dict: {tweet.__dict__}")
+                elif isinstance(tweet, dict):
+                    print(f"[DEBUG] Tweet {i+1} keys: {tweet.keys()}")
+                    print(f"[DEBUG] Tweet {i+1} sample: {list(tweet.items())[:5]}")
+            # Retweet kontrolü
+            if hasattr(tweet, 'text') and tweet.text:
+                if tweet.text.startswith('RT @') or 'RT @' in tweet.text:
+                    print(f"[SKIP] Retweet atlandı: {tweet.tweet_id}")
+                    continue
+                
+                # Pin kontrolü
+                if 'pinned' in tweet.text.lower() or 'sabitlenmiş' in tweet.text.lower():
+                    print(f"[SKIP] Pin tweet atlandı: {tweet.tweet_id}")
+                    continue
+            
+            # Medya URL'lerini çıkar
+            media_urls = []
+            if hasattr(tweet, 'tweet_id'):
+                # Her instance'ı dene
+                for instance in NITTER_INSTANCES:
+                    try:
+                        instance_media = _fetch_media_from_nitter_html(instance, TWITTER_SCREENNAME, str(tweet.tweet_id))
+                        if instance_media:
+                            media_urls.extend(instance_media)
+                            break
+                    except Exception as e:
+                        print(f"[UYARI] {instance} medya çekme hatası: {e}")
+                        continue
+            
+            # Tweet objesini uygun formata çevir
+            tweet_data = {
+                'id': tweet.tweet_id if hasattr(tweet, 'tweet_id') else None,
+                'text': tweet.text if hasattr(tweet, 'text') else '',
+                'created_at': tweet.created_on if hasattr(tweet, 'created_on') else None,
+                'media_urls': media_urls,
+                'stats': {
+                    'retweet_count': tweet.stats.retweets if hasattr(tweet, 'stats') and hasattr(tweet.stats, 'retweets') else 0,
+                    'favorite_count': tweet.stats.likes if hasattr(tweet, 'stats') and hasattr(tweet.stats, 'likes') else 0,
+                    'reply_count': tweet.stats.comments if hasattr(tweet, 'stats') and hasattr(tweet.stats, 'comments') else 0,
+                }
+            }
+            
+            filtered_tweets.append(tweet_data)
+            
+            if len(filtered_tweets) >= count:
+                break
+        
+        print(f"[+] {len(filtered_tweets)} tweet filtrelendi ve hazırlandı")
+        return filtered_tweets
+        
+    except Exception as e:
+        print(f"[HATA] Pnytter hatası: {e}")
+        print("[+] RSS fallback'e geçiliyor...")
+        return _fallback_rss_tweets(count, retry_count)
+
+def _fallback_rss_tweets(count=3, retry_count=0):
+    """RSS fallback fonksiyonu - Pnytter başarısız olursa kullanılır"""
+    print("[+] RSS fallback başlatılıyor...")
+    
     def _normalize_urls(seq):
         urls = []
         for v in (seq or []):
@@ -199,12 +568,19 @@ def get_latest_tweets_with_retweet_check(count=3, retry_count=0):
                             pny_tweets = None
                     except Exception as inner_e:
                         msg = str(inner_e)
-                        if '429' in msg or 'Forbidden' in msg or '403' in msg:
-                            sleep_s = 3 + per_inst_attempts * 2 + random.uniform(0, 2)
-                            print(f"[UYARI] {inst} yanıtı: {msg} -> {int(sleep_s)} sn bekle ve yeniden dene")
+                        if '403' in msg and 'Forbidden' in msg:
+                            print(f"[UYARI] {inst} - 403 Forbidden (dosya izinleri sorunu), sonraki deneme...")
+                            sleep_s = 2 + per_inst_attempts + random.uniform(0, 1)
+                            time.sleep(sleep_s)
+                        elif '429' in msg:
+                            sleep_s = 5 + per_inst_attempts * 3 + random.uniform(0, 3)
+                            print(f"[UYARI] {inst} - 429 Too Many Requests -> {int(sleep_s)} sn bekle ve yeniden dene")
                             time.sleep(sleep_s)
                         elif 'No address associated with hostname' in msg or 'Failed to establish' in msg:
                             print(f"[UYARI] {inst} erişilemez: {msg}")
+                            break  # Bu instance'ı atla
+                        elif 'Connection refused' in msg:
+                            print(f"[UYARI] {inst} bağlantı reddedildi")
                             break  # Bu instance'ı atla
                         else:
                             print(f"[UYARI] {inst} beklenmeyen hata: {msg}")
@@ -271,7 +647,8 @@ def get_latest_tweets_with_retweet_check(count=3, retry_count=0):
                     raw_txt = txt or ''
                     has_url = bool(re.search(r'https?://\S+', raw_txt))
                     has_hashtag = bool(re.search(r'#\w+', raw_txt))
-                    has_punct = any(ch in raw_txt for ch in [':', '-', '—', '!', '?', '“', '”', '"', '\''])
+                    has_punct = any(ch in raw_txt for ch in [':', '-', '—', '!', '?', '"', '"', '"', '\''])
+                    has_domain_terms = any(k in raw_txt for k in ['BF', 'Battlefield', 'battlefield', 'BF6'])
                     short_len_threshold = 50
                     if (len(raw_txt.strip()) < short_len_threshold) and not (has_url or has_hashtag or has_punct or has_domain_terms):
                         print(f"[INFO] Kısa/bağlamsız tweet atlandı (muhtemel yanıt): {tid} -> '{raw_txt[:80]}'")
@@ -319,31 +696,61 @@ def get_latest_tweets_with_retweet_check(count=3, retry_count=0):
     except Exception as e:
         print(f"[UYARI] Pnytter genel hatası: {e}. RSS fallback deneniyor")
 
-    # 2) RSS fallback - önce xcancel.com dene, sonra diğer instance'lar
-    # xcancel.com'u öncelikle dene
-    rss_instances_to_try = ["https://xcancel.com"]
-    # Sonra mevcut instance'ı ekle (eğer xcancel.com değilse)
+    # 2) RSS fallback - önce twiiit.com dene (dinamik yönlendirme), sonra diğer instance'lar
+    # twiiit.com'u öncelikle dene (dinamik instance seçimi)
+    rss_instances_to_try = ["https://twiiit.com", "https://xcancel.com", "https://nitter.privacydev.net"]
+    # Sonra mevcut instance'ı ekle (eğer zaten listede değilse)
     current_instance = NITTER_INSTANCES[CURRENT_NITTER_INDEX]
     if current_instance not in rss_instances_to_try:
         rss_instances_to_try.append(current_instance)
+    
+    # Tüm instance'ları dene (403 hatalarına karşı)
+    for backup_instance in NITTER_INSTANCES:
+        if backup_instance not in rss_instances_to_try:
+            rss_instances_to_try.append(backup_instance)
     
     for rss_instance in rss_instances_to_try:
         url = f"{rss_instance}/{TWITTER_SCREENNAME}/rss"
         try:
             print(f"[+] RSS ile çekiliyor: {rss_instance}")
             ua_pool = [
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36',
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1.1 Safari/605.1.15',
             ]
+            selected_ua = random.choice(ua_pool)
             headers = {
-                'User-Agent': random.choice(ua_pool),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
+                'User-Agent': selected_ua,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
+                'X-Requested-With': 'XMLHttpRequest',  # AJAX request gibi görün
+                'Origin': rss_instance,  # Origin header ekle
+                'Referer': f"{rss_instance}/{TWITTER_SCREENNAME}",  # Referer ekle
             }
-            response = requests.get(url, headers=headers, timeout=15)
+            # Session kullan ve tarayıcı benzeri davranış
+            session = get_or_create_session(rss_instance)
+            session.headers.update(headers)
+            
+            # İlk önce ana sayfayı ziyaret et (tarayıcı benzeri davranış)
+            try:
+                base_url = rss_instance
+                session.get(base_url, timeout=10)
+                time.sleep(random.uniform(5, 15))  # Daha uzun bekleme (IP ban önleme)
+            except:
+                pass  # Ana sayfa hatası önemli değil
+            
+            response = session.get(url, timeout=15)
             response.raise_for_status()
 
             import xml.etree.ElementTree as ET
@@ -417,17 +824,45 @@ def get_latest_tweets_with_retweet_check(count=3, retry_count=0):
             return {"tweets": tweets}
         except requests.exceptions.RequestException as e:
             error_msg = str(e)
-            print(f"[HATA] RSS istek hatası ({rss_instance}): {e}")
-            
-            # Specific error handling
             status = getattr(getattr(e, 'response', None), 'status_code', None)
-            if status == 429:
+            
+            # Özel hata mesajları
+            if status == 403:
+                print(f"[UYARI] {rss_instance} - 403 Forbidden (dosya izinleri sorunu)")
+                # 403 hatası için alternatif erişim yöntemi dene
+                try:
+                    print(f"[+] {rss_instance} için alternatif erişim deneniyor...")
+                    alt_headers = headers.copy()
+                    alt_headers.update({
+                        'Accept': 'application/rss+xml, application/xml, text/xml',
+                        'X-Forwarded-For': f"192.168.1.{random.randint(1, 254)}",  # Fake IP
+                        'X-Real-IP': f"10.0.0.{random.randint(1, 254)}",
+                        'Via': '1.1 proxy.example.com',
+                        'Cache-Control': 'no-cache, must-revalidate',
+                    })
+                    alt_response = session.get(url, headers=alt_headers, timeout=15)
+                    if alt_response.status_code == 200:
+                        print(f"[+] {rss_instance} alternatif erişim başarılı!")
+                        response = alt_response  # Başarılı response'u kullan
+                    else:
+                        print(f"[UYARI] {rss_instance} alternatif erişim de başarısız, sonraki instance deneniyor...")
+                        continue
+                except Exception as alt_e:
+                    print(f"[UYARI] {rss_instance} alternatif erişim hatası: {alt_e}")
+                    continue
+            elif status == 429:
                 jitter = random.uniform(0, 3)
                 backoff = min(300, (retry_count + 1) * NITTER_REQUEST_DELAY * 2 + jitter)
-                print(f"[!] 429 Too Many Requests - {int(backoff)} sn bekleniyor...")
+                print(f"[UYARI] {rss_instance} - 429 Too Many Requests, {int(backoff)} sn bekleyip sonraki instance deneniyor...")
                 time.sleep(backoff)
+            elif status == 502:
+                print(f"[UYARI] {rss_instance} - 502 Bad Gateway, sonraki instance deneniyor...")
+            elif status == 503:
+                print(f"[UYARI] {rss_instance} - 503 Service Unavailable, sonraki instance deneniyor...")
             elif 'No address associated with hostname' in error_msg:
-                print(f"[!] {rss_instance} DNS hatası - instance erişilemez")
+                print(f"[UYARI] {rss_instance} - DNS hatası, instance erişilemez")
+            else:
+                print(f"[UYARI] RSS istek hatası ({rss_instance}): {e}")
             continue
         except Exception as e:
             print(f"[HATA] RSS genel hata ({rss_instance}): {e}")
@@ -435,6 +870,10 @@ def get_latest_tweets_with_retweet_check(count=3, retry_count=0):
     
     # Tüm RSS instance'ları başarısızsa boş liste dön
     print("[HATA] Tüm RSS instance'ları başarısız")
+    
+    # Son çare: Direkt Twitter API veya alternatif kaynaklar denenmeli
+    # Şimdilik boş liste döndür ama gelecekte başka API'ler eklenebilir
+    print("[INFO] Alternatif tweet kaynakları için geliştirilmeyi bekliyor...")
     return {"tweets": []}
 
 def get_media_urls_from_tweet_data(tweet_data):
@@ -466,28 +905,66 @@ def _fetch_media_from_nitter_html(instance_base: str, screen_name: str, tweet_id
         url = f"{base}/{screen_name}/status/{tweet_id}"
 
         # Session + header + cookie (hlsPlayback bazı instance'larda mp4 kaynağını açar)
-        s = requests.Session()
-        ua_pool = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
-        ]
+        s = get_or_create_session(instance_base)
         s.headers.update({
-            'User-Agent': random.choice(ua_pool),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'User-Agent': get_random_user_agent(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
             'Host': base.split('://', 1)[1],
         })
 
+        # Tarayıcı benzeri davranış: İlk önce ana sayfayı ziyaret et
+        try:
+            s.get(base, timeout=10)
+            time.sleep(random.uniform(10, 20))  # Çok daha uzun bekleme (IP ban önleme)
+        except:
+            pass  # Ana sayfa hatası önemli değil
+        
         # Retry logic with exponential backoff
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
+                # Rastgele kısa bekleme (bot tespitini zorlaştır)
+                time.sleep(random.uniform(0.2, 1))
                 resp = s.get(url, cookies={'hlsPlayback': 'on'}, timeout=15)
                 resp.raise_for_status()
                 break
             except requests.exceptions.HTTPError as he:
-                if he.response.status_code in [418, 429, 503, 502]:
+                if he.response.status_code == 403:
+                    print(f"[UYARI] {instance_base} - 403 Forbidden, alternatif erişim deneniyor...")
+                    # 403 için özel bypass headers
+                    try:
+                        bypass_headers = s.headers.copy()
+                        bypass_headers.update({
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                            'X-Forwarded-For': f"192.168.1.{random.randint(1, 254)}",
+                            'X-Real-IP': f"10.0.0.{random.randint(1, 254)}",
+                            'Via': '1.1 proxy.example.com',
+                            'Cache-Control': 'no-cache, must-revalidate',
+                            'Pragma': 'no-cache',
+                        })
+                        bypass_resp = s.get(url, headers=bypass_headers, cookies={'hlsPlayback': 'on'}, timeout=15)
+                        if bypass_resp.status_code == 200:
+                            print(f"[+] {instance_base} bypass başarılı!")
+                            resp = bypass_resp
+                            break
+                        else:
+                            print(f"[UYARI] {instance_base} bypass başarısız")
+                            if attempt < max_attempts - 1:
+                                time.sleep(2)
+                                continue
+                    except Exception as bypass_e:
+                        print(f"[UYARI] {instance_base} bypass hatası: {bypass_e}")
+                elif he.response.status_code in [418, 429, 503, 502]:
                     if attempt < max_attempts - 1:
                         wait_time = (2 ** attempt) + random.uniform(0, 1)
                         print(f"[INFO] {instance_base} HTTP {he.response.status_code}, {wait_time:.1f}s bekleyip yeniden deneniyor...")
@@ -868,45 +1345,42 @@ def _fetch_media_with_gallery_dl(screen_name: str, tweet_id: str, instance_base:
         return []
 
 def translate_text(text):
-    # Boş metin veya API anahtarı yoksa çevirmeden geri döndür
-    if not text or not text.strip():
-        return None
-    if not RAPIDAPI_TRANSLATE_KEY:
-        print("[!] RAPIDAPI_TRANSLATE_KEY bulunamadı, çeviri başarısız")
-        return None
-
-    translate_url = "https://translateai.p.rapidapi.com/google/translate/json"
-    payload = {
-        "origin_language": "en",
-        "target_language": "tr",
-        "words_not_to_translate": "Battlefield",
-        "paths_to_exclude": "product.media.img_desc",
-        "common_keys_to_exclude": "name; price",
-        "json_content": {
-            "product": {
-                "productDesc": text
-            }
-        }
-    }
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_TRANSLATE_KEY,
-        "x-rapidapi-host": "translateai.p.rapidapi.com",
-        "Content-Type": "application/json"
-    }
+    """Gemini 2.5 Flash ile İngilizce -> Türkçe çeviri.
+    Çıkış: Sadece ham çeviri (ek açıklama, tırnak, etiket vs. yok).
+    Özel terimleri ÇEVİRME: battlefield, free pass, battle pass.
+    """
     try:
-        resp = requests.post(translate_url, json=payload, headers=headers, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        translated = data.get('translated_json', {}).get('product', {}).get('productDesc')
-        if translated and translated.strip() and translated.strip() != text.strip():
-            return translated
+        if not text or not text.strip():
+            return None
+
+        # Gemini client (API anahtarı ortam değişkeni: GEMINI_API_KEY)
+        # Ortam değişkeni yoksa client init hata verebilir; yakalayalım
+        client = genai.Client()
+
+        # Talimat: sadece ham çeviri, belirli terimler çevrilmez.
+        prompt = (
+            "Translate the text from English to Turkish. Output ONLY the translation with no extra words, "
+            "no quotes, no labels. Do NOT translate these terms and keep their original casing: "
+            "battlefield, free pass, battle pass.\n"
+            "Don't make mistakes like this translation: \"What is your FINAL Rating of the Battlefield 6 Beta? (1-10) Turkish translation: Battlefield 6 Beta'nızın SON Derecelendirmesi nedir? (1-10)\" Should be: Battlefield 6 Beta için SON derecelendirmeniz nedir?\n\n"
+            "Text:\n" + text.strip()
+        )
+
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=0)
+            ),
+        )
+        out = (resp.text or "").strip()
+        # Boş veya değişmemişse None döndür (muhtemelen zaten TR veya başarısız)
+        if out and out != text.strip():
+            return out
         print("[UYARI] Çeviri boş döndü veya orijinal ile aynı")
         return None
-    except requests.exceptions.RequestException as rexc:
-        print(f"[UYARI] Çeviri servisine ulaşılamadı: {rexc}")
-        return None
     except Exception as e:
-        print("Çeviri alınamadı:", e)
+        print(f"[UYARI] Gemini çeviri hatası: {e}")
         return None
 
 # AI-powered flair selection system
@@ -1926,7 +2400,7 @@ def main_loop():
                 continue
             # Tüm öğeler retweet ise artık uzun bekleme yok, kısa bekleme ile devam
                 
-            tweets = tweets_data.get("tweets", [])
+            tweets = tweets_data if isinstance(tweets_data, list) else tweets_data.get("tweets", [])
             if not tweets:
                 print("[!] İşlenecek tweet bulunamadı.")
                 time.sleep(NITTER_REQUEST_DELAY)
@@ -1938,7 +2412,16 @@ def main_loop():
             
             # Her tweet'i eskiden yeniye doğru işle
             for tweet_index, tweet_data in enumerate(tweets, 1):
-                tweet_id = tweet_data.get("tweet_id")
+                # Farklı kaynaklardan gelen veri yapıları için ID normalizasyonu
+                # twscrape -> 'id', Pnytter/RSS -> 'tweet_id' yaygın
+                tweet_id = (
+                    (tweet_data.get("tweet_id") if isinstance(tweet_data, dict) else None)
+                    or (tweet_data.get("id") if isinstance(tweet_data, dict) else None)
+                    or (tweet_data.get("id_str") if isinstance(tweet_data, dict) else None)
+                    or (tweet_data.get("rest_id") if isinstance(tweet_data, dict) else None)
+                )
+                if tweet_id is not None:
+                    tweet_id = str(tweet_id).strip()
                 
                 if not tweet_id:
                     print(f"[HATA] Tweet {tweet_index}/{len(tweets)} - Tweet ID bulunamadı!")
