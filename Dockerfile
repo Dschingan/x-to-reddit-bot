@@ -1,26 +1,32 @@
-# 1. Adım: Base imaj olarak Python 3.11 kullan
 FROM python:3.11-slim
 
-# 2. Adım: Çalışma klasörünü ayarla
+# Ortam
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    LANG=C.UTF-8
+
 WORKDIR /app
 
-# 3. Adım: Sisteme ihtiyaç duyulan paketleri kur (ffmpeg gibi)
+# Sistem bağımlılıkları (ffmpeg, CA sertifikaları)
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
-    apt-get clean && \
+    apt-get install -y --no-install-recommends \
+        ffmpeg \
+        ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# 4. Adım: Gereksiz cache bırakma
-ENV PIP_NO_CACHE_DIR=1
-ENV PYTHONUNBUFFERED=1
+# Python bağımlılıkları
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install --upgrade pip && \
+    pip install --no-cache-dir -r /app/requirements.txt
 
-# 5. Adım: Python bağımlılıklarını yükle
-COPY requirements.txt .
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
-
-# 6. Adım: Proje kodlarını kopyala
+# Uygulama kodu
 COPY . /app
 
-# 7. Adım: Konteyner loglarında düzgün görünmesi için unbuffered mod
+# Non-root kullanıcı
+RUN useradd -m botuser && \
+    chown -R botuser:botuser /app
+USER botuser
+
+# Çalıştır
 CMD ["python", "-u", "bot.py"]
