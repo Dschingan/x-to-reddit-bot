@@ -122,11 +122,16 @@ from base64 import b64decode
 import redditwarp.SYNC
 from redditwarp.SYNC import Client as RedditWarpClient
 
-# Windows encoding sorununu çöz
+# Windows encoding sorununu güvenli şekilde çöz (buffer olmayabilir)
 if sys.platform.startswith('win'):
     import codecs
-    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
-    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+    try:
+        stdout_base = getattr(sys.stdout, 'buffer', sys.stdout)
+        stderr_base = getattr(sys.stderr, 'buffer', sys.stderr)
+        sys.stdout = codecs.getwriter('utf-8')(stdout_base, 'strict')
+        sys.stderr = codecs.getwriter('utf-8')(stderr_base, 'strict')
+    except Exception as _enc_e:
+        print(f"[UYARI] Windows encoding ayarı atlandı: {_enc_e}")
 
 load_dotenv()
 
@@ -2690,4 +2695,4 @@ if __name__ == "__main__":
     # Lokal geliştirme/test için HTTP sunucusunu ayağa kaldır
     port = int(os.getenv("PORT", "8000"))
     print(f"[WEB] Uvicorn ile FastAPI başlatılıyor :0.0.0.0:{port}")
-    uvicorn.run("bot:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
