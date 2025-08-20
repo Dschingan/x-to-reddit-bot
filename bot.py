@@ -30,11 +30,30 @@ except Exception:
 from google import genai
 from google.genai import types
 
+# FastAPI for web service
+import threading
+from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
+import uvicorn
+
+# Resolve script directory and accounts DB absolute path early
+SCRIPT_DIR = Path(__file__).resolve().parent
+_env_db = os.environ.get("ACCOUNTS_DB_PATH", "accounts.db")
+if os.path.isabs(_env_db):
+    ACCOUNTS_DB_PATH = _env_db
+else:
+    ACCOUNTS_DB_PATH = str((SCRIPT_DIR / _env_db).resolve())
+
 # Ensure accounts.db exists (for Railway/containers without shell)
 def _ensure_accounts_db():
     try:
-        db_path = Path(os.environ.get("ACCOUNTS_DB_PATH", "accounts.db"))
+        db_path = Path(ACCOUNTS_DB_PATH)
+        # Ensure parent directory exists
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         if db_path.exists():
+            # Quick sanity check for readability
+            if not os.access(db_path, os.R_OK):
+                print(f"[UYARI] accounts.db okunamıyor (izinler): {db_path}")
             return
         b64 = os.environ.get("ACCOUNTS_DB_B64")
         if not b64:
@@ -147,6 +166,7 @@ NITTER_REQUEST_DELAY = 15  # seconds between requests (artırıldı)
 MAX_RETRIES = 2  # Maximum number of retries for failed requests (azaltıldı)
 MIN_REQUEST_INTERVAL = 30  # Minimum seconds between any requests
 LAST_REQUEST_TIME = 0  # Son istek zamanı
+TWSCRAPE_DETAIL_TIMEOUT = 8  # seconds to wait for tweet_details before skipping
 
 # PRAW konfigürasyonunu Reddit API kurallarına uygun şekilde optimize et
 reddit = praw.Reddit(
@@ -282,7 +302,13 @@ async def init_twscrape_api():
     """twscrape API'yi başlat"""
     global twscrape_api
     if twscrape_api is None:
-        twscrape_api = API("accounts.db")
+        # Debug: show resolved DB path and basic access
+        print(f"[DEBUG] twscrape accounts DB path: {ACCOUNTS_DB_PATH}")
+        if not os.path.exists(ACCOUNTS_DB_PATH):
+            print("[UYARI] accounts.db bulunamadı, twscrape erişimi başarısız olabilir")
+        elif not os.access(ACCOUNTS_DB_PATH, os.R_OK):
+            print("[UYARI] accounts.db dosyası okunamıyor (izin)")
+        twscrape_api = API(ACCOUNTS_DB_PATH)
         print("[+] twscrape API başlatıldı")
     return twscrape_api
 
@@ -330,7 +356,9 @@ async def get_latest_tweets_twscrape(count=3, retry_count=0):
         print("[+] twscrape ile tweet'ler çekiliyor...")
         
         # API'yi başlat
-        api = API("accounts.db")
+        print(f"[DEBUG] twscrape accounts DB path: {ACCOUNTS_DB_PATH}")
+        # Tek bir API instance kullan (lock ve rate-limit yönetimi için daha stabil)
+        api = await init_twscrape_api()
         print("[+] twscrape API başlatıldı")
         
         # Kullanıcı bilgilerini al
@@ -341,13 +369,17 @@ async def get_latest_tweets_twscrape(count=3, retry_count=0):
         
         # Tweet'leri çek (son gönderiler). Medya eksik çıkarsa tweet_details ile zenginleştir.
         tweets_list = []
-        async for tweet in api.user_tweets(user.id, limit=count * 6):
+        # Daha düşük limit: daha az detay çağrısı ve kilit kullanımı
+        async for tweet in api.user_tweets(user.id, limit=count * 3):
             tweets_list.append(tweet)
         
         print(f"[+] twscrape ile {len(tweets_list)} tweet bulundu")
         
         # Tweet'leri filtrele ve medya çıkar
         filtered_tweets = []
+        # TweetDetail kuyruğunu tüketmeyi sınırlamak için sayaç (daha düşük)
+        max_detail_lookups = max(1, count)
+        detail_lookups = 0
         for i, tweet in enumerate(tweets_list):
             # Debug: tweet obje yapısını göster (sadece ilk tweet için)
             if i == 0:
@@ -368,12 +400,23 @@ async def get_latest_tweets_twscrape(count=3, retry_count=0):
                 len(getattr(t_media, 'videos', []) or []) == 0 and
                 len(getattr(t_media, 'animated', []) or []) == 0
             ):
-                try:
-                    detailed = await api.tweet_details(tweet.id)
-                    if detailed and getattr(detailed, 'media', None):
-                        t_media = detailed.media
-                except Exception as _detail_err:
-                    print(f"[UYARI] tweet_details alınamadı {tweet.id}: {_detail_err}")
+                # TweetDetail isteklerini sınırla
+                if detail_lookups < max_detail_lookups:
+                    try:
+                        detailed = await asyncio.wait_for(
+                            api.tweet_details(tweet.id),
+                            timeout=TWSCRAPE_DETAIL_TIMEOUT,
+                        )
+                        detail_lookups += 1
+                        if detailed and getattr(detailed, 'media', None):
+                            t_media = detailed.media
+                    except asyncio.TimeoutError:
+                        print(f"[UYARI] tweet_details zaman aşımı {tweet.id}, atlanıyor")
+                    except Exception as _detail_err:
+                        print(f"[UYARI] tweet_details alınamadı {tweet.id}: {_detail_err}")
+                else:
+                    # Detay sınırı aşıldıysa atla
+                    pass
 
             if t_media:
                 # Fotoğraflar
@@ -1245,6 +1288,44 @@ def get_instance_health_status():
     if cooldown:
         print(f"[INFO] Cooldown'da: {', '.join(cooldown)}")
     return {"healthy": healthy, "cooldown": cooldown, "failed": failed}
+
+# -------------------- Web Service (FastAPI) --------------------
+# Not: Render Web Service için bir HTTP portu dinlemek gerekir. Aşağıdaki app,
+# / ve /healthz endpoint'leri sağlar ve uygulama başlarken bot döngüsünü
+# arka planda bir thread ile başlatır.
+
+app = FastAPI(title="X-to-Reddit Bot")
+_worker_started = False
+_worker_lock = threading.Lock()
+
+@app.get("/", response_class=PlainTextResponse)
+def root():
+    return "OK"
+
+@app.get("/healthz", response_class=PlainTextResponse)
+def healthz():
+    try:
+        status = get_instance_health_status()
+        return "healthy" if status else "ok"
+    except Exception:
+        return PlainTextResponse("ok", status_code=200)
+
+@app.on_event("startup")
+def start_background_worker():
+    global _worker_started
+    with _worker_lock:
+        if _worker_started:
+            return
+        def _run():
+            # main_loop zaten kendi içinde sonsuz döngüye sahip
+            try:
+                print("[WEB] Background worker starting main_loop()...")
+                main_loop()
+            except Exception as e:
+                print(f"[WEB] Background worker stopped: {e}")
+        t = threading.Thread(target=_run, name="bot-worker", daemon=True)
+        t.start()
+        _worker_started = True
 
 def _fetch_media_from_nitter_html_multi(screen_name: str, tweet_id: str, preferred: str = None):
     """Birden fazla Nitter instance'ını deneyerek HTML'den medya URL'leri çıkarmayı dener."""
@@ -2606,17 +2687,7 @@ def main_loop():
         time.sleep(300)
 
 if __name__ == "__main__":
-    while True:
-        try:
-            print("[+] Bot başlatılıyor...")
-            main_loop()
-        except KeyboardInterrupt:
-            print("\n[!] Bot durduruldu (Ctrl+C)")
-            break
-        except Exception as e:
-            print(f"\n[HATA] Kritik hata: {e}")
-            import traceback
-            traceback.print_exc()
-            print("\n[+] 30 saniye sonra yeniden başlatılıyor...")
-            time.sleep(30)
-            continue
+    # Lokal geliştirme/test için HTTP sunucusunu ayağa kaldır
+    port = int(os.getenv("PORT", "8000"))
+    print(f"[WEB] Uvicorn ile FastAPI başlatılıyor :0.0.0.0:{port}")
+    uvicorn.run("bot:app", host="0.0.0.0", port=port, reload=False)
