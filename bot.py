@@ -2434,7 +2434,7 @@ def main_loop():
             # Son 8 tweet'i al ve retweet kontrolü yap (daha fazla tweet kontrol et)
             tweets_data = get_latest_tweets_with_retweet_check(8)
             
-            if "error" in tweets_data:
+            if isinstance(tweets_data, dict) and "error" in tweets_data:
                 print(f"[!] Hata oluştu: {tweets_data['error']}")
                 print(f"[!] {NITTER_REQUEST_DELAY} saniye sonra tekrar denenecek...")
                 time.sleep(NITTER_REQUEST_DELAY)
@@ -2443,8 +2443,7 @@ def main_loop():
                 print("[!] Tweet bulunamadı veya API hatası.")
                 time.sleep(NITTER_REQUEST_DELAY)
                 continue
-            # Tüm öğeler retweet ise artık uzun bekleme yok, kısa bekleme ile devam
-                
+            
             tweets = tweets_data if isinstance(tweets_data, list) else tweets_data.get("tweets", [])
             if not tweets:
                 print("[!] İşlenecek tweet bulunamadı.")
@@ -2457,8 +2456,7 @@ def main_loop():
             
             # Her tweet'i eskiden yeniye doğru işle
             for tweet_index, tweet_data in enumerate(tweets, 1):
-                # Farklı kaynaklardan gelen veri yapıları için ID normalizasyonu
-                # twscrape -> 'id', Pnytter/RSS -> 'tweet_id' yaygın
+                # ID normalizasyonu
                 tweet_id = (
                     (tweet_data.get("tweet_id") if isinstance(tweet_data, dict) else None)
                     or (tweet_data.get("id") if isinstance(tweet_data, dict) else None)
@@ -2467,177 +2465,145 @@ def main_loop():
                 )
                 if tweet_id is not None:
                     tweet_id = str(tweet_id).strip()
-                
                 if not tweet_id:
                     print(f"[HATA] Tweet {tweet_index}/{len(tweets)} - Tweet ID bulunamadı!")
                     continue
                 
                 if tweet_id in posted_tweet_ids:
                     print(f"[!] Tweet {tweet_index}/{len(tweets)} zaten işlendi: {tweet_id}")
-                    continue  # Bu tweet'i atla ve sonrakine geç
+                    continue
+                
+                print(f"[+] Tweet {tweet_index}/{len(tweets)} işleniyor: {tweet_id}")
+                posted_tweet_ids.add(tweet_id)
+                save_posted_tweet_id(tweet_id)
+                print(f"[+] Tweet ID kaydedildi (işlem öncesi): {tweet_id}")
+                print(f"[+] Tweet linki: https://x.com/{TWITTER_SCREENNAME}/status/{tweet_id}")
+                
+                # Tweet metni ve çeviri
+                text = tweet_data.get("text", "")
+                print(f"[+] Orijinal Tweet: {text[:100]}{'...' if len(text) > 100 else ''}")
+                cleaned_text = clean_tweet_text(text)
+                print(f"[+] Temizlenmiş Tweet: {cleaned_text[:100]}{'...' if len(cleaned_text) > 100 else ''}")
+                translated = translate_text(cleaned_text)
+                if translated:
+                    print(f"[+] Çeviri: {translated[:100]}{'...' if len(translated) > 100 else ''}")
                 else:
-                    print(f"[+] Tweet {tweet_index}/{len(tweets)} işleniyor: {tweet_id}")
-                    
-                    # Tweet ID'sini hemen kaydet (işlem başlamadan önce)
-                    posted_tweet_ids.add(tweet_id)
-                    save_posted_tweet_id(tweet_id)
-                    print(f"[+] Tweet ID kaydedildi (işlem öncesi): {tweet_id}")
-                    print(f"[+] Tweet linki: https://x.com/{TWITTER_SCREENNAME}/status/{tweet_id}")
-                    
-                    # Tweet işleme
-                    text = tweet_data.get("text", "")
-                    print(f"[+] Orijinal Tweet: {text[:100]}{'...' if len(text) > 100 else ''}")
-                    
-                    cleaned_text = clean_tweet_text(text)
-                    print(f"[+] Temizlenmiş Tweet: {cleaned_text[:100]}{'...' if len(cleaned_text) > 100 else ''}")
-                    
-                    translated = translate_text(cleaned_text)
-                    if translated:
-                        print(f"[+] Çeviri: {translated[:100]}{'...' if len(translated) > 100 else ''}")
-                    else:
-                        print(f"[UYARI] Çeviri başarısız, tweet atlanıyor: {tweet_id}")
-                        continue
-                    
-                    # Medya işleme - zaten çekilmiş veriden
-                    print("[+] Medya URL'leri çıkarılıyor...")
-                    media_urls = get_media_urls_from_tweet_data(tweet_data)
-                    media_files = []
-                    
-                    # Resimleri ve videoları ayır
-                    image_urls = []
-                    video_urls = []
-                    
-                    for media_url in media_urls:
-                        # Geliştirilmiş medya tipi tespiti
-                        url_lower = media_url.lower()
-                        # Resim tespiti: dosya uzantısı veya format parametresi
-                        is_image = (
-                            any(ext in url_lower for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']) or
-                            'format=jpg' in url_lower or 'format=jpeg' in url_lower or 
-                            'format=png' in url_lower or 'format=webp' in url_lower or
-                            'pbs.twimg.com/media' in url_lower
-                        )
-                        # Video tespiti
-                        is_video = (
-                            '.mp4' in url_lower or 'format=mp4' in url_lower or
-                            'video.twimg.com' in url_lower
-                        )
-                        
-                        if is_image:
-                            image_urls.append(media_url)
-                        elif is_video:
-                            video_urls.append(media_url)
-                    
-                    print(f"[+] Medya analizi: {len(image_urls)} resim, {len(video_urls)} video")
-                    
-                    # Birden fazla resim varsa toplu indirme kullan
-                    if len(image_urls) > 1:
-                        print("[+] Birden fazla resim tespit edildi, toplu indirme başlatılıyor...")
-                        downloaded_images = download_multiple_images(image_urls, tweet_id)
-                        media_files.extend(downloaded_images)
-                    elif len(image_urls) == 1:
-                        # Tek resim için normal indirme
-                        media_url = image_urls[0]
-                        ext = os.path.splitext(media_url)[1].split("?")[0] or ".jpg"
-                        filename = f"temp_image_{tweet_id}_0{ext}"
-                        print(f"[+] Tek resim indiriliyor: {media_url[:50]}...")
+                    print(f"[UYARI] Çeviri başarısız, tweet atlanıyor: {tweet_id}")
+                    continue
+                
+                # Medya çıkarımı
+                print("[+] Medya URL'leri çıkarılıyor...")
+                media_urls = get_media_urls_from_tweet_data(tweet_data)
+                media_files = []
+                
+                image_urls: list[str] = []
+                video_urls: list[str] = []
+                for media_url in media_urls:
+                    u = media_url.lower()
+                    is_image = (
+                        any(ext in u for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']) or
+                        'format=jpg' in u or 'format=jpeg' in u or 'format=png' in u or 'format=webp' in u or
+                        'pbs.twimg.com/media' in u
+                    )
+                    is_video = ('.mp4' in u or 'format=mp4' in u or 'video.twimg.com' in u)
+                    if is_image:
+                        image_urls.append(media_url)
+                    elif is_video:
+                        video_urls.append(media_url)
+                print(f"[+] Medya analizi: {len(image_urls)} resim, {len(video_urls)} video")
+                
+                # Resimler
+                if len(image_urls) > 1:
+                    print("[+] Birden fazla resim tespit edildi, toplu indirme başlatılıyor...")
+                    downloaded_images = download_multiple_images(image_urls, tweet_id)
+                    media_files.extend(downloaded_images)
+                elif len(image_urls) == 1:
+                    media_url = image_urls[0]
+                    ext = os.path.splitext(media_url)[1].split("?")[0] or ".jpg"
+                    filename = f"temp_image_{tweet_id}_0{ext}"
+                    print(f"[+] Tek resim indiriliyor: {media_url[:50]}...")
+                    path = download_media(media_url, filename)
+                    if path:
+                        media_files.append(path)
+                        print(f"[+] Resim hazır: {path}")
+                
+                # Videolar
+                for i, media_url in enumerate(video_urls):
+                    try:
+                        filename = f"temp_video_{tweet_id}_{i}.mp4"
+                        print(f"[+] Video indiriliyor ({i+1}/{len(video_urls)}): {media_url[:50]}...")
                         path = download_media(media_url, filename)
                         if path:
-                            media_files.append(path)
-                            print(f"[+] Resim hazır: {path}")
-                    
-                    # Videoları işle (mevcut kod)
-                    for i, media_url in enumerate(video_urls):
-                        try:
-                            ext = ".mp4"
-                            filename = f"temp_video_{tweet_id}_{i}{ext}"
-                            
-                            print(f"[+] Video indiriliyor ({i+1}/{len(video_urls)}): {media_url[:50]}...")
-                            path = download_media(media_url, filename)
-                            
-                            if path:
-                                # Video dönüştürme
-                                converted = f"converted_{filename}"
-                                print(f"[+] Video dönüştürülüyor: {path} -> {converted}")
-                                converted_path = convert_video_to_reddit_format(path, converted)
-                                
-                                if converted_path:
-                                    media_files.append(converted_path)
-                                    print(f"[+] Video dönüştürme başarılı: {converted_path}")
-                                else:
-                                    print("[!] Video dönüştürme başarısız")
-                                
-                                # Orijinal dosyayı sil
-                                if os.path.exists(path):
-                                    os.remove(path)
+                            converted = f"converted_{filename}"
+                            print(f"[+] Video dönüştürülüyor: {path} -> {converted}")
+                            converted_path = convert_video_to_reddit_format(path, converted)
+                            if converted_path:
+                                media_files.append(converted_path)
+                                print(f"[+] Video dönüştürme başarılı: {converted_path}")
                             else:
-                                print(f"[!] Video indirilemedi: {media_url}")
-                                
-                        except Exception as media_e:
-                            print(f"[HATA] Video işleme hatası: {media_e}")
-                        
-                    print(f"[+] Toplam {len(media_files)} medya dosyası hazır")
-                    
-                    # Medya doğrulaması: Orijinal tweet'te medya varsa Reddit postunda da olmalı
-                    original_text = tweet_data.get("text", "")
-                    has_media_in_original = any(indicator in original_text for indicator in ['pic.twitter.com', 'video.twitter.com', 'pbs.twimg.com'])
-                    
-                    if has_media_in_original and len(media_files) == 0:
-                        print(f"[UYARI] Orijinal tweet'te medya var ama indirilemedi, post atlanıyor: {tweet_id}")
-                        # Geçici dosyaları temizle
-                        for fpath in media_files:
-                            try:
-                                if os.path.exists(fpath):
-                                    os.remove(fpath)
-                            except Exception:
-                                pass
-                        continue
-                    
-                    # Post gönderme
-                    # Başlık oluşturma ve doğrulama (çeviri -> temizlenmiş -> orijinal -> varsayılan)
-                    candidates = [
-                        (translated or "").strip(),
-                        (cleaned_text or "").strip(),
-                        (text or "").strip(),
-                    ]
-                    chosen_text = next((c for c in candidates if c), "")
-                    if not chosen_text:
-                        chosen_text = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
-                    # Uzun metni başlık + kalan olarak böl
-                    title_to_use, remainder_to_post = smart_split_title(chosen_text, 300)
-                    print(f"[+] Kullanılacak başlık ({len(title_to_use)}): {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
-                    if remainder_to_post:
-                        print(f"[+] Başlığın kalan kısmı ({len(remainder_to_post)} karakter) gönderi açıklaması/yorum olarak eklenecek")
-                    print("[+] Reddit'e post gönderiliyor...")
-                    success = submit_post(title_to_use, media_files, text, remainder_text=remainder_to_post)  # Orijinal tweet text'i yedek olarak gönder
-                    
-                    if success:
-                        print(f"[+] Tweet başarıyla işlendi: {tweet_id}")
-                    else:
-                        print(f"[UYARI] Tweet işlenemedi ama ID zaten kaydedildi: {tweet_id}")
-                        
-                        # Geçici dosyaları temizle
-                        for fpath in media_files:
-                            try:
-                                if os.path.exists(fpath):
-                                    os.remove(fpath)
-                                    print(f"[+] Geçici dosya silindi: {fpath}")
-                            except Exception as cleanup_e:
-                                print(f"[UYARI] Dosya silinirken hata: {cleanup_e}")
-                    
-                    # Tweet'ler arası 5 dakika bekle (son tweet hariç)
-                    if tweet_index < len(tweets):
-                        print(f"[+] Sonraki tweet için 5 dakika bekleniyor... ({tweet_index}/{len(tweets)} tamamlandı)")
-                        time.sleep(300)  # 5 dakika = 300 saniye
-                            
+                                print("[!] Video dönüştürme başarısız")
+                            if os.path.exists(path):
+                                os.remove(path)
+                        else:
+                            print(f"[!] Video indirilemedi: {media_url}")
+                    except Exception as media_e:
+                        print(f"[HATA] Video işleme hatası: {media_e}")
+                
+                print(f"[+] Toplam {len(media_files)} medya dosyası hazır")
+                
+                # Medya doğrulaması
+                original_text = tweet_data.get("text", "")
+                has_media_in_original = any(ind in original_text for ind in ['pic.twitter.com', 'video.twitter.com', 'pbs.twimg.com'])
+                if has_media_in_original and len(media_files) == 0:
+                    print(f"[UYARI] Orijinal tweet'te medya var ama indirilemedi, post atlanıyor: {tweet_id}")
+                    for fpath in media_files:
+                        try:
+                            if os.path.exists(fpath):
+                                os.remove(fpath)
+                        except Exception:
+                            pass
+                    continue
+                
+                # Post gönderme
+                candidates = [
+                    (translated or "").strip(),
+                    (cleaned_text or "").strip(),
+                    (text or "").strip(),
+                ]
+                chosen_text = next((c for c in candidates if c), "")
+                if not chosen_text:
+                    chosen_text = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
+                title_to_use, remainder_to_post = smart_split_title(chosen_text, 300)
+                print(f"[+] Kullanılacak başlık ({len(title_to_use)}): {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
+                if remainder_to_post:
+                    print(f"[+] Başlığın kalan kısmı ({len(remainder_to_post)} karakter) gönderi açıklaması/yorum olarak eklenecek")
+                print("[+] Reddit'e post gönderiliyor...")
+                success = submit_post(title_to_use, media_files, text, remainder_text=remainder_to_post)
+                if success:
+                    print(f"[+] Tweet başarıyla işlendi: {tweet_id}")
+                else:
+                    print(f"[UYARI] Tweet işlenemedi ama ID zaten kaydedildi: {tweet_id}")
+                    for fpath in media_files:
+                        try:
+                            if os.path.exists(fpath):
+                                os.remove(fpath)
+                                print(f"[+] Geçici dosya silindi: {fpath}")
+                        except Exception as cleanup_e:
+                            print(f"[UYARI] Dosya silinirken hata: {cleanup_e}")
+                
+                # Tweet'ler arası 5 dakika bekle (son tweet hariç)
+                if tweet_index < len(tweets):
+                    print(f"[+] Sonraki tweet için 5 dakika bekleniyor... ({tweet_index}/{len(tweets)} tamamlandı)")
+                    time.sleep(300)
         except Exception as loop_e:
             print(f"[HATA] Ana döngü hatası: {loop_e}")
             import traceback
             traceback.print_exc()
         
-        print(f"\n[+] Sonraki kontrol: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() + 5184))}")
-        print("⏳ 1 saat 26 dakika bekleniyor...")
-        time.sleep(5184)  # 1 saat 26 dakika (5184 saniye)
+        # Dış döngü beklemesi: 5 dakika
+        print(f"\n[+] Sonraki kontrol: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() + 300))}")
+        print("⏳ 5 dakika bekleniyor...")
+        time.sleep(300)
 
 if __name__ == "__main__":
     while True:
