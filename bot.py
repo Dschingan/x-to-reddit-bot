@@ -21,6 +21,7 @@ import io
 from bs4 import BeautifulSoup
 import asyncio
 from twscrape import API, gather
+from types import SimpleNamespace
 # Pnytter opsiyonel (pydantic çakışması nedeniyle requirements dışına alındı)
 try:
     from pnytter import Pnytter
@@ -1017,7 +1018,8 @@ def _fetch_media_from_nitter_html(instance_base: str, screen_name: str, tweet_id
 
         # Tarayıcı benzeri davranış: İlk önce ana sayfayı ziyaret et
         try:
-            s.get(base, timeout=10)
+            base_url = rss_instance
+            session.get(base_url, timeout=10)
             time.sleep(random.uniform(10, 20))  # Çok daha uzun bekleme (IP ban önleme)
         except:
             pass  # Ana sayfa hatası önemli değil
@@ -1334,79 +1336,84 @@ def start_background_worker():
 
 def _fetch_media_from_nitter_html_multi(screen_name: str, tweet_id: str, preferred: str = None):
     """Birden fazla Nitter instance'ını deneyerek HTML'den medya URL'leri çıkarmayı dener."""
-    try_list = []
-    if preferred and not _is_instance_in_cooldown(preferred):
-        try_list.append(preferred)
-    
-    # Kalanları ekle (cooldown'da olmayanlar)
-    for inst in NITTER_INSTANCES:
-        if inst not in try_list and not _is_instance_in_cooldown(inst):
-            try_list.append(inst)
-    
-    # Eğer tüm instance'lar cooldown'daysa, en az başarısızlığı olanı dene
-    if not try_list:
-        print("[UYARI] Tüm instance'lar cooldown'da, en az başarısızlığı olan deneniyor")
-        min_failures = min(_INSTANCE_FAILURES.get(inst, (0, 0))[0] for inst in NITTER_INSTANCES)
+    try:
+        try_list = []
+        if preferred and not _is_instance_in_cooldown(preferred):
+            try_list.append(preferred)
+        
+        # Kalanları ekle (cooldown'da olmayanlar)
         for inst in NITTER_INSTANCES:
-            if _INSTANCE_FAILURES.get(inst, (0, 0))[0] == min_failures:
+            if inst not in try_list and not _is_instance_in_cooldown(inst):
                 try_list.append(inst)
-                break
+        
+        # Eğer tüm instance'lar cooldown'daysa, en az başarısızlığı olanı dene
+        if not try_list:
+            print("[UYARI] Tüm instance'lar cooldown'da, en az başarısızlığı olan deneniyor")
+            min_failures = min(_INSTANCE_FAILURES.get(inst, (0, 0))[0] for inst in NITTER_INSTANCES)
+            for inst in NITTER_INSTANCES:
+                if _INSTANCE_FAILURES.get(inst, (0, 0))[0] == min_failures:
+                    try_list.append(inst)
+                    break
 
-    for inst in try_list:
+        for inst in try_list:
+            try:
+                media = _fetch_media_from_nitter_html(inst, screen_name, tweet_id)
+                if media:
+                    # Başarılı olursa failure kaydını temizle
+                    if inst in _INSTANCE_FAILURES:
+                        del _INSTANCE_FAILURES[inst]
+                    return media
+            except Exception as e:
+                # Instance başarısızlığını kaydet
+                _record_instance_failure(inst)
+                
+                # Gelişmiş hata işleme
+                msg = str(e)
+                status_code = getattr(getattr(e, 'response', None), 'status_code', None)
+                
+                # HTTP hata kodlarına göre işlem
+                if status_code == 418:
+                    print(f"[UYARI] {inst} anti-bot koruması (418 I'm a teapot)")
+                    continue
+                elif status_code == 503:
+                    print(f"[UYARI] {inst} geçici olarak kullanılamıyor (503)")
+                    continue
+                elif status_code == 502:
+                    print(f"[UYARI] {inst} ağ geçidi hatası (502)")
+                    continue
+                elif any(code in msg for code in ['403', '404', '418', '429', '502', '503']):
+                    print(f"[UYARI] {inst} HTTP hatası: {status_code or 'unknown'}")
+                    continue
+                elif any(err in msg for err in ['getaddrinfo failed', 'Failed to establish', 'Connection refused', 'timeout']):
+                    print(f"[UYARI] {inst} bağlantı hatası: {type(e).__name__}")
+                    continue
+                else:
+                    print(f"[UYARI] {inst} beklenmeyen hata: {e}")
+                    continue
+        # Hepsi başarısızsa: Önce tweet reply/retweet mi diye kontrol et, öyleyse fallback'i devre dışı bırak
         try:
-            media = _fetch_media_from_nitter_html(inst, screen_name, tweet_id)
-            if media:
-                # Başarılı olursa failure kaydını temizle
-                if inst in _INSTANCE_FAILURES:
-                    del _INSTANCE_FAILURES[inst]
-                return media
-        except Exception as e:
-            # Instance başarısızlığını kaydet
-            _record_instance_failure(inst)
-            
-            # Gelişmiş hata işleme
-            msg = str(e)
-            status_code = getattr(getattr(e, 'response', None), 'status_code', None)
-            
-            # HTTP hata kodlarına göre işlem
-            if status_code == 418:
-                print(f"[UYARI] {inst} anti-bot koruması (418 I'm a teapot)")
-                continue
-            elif status_code == 503:
-                print(f"[UYARI] {inst} geçici olarak kullanılamıyor (503)")
-                continue
-            elif status_code == 502:
-                print(f"[UYARI] {inst} ağ geçidi hatası (502)")
-                continue
-            elif any(code in msg for code in ['403', '404', '418', '429', '502', '503']):
-                print(f"[UYARI] {inst} HTTP hatası: {status_code or 'unknown'}")
-                continue
-            elif any(err in msg for err in ['getaddrinfo failed', 'Failed to establish', 'Connection refused', 'timeout']):
-                print(f"[UYARI] {inst} bağlantı hatası: {type(e).__name__}")
-                continue
-            else:
-                print(f"[UYARI] {inst} beklenmeyen hata: {e}")
-                continue
-    # Hepsi başarısızsa: Önce tweet reply/retweet mi diye kontrol et, öyleyse fallback'i devre dışı bırak
-    try:
-        inspect_base = preferred or (try_list[0] if try_list else (NITTER_INSTANCES[0] if NITTER_INSTANCES else None))
-        if inspect_base and _is_tweet_reply_or_retweet_html(inspect_base, screen_name, tweet_id):
-            print(f"[INFO] Tweet reply/retweet olarak tespit edildi, gallery-dl fallback atlandı: {screen_name}/{tweet_id}")
-            return []
-    except Exception:
-        pass
+            inspect_base = preferred or (try_list[0] if try_list else (NITTER_INSTANCES[0] if NITTER_INSTANCES else None))
+            if inspect_base and _is_tweet_reply_or_retweet_html(inspect_base, screen_name, tweet_id):
+                print(f"[INFO] Tweet reply/retweet olarak tespit edildi, gallery-dl fallback atlandı: {screen_name}/{tweet_id}")
+                return []
+        except Exception:
+            pass
 
-    # Reply/retweet değilse gallery-dl fallback dene
-    try:
-        urls = _fetch_media_with_gallery_dl(screen_name, tweet_id, preferred or (try_list[0] if try_list else None))
-        if urls:
-            return urls
-    except Exception as _gde:
-        print(f"[UYARI] gallery-dl fallback başarısız: {_gde}")
+        # Reply/retweet değilse gallery-dl fallback dene
+        try:
+            urls = _fetch_media_with_gallery_dl(screen_name, tweet_id, preferred or (try_list[0] if try_list else None))
+            if urls:
+                return urls
+        except Exception as _gde:
+            print(f"[UYARI] gallery-dl fallback başarısız: {_gde}")
     
-    # Son çare: medya alınamadı, None döndür (tweet atlanacak)
-    print(f"[UYARI] {screen_name}/{tweet_id} için medya alınamadı")
-    return None
+        # Son çare: medya alınamadı, None döndür (tweet atlanacak)
+        print(f"[UYARI] {screen_name}/{tweet_id} için medya alınamadı")
+        return None
+
+    except Exception as e:
+        print(f"[HATA] _fetch_media_from_nitter_html_multi beklenmeyen hata: {e}")
+        return None
 
 def _fetch_media_with_gallery_dl(screen_name: str, tweet_id: str, instance_base: str = None):
     """gallery-dl aracılığıyla medya URL'lerini çıkar (indirMEdEN -g)."""
@@ -1837,9 +1844,34 @@ def upload_gallery_via_redditwarp(title, image_paths, subreddit_name):
     try:
         print(f"[+] {len(image_paths)} resim için gallery oluşturuluyor...")
         
+        # Görselleri normalize et (RGB, boyut sınırı, baseline JPEG)
+        def _normalize_image(path):
+            try:
+                with Image.open(path) as im:
+                    im = im.convert("RGB")
+                    max_dim = 4096
+                    w, h = im.size
+                    if max(w, h) > max_dim:
+                        if w >= h:
+                            new_w = max_dim
+                            new_h = int(h * (max_dim / w))
+                        else:
+                            new_h = max_dim
+                            new_w = int(w * (max_dim / h))
+                        im = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                    out_path = os.path.join(os.path.dirname(path), os.path.splitext(os.path.basename(path))[0] + "_norm.jpg")
+                    im.save(out_path, format="JPEG", quality=90, optimize=True, progressive=False)
+                    print(f"[+] Normalize edildi: {os.path.basename(out_path)}")
+                    return out_path
+            except Exception as _norm_e:
+                print(f"[UYARI] Normalize edilemedi ({os.path.basename(path)}): {_norm_e}")
+            return path
+        
+        norm_image_paths = [_normalize_image(p) for p in image_paths]
+        
         # Her resim için upload lease al
         image_leases = []
-        for i, image_path in enumerate(image_paths):
+        for i, image_path in enumerate(norm_image_paths):
             print(f"[+] Resim {i+1}/{len(image_paths)} yükleniyor: {os.path.basename(image_path)}")
             
             if not os.path.exists(image_path):
@@ -1850,13 +1882,9 @@ def upload_gallery_via_redditwarp(title, image_paths, subreddit_name):
                 with open(image_path, 'rb') as image_file:
                     # RedditWarp ile resim upload
                     image_lease = redditwarp_client.p.submission.media_uploading.upload(image_file)
-                    image_leases.append({
-                        'media_id': image_lease.media_id,
-                        'location': image_lease.location,
-                        'caption': f"Resim {i+1}"
-                    })
+                    image_leases.append(image_lease)
                     print(f"[+] Resim lease alındı - Media ID: {image_lease.media_id}")
-                    
+                
             except Exception as upload_e:
                 print(f"[HATA] Resim yükleme hatası ({image_path}): {upload_e}")
                 continue
@@ -1870,12 +1898,15 @@ def upload_gallery_via_redditwarp(title, image_paths, subreddit_name):
         # Gallery post oluştur
         try:
             # RedditWarp gallery creation
-            gallery_items = []
-            for lease in image_leases:
-                gallery_items.append({
-                    'media_id': lease['media_id'],
-                    'caption': lease['caption']
-                })
+            gallery_items = [
+                SimpleNamespace(
+                    id=idx,
+                    media_id=lease.media_id,
+                    caption=f"Resim {idx+1}",
+                    outbound_link="",
+                )
+                for idx, lease in enumerate(image_leases)
+            ]
             
             created = redditwarp_client.p.submission.create.gallery(
                 sr=subreddit_name,
@@ -1886,16 +1917,34 @@ def upload_gallery_via_redditwarp(title, image_paths, subreddit_name):
             if created:
                 submission_id = getattr(created, 'id', str(created))
                 print(f"[+] Gallery başarıyla oluşturuldu - ID: {submission_id}")
-                print(f"[+] URL: https://reddit.com/r/{subreddit_name}/comments/{submission_id}")
-                return created
+                # Başarılı gönderiden sonra disk temizliği
+                try:
+                    # Normalized dosyaları sil
+                    for p in norm_image_paths:
+                        if p and os.path.exists(p):
+                            try:
+                                os.remove(p)
+                                print(f"[TEMİZLİK] Silindi: {p}")
+                            except Exception as de:
+                                print(f"[UYARI] Silinemedi: {p} - {de}")
+                    # Orijinal dosyaları da sil
+                    for p in image_paths:
+                        if p and os.path.exists(p):
+                            try:
+                                os.remove(p)
+                                print(f"[TEMİZLİK] Silindi: {p}")
+                            except Exception as de:
+                                print(f"[UYARI] Silinemedi: {p} - {de}")
+                except Exception as ce:
+                    print(f"[UYARI] Temizlik sırasında hata: {ce}")
+                return True
             else:
                 print("[HATA] Gallery oluşturulamadı")
                 return False
-                
-        except Exception as gallery_e:
-            print(f"[HATA] Gallery oluşturma hatası: {gallery_e}")
+        except Exception as create_e:
+            print(f"[HATA] Gallery oluşturma hatası: {create_e}")
             return False
-            
+        
     except Exception as e:
         print(f"[HATA] RedditWarp gallery yükleme genel hatası: {e}")
         import traceback
