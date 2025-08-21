@@ -36,6 +36,8 @@ import threading
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 import uvicorn
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # Resolve script directory and accounts DB absolute path early
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -144,21 +146,22 @@ REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
 REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
 REDDIT_USER_AGENT = "python:bf6-gaming-news-bot:v1.1.0 (by /u/BFHaber_Bot)"
 RAPIDAPI_TRANSLATE_KEY = os.getenv("RAPIDAPI_TRANSLATE_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Posted IDs storage backend selector
+USE_DB_FOR_POSTED_IDS = bool(DATABASE_URL)
 
 # Belirli tweet ID'lerini asla Reddit'e göndermeyin (kullanıcı isteği)
 # Bu ID'ler işlenmiş olarak da işaretlenir, böylece tekrar denenmez
 EXCLUDED_TWEET_IDS = {
-    "1958232301210407056",
-    "1958243345547071725",
-    "1958186435728547955",
-    "1958160170518819041",
-    "1958257735314923964",
-    "1958243350227664939",
-    "1958227542617596047",
-    "1957995203404423520",
+    "1958574822692462777",
+    "19585522850022935535",
+    "1958552050322616811",
+    "1958551490953367669",
     "1958551346367324285",
     "1958548172915044642",
     "1958529168376770882",
+    "1958287931153760384",
     "1958287931153760384",
     "1958025330372825431",
 }
@@ -1548,7 +1551,7 @@ def translate_text(text):
         prompt = (
             "Translate the text from English to Turkish. Output ONLY the translation with no extra words, "
             "no quotes, no labels. Do NOT translate these terms and keep their original casing: "
-            "battlefield, free pass, battle pass.\n"
+            "battlefield, free pass, battle pass, Operation Firestorm.\n"
             "Additionally, if the source text contains these tags/keywords, translate them EXACTLY as follows (preserve casing where appropriate):\n"
             "BREAKING => SON DAKİKA; LEAK => SIZINTI; HUMOUR => SÖYLENTİ.\n"
             "Don't make mistakes like this translation: \"What is your FINAL Rating of the Battlefield 6 Beta? (1-10) Turkish translation: Battlefield 6 Beta'nızın SON Derecelendirmesi nedir? (1-10)\" Should be: Battlefield 6 Beta için SON derecelendirmeniz nedir?\n\n"
@@ -2639,10 +2642,19 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
             pass
 
 def load_posted_tweet_ids():
-    """Daha önce gönderilmiş tweet ID'lerini dosyadan yükle"""
+    """Daha önce gönderilmiş tweet ID'lerini veritabanından veya dosyadan yükle"""
+    # 1) Veritabanı kullanılabiliyorsa DB'den oku
+    if USE_DB_FOR_POSTED_IDS:
+        try:
+            _ensure_posted_ids_table()
+            ids = _db_load_posted_ids()
+            print(f"[+] DB'den {len(ids)} adet önceki tweet ID'si yüklendi")
+            return set(ids)
+        except Exception as e:
+            print(f"[UYARI] DB'den posted_tweet_ids yüklenemedi, dosyaya düşülecek: {e}")
+    # 2) Dosya fallback
     posted_ids_file = "posted_tweet_ids.txt"
     posted_ids = set()
-    
     try:
         if os.path.exists(posted_ids_file):
             with open(posted_ids_file, 'r', encoding='utf-8') as f:
@@ -2650,24 +2662,91 @@ def load_posted_tweet_ids():
                     tweet_id = line.strip()
                     if tweet_id:
                         posted_ids.add(tweet_id)
-            print(f"[+] {len(posted_ids)} adet önceki tweet ID'si yüklendi")
+            print(f"[+] (Fallback) {len(posted_ids)} adet önceki tweet ID'si dosyadan yüklendi")
         else:
-            print("[+] Yeni posted_tweet_ids.txt dosyası oluşturulacak")
+            print("[INFO] (Fallback) posted_tweet_ids.txt mevcut değil; yeni oluşturulabilir")
     except Exception as e:
-        print(f"[UYARI] Posted tweet IDs yüklenirken hata: {e}")
-    
+        print(f"[UYARI] (Fallback) Posted tweet IDs yüklenirken hata: {e}")
     return posted_ids
 
 def save_posted_tweet_id(tweet_id):
-    """Yeni gönderilmiş tweet ID'sini dosyaya kaydet"""
+    """Yeni gönderilmiş tweet ID'sini veritabanına veya dosyaya kaydet"""
+    # 1) Veritabanı kullanılabiliyorsa önce DB'ye yaz
+    if USE_DB_FOR_POSTED_IDS:
+        try:
+            _ensure_posted_ids_table()
+            _db_save_posted_id(tweet_id)
+            print(f"[+] (DB) Tweet ID kaydedildi: {tweet_id}")
+            return
+        except Exception as e:
+            print(f"[UYARI] (DB) Tweet ID kaydedilemedi, dosyaya düşülecek: {e}")
+    # 2) Dosya fallback
     posted_ids_file = "posted_tweet_ids.txt"
-    
     try:
         with open(posted_ids_file, 'a', encoding='utf-8') as f:
             f.write(f"{tweet_id}\n")
-        print(f"[+] Tweet ID kaydedildi: {tweet_id}")
+        print(f"[+] (Fallback) Tweet ID dosyaya kaydedildi: {tweet_id}")
     except Exception as e:
-        print(f"[UYARI] Tweet ID kaydedilirken hata: {e}")
+        print(f"[UYARI] (Fallback) Tweet ID kaydedilirken hata: {e}")
+
+############################################################
+# Postgres helper functions for posted_tweet_ids persistence
+############################################################
+_POSTED_IDS_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS posted_tweet_ids (\n"
+    "    id BIGINT PRIMARY KEY,\n"
+    "    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n"
+    ")"
+)
+
+def _db_connect():
+    """Get a psycopg2 connection using DATABASE_URL."""
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL env yok")
+    # Render provides a full URL; sslmode is already included usually
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
+
+def _ensure_posted_ids_table():
+    """Ensure table exists."""
+    conn = _db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(_POSTED_IDS_TABLE_SQL)
+    finally:
+        conn.close()
+
+def _db_load_posted_ids():
+    """Load all posted ids from DB as list of strings."""
+    conn = _db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM posted_tweet_ids")
+                rows = cur.fetchall()
+                return [str(r[0]) for r in rows]
+    finally:
+        conn.close()
+
+def _db_save_posted_id(tweet_id: str):
+    """Insert id if not exists (id bigint)."""
+    # Convert to int if possible; ignore if non-numeric
+    try:
+        id_int = int(str(tweet_id))
+    except Exception:
+        # store as bigint not possible; skip
+        return
+    conn = _db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO posted_tweet_ids (id) VALUES (%s) ON CONFLICT (id) DO NOTHING",
+                    (id_int,),
+                )
+    finally:
+        conn.close()
 
 def main_loop():
     # Persistent storage ile posted tweet IDs'leri yükle
