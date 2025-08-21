@@ -462,6 +462,37 @@ async def get_latest_tweets_twscrape(count=3, retry_count=0):
             if len(filtered_tweets) >= count:
                 break
         
+        # twscrape dönüşünü deterministik sırala (eskiden yeniye)
+        def _tw_key(td):
+            ts = td.get('created_at') if isinstance(td, dict) else None
+            tsv = 0.0
+            try:
+                if hasattr(ts, 'timestamp'):
+                    tsv = float(ts.timestamp())
+                elif isinstance(ts, (int, float)):
+                    tsv = float(ts)
+            except Exception:
+                tsv = 0.0
+            idv = 0
+            if isinstance(td, dict):
+                for k in ('id', 'tweet_id', 'id_str', 'rest_id'):
+                    v = td.get(k)
+                    if v is None:
+                        continue
+                    s = str(v).strip()
+                    if s.isdigit():
+                        try:
+                            idv = int(s)
+                            break
+                        except Exception:
+                            pass
+            return (tsv, idv)
+
+        try:
+            filtered_tweets.sort(key=_tw_key, reverse=False)
+        except Exception:
+            pass
+        
         return filtered_tweets
         
     except Exception as e:
