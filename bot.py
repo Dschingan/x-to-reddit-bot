@@ -1939,10 +1939,67 @@ def upload_gallery_via_redditwarp(title, image_paths, subreddit_name):
                     print(f"[UYARI] Temizlik sırasında hata: {ce}")
                 return True
             else:
+                # RedditWarp bazen creation nesnesini döndürmeyebilir; canlıda doğrula
+                print("[UYARI] Gallery API yanıtı falsy görünüyor, subreddit'te doğrulanıyor...")
+                try:
+                    sr_obj = reddit.subreddit(subreddit_name)
+                    for s in sr_obj.new(limit=10):
+                        author_name = getattr(s.author, 'name', '') or ''
+                        if author_name.lower() == (REDDIT_USERNAME or '').lower() and s.title == title:
+                            print(f"[+] Gallery gönderisi doğrulandı: {s.url}")
+                            # Başarılı kabul et ve dosyaları temizle
+                            try:
+                                for p in norm_image_paths:
+                                    if p and os.path.exists(p):
+                                        try:
+                                            os.remove(p)
+                                            print(f"[TEMİZLİK] Silindi: {p}")
+                                        except Exception as de:
+                                            print(f"[UYARI] Silinemedi: {p} - {de}")
+                                for p in image_paths:
+                                    if p and os.path.exists(p):
+                                        try:
+                                            os.remove(p)
+                                            print(f"[TEMİZLİK] Silindi: {p}")
+                                        except Exception as de:
+                                            print(f"[UYARI] Silinemedi: {p} - {de}")
+                            except Exception as ce:
+                                print(f"[UYARI] Temizlik sırasında hata: {ce}")
+                            return True
+                except Exception as ve:
+                    print(f"[UYARI] Gallery doğrulama hatası: {ve}")
                 print("[HATA] Gallery oluşturulamadı")
                 return False
         except Exception as create_e:
             print(f"[HATA] Gallery oluşturma hatası: {create_e}")
+            # Hata durumunda da doğrulamayı dene (async yaratılmış olabilir)
+            try:
+                sr_obj = reddit.subreddit(subreddit_name)
+                for s in sr_obj.new(limit=10):
+                    author_name = getattr(s.author, 'name', '') or ''
+                    if author_name.lower() == (REDDIT_USERNAME or '').lower() and s.title == title:
+                        print(f"[+] Gallery gönderisi hata sonrasında doğrulandı: {s.url}")
+                        # Başarılı kabul et ve dosyaları temizle
+                        try:
+                            for p in norm_image_paths:
+                                if p and os.path.exists(p):
+                                    try:
+                                        os.remove(p)
+                                        print(f"[TEMİZLİK] Silindi: {p}")
+                                    except Exception as de:
+                                        print(f"[UYARI] Silinemedi: {p} - {de}")
+                            for p in image_paths:
+                                if p and os.path.exists(p):
+                                    try:
+                                        os.remove(p)
+                                        print(f"[TEMİZLİK] Silindi: {p}")
+                                    except Exception as de:
+                                        print(f"[UYARI] Silinemedi: {p} - {de}")
+                        except Exception as ce:
+                            print(f"[UYARI] Temizlik sırasında hata: {ce}")
+                        return True
+            except Exception as ve:
+                print(f"[UYARI] Gallery doğrulama hatası: {ve}")
             return False
         
     except Exception as e:
@@ -2373,6 +2430,16 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
                     print(f"[UYARI] Resim silinirken hata: {cleanup_e}")
             return True
         else:
+            # Fallback öncesi, Reddit'te gönderi oluşmuş mı kontrol et
+            try:
+                sr_obj = reddit.subreddit(SUBREDDIT)
+                for s in sr_obj.new(limit=10):
+                    author_name = getattr(s.author, 'name', '') or ''
+                    if author_name.lower() == (REDDIT_USERNAME or '').lower() and s.title == title:
+                        print(f"[+] Gallery aslında oluşturulmuş (fallback iptal): {s.url}")
+                        return True
+            except Exception as ve:
+                print(f"[UYARI] Fallback öncesi doğrulama hatası: {ve}")
             print("[!] Gallery yüklenemedi, tekil resim yükleme deneniyor...")
     
     # Tekil resim veya video yükleme (mevcut kod)
