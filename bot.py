@@ -145,6 +145,20 @@ REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
 REDDIT_USER_AGENT = "python:bf6-gaming-news-bot:v1.1.0 (by /u/BFHaber_Bot)"
 RAPIDAPI_TRANSLATE_KEY = os.getenv("RAPIDAPI_TRANSLATE_KEY")
 
+# Belirli tweet ID'lerini asla Reddit'e göndermeyin (kullanıcı isteği)
+# Bu ID'ler işlenmiş olarak da işaretlenir, böylece tekrar denenmez
+EXCLUDED_TWEET_IDS = {
+    "1958232301210407056",
+    "1958243345547071725",
+    "1958186435728547955",
+    "1958160170518819041",
+    "1958257735314923964",
+    "1958243350227664939",
+    "1958227542617596047",
+    "1957995203404423520",
+    "1958025330372825431",
+}
+
 # Nitter configuration - Using twiiit.com for dynamic instance selection + working instances
 _DEFAULT_NITTER_INSTANCES = [
     "https://twiiit.com",           # Dynamic service that redirects to working instances
@@ -2731,6 +2745,12 @@ def main_loop():
                     tweet_id = str(tweet_id).strip()
                 if not tweet_id:
                     print(f"[HATA] Tweet {tweet_index}/{len(tweets)} - Tweet ID bulunamadı!")
+                    continue
+                # Engelli tweet ID'lerini atla ve işlenmiş olarak kaydet
+                if tweet_id in EXCLUDED_TWEET_IDS:
+                    print(f"[SKIP] Engelli tweet ID (gönderilmeyecek): {tweet_id}")
+                    posted_tweet_ids.add(tweet_id)
+                    save_posted_tweet_id(tweet_id)
                     continue
                 
                 if tweet_id in posted_tweet_ids:
