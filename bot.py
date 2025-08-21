@@ -156,6 +156,9 @@ EXCLUDED_TWEET_IDS = {
     "1958243350227664939",
     "1958227542617596047",
     "1957995203404423520",
+    "1958551346367324285",
+    "1958548172915044642",
+    "1958529168376770882",
     "1958287931153760384",
     "1958025330372825431",
 }
@@ -1546,6 +1549,8 @@ def translate_text(text):
             "Translate the text from English to Turkish. Output ONLY the translation with no extra words, "
             "no quotes, no labels. Do NOT translate these terms and keep their original casing: "
             "battlefield, free pass, battle pass.\n"
+            "Additionally, if the source text contains these tags/keywords, translate them EXACTLY as follows (preserve casing where appropriate):\n"
+            "BREAKING => SON DAKİKA; LEAK => SIZINTI; HUMOUR => SÖYLENTİ.\n"
             "Don't make mistakes like this translation: \"What is your FINAL Rating of the Battlefield 6 Beta? (1-10) Turkish translation: Battlefield 6 Beta'nızın SON Derecelendirmesi nedir? (1-10)\" Should be: Battlefield 6 Beta için SON derecelendirmeniz nedir?\n\n"
             "Text:\n" + text.strip()
         )
