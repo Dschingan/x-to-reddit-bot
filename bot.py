@@ -2652,8 +2652,39 @@ def main_loop():
                 time.sleep(NITTER_REQUEST_DELAY)
                 continue
             
-            # Eskiden yeniye işle
-            tweets = list(reversed(tweets))
+            # Eskiden yeniye işle - created_at/id'e göre deterministik sırala
+            def _tweet_sort_key(td):
+                # created_at zamanı (varsa) -> epoch saniyesi
+                ts = td.get('created_at') if isinstance(td, dict) else None
+                tsv = 0.0
+                try:
+                    if hasattr(ts, 'timestamp'):
+                        tsv = float(ts.timestamp())
+                    elif isinstance(ts, (int, float)):
+                        tsv = float(ts)
+                except Exception:
+                    tsv = 0.0
+                # numeric tweet id (Snowflake) -> daha büyük daha yeni
+                idv = 0
+                if isinstance(td, dict):
+                    for k in ('id', 'tweet_id', 'id_str', 'rest_id'):
+                        v = td.get(k)
+                        if v is None:
+                            continue
+                        s = str(v).strip()
+                        if s.isdigit():
+                            try:
+                                idv = int(s)
+                                break
+                            except Exception:
+                                pass
+                return (tsv, idv)
+
+            try:
+                tweets.sort(key=_tweet_sort_key, reverse=False)
+            except Exception:
+                # Her ihtimale karşı önce reverse deneyip sonra işle
+                tweets = list(reversed(tweets))
             print(f"[+] {len(tweets)} tweet bulundu, eskiden yeniye doğru işlenecek...")
             
             # Her tweet'i eskiden yeniye doğru işle
