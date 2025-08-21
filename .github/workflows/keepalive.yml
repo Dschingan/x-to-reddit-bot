@@ -18,10 +18,17 @@ jobs:
             exit 1
           fi
           echo "Pinging $KEEPALIVE_URL ..."
+          set +e
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             --connect-timeout 5 --max-time 15 \
-            --retry 2 --retry-connrefused \
+            --retry 2 --retry-connrefused --location \
             "$KEEPALIVE_URL")
+          CURL_EXIT=$?
+          set -e
+          if [ $CURL_EXIT -ne 0 ]; then
+            echo "curl exited with code $CURL_EXIT"
+            HTTP_CODE=${HTTP_CODE:-000}
+          fi
           echo "HTTP $HTTP_CODE"
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 400 ]; then
             echo "Ping failed with HTTP code $HTTP_CODE"
