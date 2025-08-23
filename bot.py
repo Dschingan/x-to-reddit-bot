@@ -2711,6 +2711,60 @@ def _db_save_posted_id(tweet_id: str):
     finally:
         conn.close()
 
+def get_latest_tweets_with_retweet_check(count: int = 8):
+    """En son tweet'leri topla ve reply/retweet'leri ele.
+    Dönüş formatı main_loop'un beklediği gibi dict listesi olur:
+      { 'id': str, 'text': str, 'created_at': any, 'media_urls': list[str] }
+    """
+    try:
+        # Önce Pnytter, sonra RSS fallback dene
+        tweets = _fallback_pnytter_tweets(count=count) or []
+        if not tweets:
+            tweets = _fallback_rss_tweets(count=count) or []
+
+        normalized = []
+        for t in tweets:
+            try:
+                tid = (
+                    t.get('id') if isinstance(t, dict) else None
+                ) or (
+                    t.get('tweet_id') if isinstance(t, dict) else None
+                ) or (
+                    t.get('id_str') if isinstance(t, dict) else None
+                ) or (
+                    t.get('rest_id') if isinstance(t, dict) else None
+                )
+                tid = str(tid).strip() if tid is not None else ''
+                if not tid:
+                    continue
+
+                text = (t.get('text') if isinstance(t, dict) else '') or ''
+
+                # Basit filtreler: reply veya retweet olanları atla
+                if _is_reply_text(text):
+                    continue
+                low = text.strip().lower()
+                if low.startswith('rt '):
+                    continue
+                if _is_retweet_of_target(text, TWITTER_SCREENNAME):
+                    continue
+
+                normalized.append({
+                    'id': tid,
+                    'text': text,
+                    'created_at': t.get('created_at') if isinstance(t, dict) else None,
+                    'media_urls': (t.get('media_urls') if isinstance(t, dict) else []) or []
+                })
+                if len(normalized) >= count:
+                    break
+            except Exception:
+                continue
+
+        return normalized
+    except Exception as e:
+        print(f"[HATA] get_latest_tweets_with_retweet_check hata: {e}")
+        return []
+
 def main_loop():
     # Persistent storage ile posted tweet IDs'leri yükle
     posted_tweet_ids = load_posted_tweet_ids()
