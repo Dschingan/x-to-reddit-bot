@@ -33,7 +33,7 @@ from google.genai import types
 
 # FastAPI for web service
 import threading
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 import uvicorn
 import psycopg2
@@ -1320,13 +1320,17 @@ app = FastAPI(title="X-to-Reddit Bot")
 _worker_started = False
 _worker_lock = threading.Lock()
 
-@app.get("/", response_class=PlainTextResponse)
-def root():
+@app.api_route("/", methods=["GET", "HEAD"], response_class=PlainTextResponse)
+def root(request: Request):
+    if request.method == "HEAD":
+        return PlainTextResponse("", status_code=200)
     return "OK"
 
-@app.get("/healthz", response_class=PlainTextResponse)
-def healthz():
+@app.api_route("/healthz", methods=["GET", "HEAD"], response_class=PlainTextResponse)
+def healthz(request: Request):
     try:
+        if request.method == "HEAD":
+            return PlainTextResponse("", status_code=200)
         status = get_instance_health_status()
         return "healthy" if status else "ok"
     except Exception:
