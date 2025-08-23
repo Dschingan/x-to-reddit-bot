@@ -2712,17 +2712,92 @@ def _db_save_posted_id(tweet_id: str):
         conn.close()
 
 def get_latest_tweets_with_retweet_check(count: int = 8):
-    """En son tweet'leri topla ve reply/retweet'leri ele.
-    Dönüş formatı main_loop'un beklediği gibi dict listesi olur:
-      { 'id': str, 'text': str, 'created_at': any, 'media_urls': list[str] }
+    """TheBFWire timeline'ını twscrape ile oku (birincil),
+    reply/retweet'leri ele ve medya URL'lerini çıkar. Hata olursa Pnytter/RSS fallback.
+    Dönüş: list[{'id','text','created_at','media_urls'}]
     """
     try:
-        # Önce Pnytter, sonra RSS fallback dene
+        # Global rate-limit uygula
+        global LAST_REQUEST_TIME
+        current_time = time.time()
+        time_since_last_request = current_time - LAST_REQUEST_TIME
+        if time_since_last_request < MIN_REQUEST_INTERVAL:
+            wait_time = MIN_REQUEST_INTERVAL - time_since_last_request
+            print(f"[+] (TL) Rate limiting: {int(wait_time)} saniye bekleniyor...")
+            time.sleep(wait_time)
+        LAST_REQUEST_TIME = time.time()
+
+        def _twscrape_fetch_sync():
+            async def _run():
+                try:
+                    api = await init_twscrape_api()
+                    # Kullanıcıyı login ile getir
+                    user = await api.user_by_login(TWITTER_SCREENNAME)
+                    if not user:
+                        return []
+                    out = []
+                    # Daha fazlasını çekip filtreleyeceğimiz için limit*3 oku
+                    async for tw in api.user_tweets(user.id, limit=max(10, count * 3)):
+                        # Reply veya retweet olanları atla
+                        if getattr(tw, 'inReplyToTweetId', None):
+                            continue
+                        if getattr(tw, 'retweetedTweet', None):
+                            continue
+
+                        # Medya URL'lerini çıkar
+                        media_urls: list[str] = []
+                        md = getattr(tw, 'media', None)
+                        if md:
+                            for p in getattr(md, 'photos', []) or []:
+                                if getattr(p, 'url', None):
+                                    media_urls.append(p.url)
+                            for v in getattr(md, 'videos', []) or []:
+                                variants = getattr(v, 'variants', []) or []
+                                if variants:
+                                    best = max(variants, key=lambda x: getattr(x, 'bitrate', 0))
+                                    if getattr(best, 'url', None):
+                                        media_urls.append(best.url)
+                            for a in getattr(md, 'animated', []) or []:
+                                if getattr(a, 'videoUrl', None):
+                                    media_urls.append(a.videoUrl)
+
+                        out.append({
+                            'id': str(getattr(tw, 'id', getattr(tw, 'id_str', ''))),
+                            'text': getattr(tw, 'rawContent', ''),
+                            'created_at': getattr(tw, 'date', None),
+                            'media_urls': media_urls,
+                            'url': getattr(tw, 'url', None),
+                        })
+                        if len(out) >= count:
+                            break
+                    # Eskiden yeniye sırala
+                    try:
+                        out.sort(key=_tweet_sort_key, reverse=False)
+                    except Exception:
+                        pass
+                    return out
+                except Exception as e:
+                    print(f"[UYARI] twscrape timeline hatası: {e}")
+                    return []
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(_run())
+            finally:
+                loop.close()
+
+        # 1) TWSCRAPE PRIMARY
+        normalized = _twscrape_fetch_sync()
+        if normalized:
+            return normalized
+
+        # 2) FALLBACKS
         tweets = _fallback_pnytter_tweets(count=count) or []
         if not tweets:
             tweets = _fallback_rss_tweets(count=count) or []
 
-        normalized = []
+        out = []
         for t in tweets:
             try:
                 tid = (
@@ -2739,8 +2814,6 @@ def get_latest_tweets_with_retweet_check(count: int = 8):
                     continue
 
                 text = (t.get('text') if isinstance(t, dict) else '') or ''
-
-                # Basit filtreler: reply veya retweet olanları atla
                 if _is_reply_text(text):
                     continue
                 low = text.strip().lower()
@@ -2749,18 +2822,17 @@ def get_latest_tweets_with_retweet_check(count: int = 8):
                 if _is_retweet_of_target(text, TWITTER_SCREENNAME):
                     continue
 
-                normalized.append({
+                out.append({
                     'id': tid,
                     'text': text,
                     'created_at': t.get('created_at') if isinstance(t, dict) else None,
                     'media_urls': (t.get('media_urls') if isinstance(t, dict) else []) or []
                 })
-                if len(normalized) >= count:
+                if len(out) >= count:
                     break
             except Exception:
                 continue
-
-        return normalized
+        return out
     except Exception as e:
         print(f"[HATA] get_latest_tweets_with_retweet_check hata: {e}")
         return []
