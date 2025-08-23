@@ -325,6 +325,23 @@ def clean_tweet_text(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
+def extract_username_from_tweet_url(url: str) -> str:
+    """Tweet URL'sinden kullanıcı adını çıkar.
+    Beklenen biçimler:
+    - https://x.com/<username>/status/<id>
+    - https://twitter.com/<username>/status/<id>
+    Uyumlu değilse varsayılan olarak TWITTER_SCREENNAME döner.
+    """
+    try:
+        if not url:
+            return TWITTER_SCREENNAME
+        m = re.search(r"https?://(?:x|twitter)\.com/([^/]+)/status/", url)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return TWITTER_SCREENNAME
+
 async def init_twscrape_api():
     """twscrape API'yi başlat"""
     global twscrape_api
@@ -427,8 +444,7 @@ async def _get_bf6_retweets_twscrape(target: str, count: int = 3):
                 'text': getattr(rt, 'rawContent', ''),
                 'created_at': getattr(rt, 'date', None),
                 'media_urls': media_urls,
-                'url': getattr(rt, 'url', None),
-                'author_username': (getattr(getattr(rt, 'user', None), 'username', None) or None)
+                'url': getattr(rt, 'url', None)
             }
 
             results.append(tweet_data)
@@ -3092,16 +3108,33 @@ def main_loop():
                             posted_tweet_ids.add(tweet_id)
                             save_posted_tweet_id(tweet_id)
                             print(f"[+] RT ID kaydedildi (işlem öncesi): {tweet_id}")
-                            rt_url = tweet_data.get("url") or f"https://x.com/i/web/status/{tweet_id}"
-                            print(f"[+] RT linki: {rt_url}")
+                            print(f"[+] RT linki: https://x.com/{TWITTER_SCREENNAME}/status/{tweet_id}")
 
                             text = tweet_data.get("text", "")
                             print(f"[+] Orijinal RT Metin: {text[:100]}{'...' if len(text) > 100 else ''}")
                             cleaned_text = clean_tweet_text(text)
                             print(f"[+] Temizlenmiş RT Metin: {cleaned_text[:100]}{'...' if len(cleaned_text) > 100 else ''}")
-                            translated = translate_text(cleaned_text)
+                            # 'Kaynak' başlığı sadece METİN SADECE LINKlerden ibaretse kullanılacak.
+                            # Karar için sadece URL'leri kaldır ve kontrol et (hashtagleri kaldırma):
+                            fallback_source_title = None
+                            url_only_removed = re.sub(r'https?://\S+', '', text)
+                            url_only_removed = re.sub(r'www\.\S+', '', url_only_removed)
+                            url_only_removed = re.sub(r't\.co/\S+', '', url_only_removed)
+                            url_only_removed = re.sub(r'\s+', ' ', url_only_removed).strip()
+                            if not url_only_removed:
+                                # Metin URL'lerden ibaret -> Kaynak başlığı kullan
+                                rt_url = tweet_data.get("url") or f"https://x.com/i/web/status/{tweet_id}"
+                                rt_author = extract_username_from_tweet_url(rt_url)
+                                fallback_source_title = f"Kaynak: @{rt_author}"
+                                translated = None
+                                print(f"[INFO] RT metni sadece link, başlık kaynak olarak ayarlanacak: {fallback_source_title}")
+                            else:
+                                translated = translate_text(cleaned_text)
                             if translated:
                                 print(f"[+] RT Çeviri: {translated[:100]}{'...' if len(translated) > 100 else ''}")
+                            elif fallback_source_title:
+                                # Çeviri yok ama kaynak başlığı mevcut; devam edilecek
+                                print("[INFO] RT çeviri atlandı, kaynak başlığı kullanılacak")
                             else:
                                 print(f"[UYARI] RT çeviri başarısız, atlanıyor: {tweet_id}")
                                 continue
@@ -3181,24 +3214,13 @@ def main_loop():
                             ]
                             chosen_text = next((c for c in candidates if c), "")
                             if not chosen_text:
-                                chosen_text = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
-                            # Kaynak kullanıcı adını belirle
-                            author_username = (tweet_data.get("author_username") or "").strip()
-                            if not author_username:
-                                try:
-                                    _u = (tweet_data.get("url") or "").strip()
-                                    m = re.match(r"https?://(?:x|twitter)\.com/([^/]+)/status/", _u)
-                                    if m:
-                                        author_username = m.group(1)
-                                except Exception:
-                                    author_username = ""
-
-                            # Başlığa Kaynak: @username ekle
-                            prefix = f"Kaynak: @{author_username}" if author_username else ""
-                            final_title_text = (
-                                f"{prefix} — {chosen_text}" if prefix and chosen_text else (prefix or chosen_text)
-                            )
-                            title_to_use, remainder_to_post = smart_split_title(final_title_text, 300)
+                                # Sadece temizlenmiş metin boş olduğunda oluşturulan kaynak başlığını kullan
+                                if 'fallback_source_title' in locals() and fallback_source_title:
+                                    chosen_text = fallback_source_title
+                                else:
+                                    # Eski davranış: genel fallback (Kaynak kullanma!)
+                                    chosen_text = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
+                            title_to_use, remainder_to_post = smart_split_title(chosen_text, 300)
                             print(f"[+] RT Kullanılacak başlık ({len(title_to_use)}): {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
                             if remainder_to_post:
                                 print(f"[+] RT Başlığın kalan kısmı ({len(remainder_to_post)} karakter) gönderi açıklaması/yorum olarak eklenecek")
