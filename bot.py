@@ -189,7 +189,6 @@ else:
     NITTER_INSTANCES = _DEFAULT_NITTER_INSTANCES[:]
 CURRENT_NITTER_INDEX = 0
 TWITTER_SCREENNAME = "TheBFWire"
-TWITTER_SCREENNAME_SECONDARY = "bf6_tr"  # Retweet'leri için ikincil hesap
 NITTER_REQUEST_DELAY = 15  # seconds between requests (artırıldı)
 MAX_RETRIES = 2  # Maximum number of retries for failed requests (azaltıldı)
 MIN_REQUEST_INTERVAL = 30  # Minimum seconds between any requests
@@ -340,7 +339,150 @@ async def init_twscrape_api():
         print("[+] twscrape API başlatıldı")
     return twscrape_api
 
-def get_latest_tweets_with_retweet_check(count=3, retry_count=0, screen_name=None):
+def _is_retweet_of_target(raw_text: str, target_screenname: str) -> bool:
+    """Metnin belirli bir hedef hesabın retweet'i olup olmadığını kontrol eder."""
+    if not raw_text:
+        return False
+    pattern = rf"^RT @{re.escape(target_screenname)}:\s*"
+    return bool(re.search(pattern, raw_text))
+
+def get_latest_bf6_retweets(count: int = 3):
+    """twscrape ile TWITTER_SCREENNAME zaman akışından sadece @bf6_tr retweet'lerini getirir.
+    Başarısız olursa sessizce boş liste döner. Mevcut pipeline ile aynı veri şeklini üretir.
+    """
+    target = os.getenv("SECONDARY_RETWEET_TARGET", "bf6_tr")
+    try:
+        # Rate limiting (aynı mekanizma)
+        global LAST_REQUEST_TIME
+        current_time = time.time()
+        time_since_last_request = current_time - LAST_REQUEST_TIME
+        if time_since_last_request < MIN_REQUEST_INTERVAL:
+            wait_time = MIN_REQUEST_INTERVAL - time_since_last_request
+            print(f"[+] (RT) Rate limiting: {int(wait_time)} saniye bekleniyor...")
+            time.sleep(wait_time)
+        LAST_REQUEST_TIME = time.time()
+
+        # Async twscrape çağrısı
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            tweets = loop.run_until_complete(_get_bf6_retweets_twscrape(target, count))
+        finally:
+            loop.close()
+        return tweets or []
+    except Exception as e:
+        print(f"[UYARI] @bf6_tr retweet'leri alınamadı: {e}")
+        return []
+
+async def _get_bf6_retweets_twscrape(target: str, count: int = 3):
+    """Async: TWITTER_SCREENNAME akışından sadece belirli hedef (@bf6_tr) retweet'leri getirir."""
+    try:
+        api = await init_twscrape_api()
+        user = await api.user_by_login(TWITTER_SCREENNAME)
+        if not user:
+            print(f"[HATA] Kullanıcı bulunamadı: {TWITTER_SCREENNAME}")
+            return []
+
+        results = []
+        detail_lookups = 0
+        max_detail_lookups = max(1, count)
+        async for tweet in api.user_tweets(user.id, limit=count * 6):
+            raw = getattr(tweet, 'rawContent', '') or ''
+            if not _is_retweet_of_target(raw, target):
+                continue
+
+            media_urls = []
+            t_media = getattr(tweet, 'media', None)
+            # Gerekirse detay çağrısı
+            if not t_media or (
+                len(getattr(t_media, 'photos', []) or []) == 0 and
+                len(getattr(t_media, 'videos', []) or []) == 0 and
+                len(getattr(t_media, 'animated', []) or []) == 0
+            ):
+                if detail_lookups < max_detail_lookups:
+                    try:
+                        detailed = await asyncio.wait_for(
+                            api.tweet_details(tweet.id),
+                            timeout=TWSCRAPE_DETAIL_TIMEOUT,
+                        )
+                        detail_lookups += 1
+                        if detailed and getattr(detailed, 'media', None):
+                            t_media = detailed.media
+                    except Exception:
+                        pass
+
+            if t_media:
+                for photo in getattr(t_media, 'photos', []) or []:
+                    url = getattr(photo, 'url', None)
+                    if url:
+                        media_urls.append(url)
+                for video in getattr(t_media, 'videos', []) or []:
+                    variants = getattr(video, 'variants', []) or []
+                    if variants:
+                        best = max(variants, key=lambda x: getattr(x, 'bitrate', 0))
+                        vurl = getattr(best, 'url', None)
+                        if vurl:
+                            media_urls.append(vurl)
+                for gif in getattr(t_media, 'animated', []) or []:
+                    vurl = getattr(gif, 'videoUrl', None)
+                    if vurl:
+                        media_urls.append(vurl)
+
+            # Medya hâlâ yoksa Nitter HTML üzerinden dene (retweet sayfası genelde medyayı gösterir)
+            if not media_urls:
+                try:
+                    mu = _fetch_media_from_nitter_html_multi(TWITTER_SCREENNAME, str(tweet.id))
+                    if mu:
+                        media_urls.extend(mu)
+                except Exception:
+                    pass
+
+            results.append({
+                'id': str(tweet.id),
+                'text': raw,
+                'created_at': getattr(tweet, 'date', None),
+                'media_urls': media_urls,
+                'url': getattr(tweet, 'url', None),
+            })
+            if len(results) >= count:
+                break
+
+        # Eskiden yeniye sırala
+        def _tw_key(td):
+            ts = td.get('created_at') if isinstance(td, dict) else None
+            tsv = 0.0
+            try:
+                if hasattr(ts, 'timestamp'):
+                    tsv = float(ts.timestamp())
+                elif isinstance(ts, (int, float)):
+                    tsv = float(ts)
+            except Exception:
+                tsv = 0.0
+            idv = 0
+            if isinstance(td, dict):
+                for k in ('id', 'tweet_id', 'id_str', 'rest_id'):
+                    v = td.get(k)
+                    if v is None:
+                        continue
+                    s = str(v).strip()
+                    if s.isdigit():
+                        try:
+                            idv = int(s)
+                            break
+                        except Exception:
+                            pass
+            return (tsv, idv)
+
+        try:
+            results.sort(key=_tw_key, reverse=False)
+        except Exception:
+            pass
+        return results
+    except Exception as e:
+        print(f"[HATA] twscrape (RT) async hatası: {e}")
+        return []
+
+def get_latest_tweets_with_retweet_check(count=3, retry_count=0):
     """twscrape kullanarak son tweet'leri al, retweet/pin'leri atla, medya URL'lerini çıkar."""
     global CURRENT_NITTER_INDEX, LAST_REQUEST_TIME
     
@@ -390,10 +532,9 @@ async def get_latest_tweets_twscrape(count=3, retry_count=0):
         print("[+] twscrape API başlatıldı")
         
         # Kullanıcı bilgilerini al
-        target_username = screen_name or TWITTER_SCREENNAME
-        user = await api.user_by_login(target_username)
+        user = await api.user_by_login(TWITTER_SCREENNAME)
         if not user:
-            print(f"[HATA] Kullanıcı bulunamadı: {target_username}")
+            print(f"[HATA] Kullanıcı bulunamadı: {TWITTER_SCREENNAME}")
             return []
         
         # Tweet'leri çek (son gönderiler). Medya eksik çıkarsa tweet_details ile zenginleştir.
@@ -416,18 +557,9 @@ async def get_latest_tweets_twscrape(count=3, retry_count=0):
                 print(f"[DEBUG] twscrape Tweet attributes: {[attr for attr in dir(tweet) if not attr.startswith('_')]}")
                 
             if hasattr(tweet, 'rawContent') and tweet.rawContent:
-                # Ana hesap için retweet'leri atla, ikincil hesap için sadece retweet'leri al
-                is_retweet = tweet.rawContent.startswith('RT @') or 'RT @' in tweet.rawContent
-                if screen_name == TWITTER_SCREENNAME_SECONDARY:
-                    # bf6_tr hesabı için sadece retweet'leri işle
-                    if not is_retweet:
-                        print(f"[SKIP] {screen_name} - Retweet olmayan tweet atlandı: {tweet.id}")
-                        continue
-                else:
-                    # Ana hesap için retweet'leri atla
-                    if is_retweet:
-                        print(f"[SKIP] Retweet atlandı: {tweet.id}")
-                        continue
+                if tweet.rawContent.startswith('RT @') or 'RT @' in tweet.rawContent:
+                    print(f"[SKIP] Retweet atlandı: {tweet.id}")
+                    continue
             
             # Medya URL'lerini çıkar (gerekirse detay çağrısı ile zenginleştir)
             media_urls = []
@@ -539,17 +671,26 @@ def _fallback_pnytter_tweets(count=3, retry_count=0):
         # Ana instance'ları ekle (opsiyonel)
         if not PNYTTER_AVAILABLE:
             print("[INFO] Pnytter mevcut değil, fallback atlanıyor")
+            return []
+        pnytter = Pnytter(nitter_instances=[NITTER_INSTANCES[0]])
+        
+        # Diğer instance'ları ekle (times parametresi ile güvenilirlik artır)
+        for instance in NITTER_INSTANCES[1:]:
+            pnytter.add_instance(instance, times=2)
+        
+        print(f"[+] Pnytter başlatıldı, {len(NITTER_INSTANCES)} instance kullanılıyor")
+        
+        # Tweet'leri çek (filter_from ve filter_to parametreleri ekle)
         from datetime import datetime, timedelta
         today = datetime.now()
         week_ago = today - timedelta(days=7)
-        target_username = screen_name or TWITTER_SCREENNAME
-        tweets = pnytter.get_user_tweets_list(target_username, 
+        tweets = pnytter.get_user_tweets_list(TWITTER_SCREENNAME, 
                                             filter_from=week_ago.strftime("%Y-%m-%d"),
                                             filter_to=today.strftime("%Y-%m-%d"))
         
         if not tweets:
             print("[UYARI] Pnytter ile tweet bulunamadı, RSS fallback'e geçiliyor...")
-            return get_latest_tweets_rss_fallback(count, screen_name)
+            return _fallback_rss_tweets(count, retry_count)
         
         print(f"[+] Pnytter ile {len(tweets)} tweet bulundu")
         
@@ -586,17 +727,9 @@ def _fallback_pnytter_tweets(count=3, retry_count=0):
                     print(f"[DEBUG] Tweet {i+1} sample: {list(tweet.items())[:5]}")
             # Retweet kontrolü
             if hasattr(tweet, 'text') and tweet.text:
-                is_retweet = tweet.text.startswith('RT @') or 'RT @' in tweet.text
-                if screen_name == TWITTER_SCREENNAME_SECONDARY:
-                    # bf6_tr hesabı için sadece retweet'leri işle
-                    if not is_retweet:
-                        print(f"[SKIP] {screen_name} - Retweet olmayan tweet atlandı: {tweet.tweet_id}")
-                        continue
-                else:
-                    # Ana hesap için retweet'leri atla
-                    if is_retweet:
-                        print(f"[SKIP] Retweet atlandı: {tweet.tweet_id}")
-                        continue
+                if tweet.text.startswith('RT @') or 'RT @' in tweet.text:
+                    print(f"[SKIP] Retweet atlandı: {tweet.tweet_id}")
+                    continue
                 
                 # Pin kontrolü
                 if 'pinned' in tweet.text.lower() or 'sabitlenmiş' in tweet.text.lower():
@@ -618,23 +751,19 @@ def _fallback_pnytter_tweets(count=3, retry_count=0):
                         continue
             
             # Tweet objesini uygun formata çevir
-            tid = tweet.tweet_id if hasattr(tweet, 'tweet_id') else None
-            txt = tweet.text if hasattr(tweet, 'text') else ''
-            tweet_obj = {
-                'tweet_id': tid,
-                'text': clean_tweet_text(txt),
+            tweet_data = {
+                'id': tweet.tweet_id if hasattr(tweet, 'tweet_id') else None,
+                'text': tweet.text if hasattr(tweet, 'text') else '',
                 'created_at': tweet.created_on if hasattr(tweet, 'created_on') else None,
                 'media_urls': media_urls,
-                'source_account': target_username,  # Hangi hesaptan geldiğini belirt
                 'stats': {
                     'retweet_count': tweet.stats.retweets if hasattr(tweet, 'stats') and hasattr(tweet.stats, 'retweets') else 0,
                     'favorite_count': tweet.stats.likes if hasattr(tweet, 'stats') and hasattr(tweet.stats, 'likes') else 0,
                     'reply_count': tweet.stats.comments if hasattr(tweet, 'stats') and hasattr(tweet.stats, 'comments') else 0,
-                },
-                'link': f"https://x.com/{target_username}/status/{tid}"
+                }
             }
             
-            filtered_tweets.append(tweet_obj)
+            filtered_tweets.append(tweet_data)
             
             if len(filtered_tweets) >= count:
                 break
@@ -645,32 +774,232 @@ def _fallback_pnytter_tweets(count=3, retry_count=0):
     except Exception as e:
         print(f"[HATA] Pnytter hatası: {e}")
         print("[+] RSS fallback'e geçiliyor...")
-        return get_latest_tweets_rss_fallback(count, screen_name)
+        return _fallback_rss_tweets(count, retry_count)
 
-def get_latest_tweets_rss_fallback(count=3, screen_name=None):
-    """RSS ile tweet'leri çek (Nitter RSS feed)."""
+def _fallback_rss_tweets(count=3, retry_count=0):
+    """RSS fallback fonksiyonu - Pnytter başarısız olursa kullanılır"""
+    print("[+] RSS fallback başlatılıyor...")
     
-    # Nitter instance'larını dene
-    rss_instances_to_try = NITTER_INSTANCES[:]
+    def _normalize_urls(seq):
+        urls = []
+        for v in (seq or []):
+            if isinstance(v, str):
+                urls.append(v)
+            elif isinstance(v, dict):
+                for k in ("url", "src", "href"):
+                    if k in v:
+                        urls.append(v[k])
+                        break
+        return urls
+
+    # 1) Pnytter ile dene (instance'ları tek tek dene, sırayı karıştır ama tercih edilenleri öncele)
+    try:
+        from pnytter import Pnytter
+        print("[+] Pnytter ile tweetler çekiliyor")
+        # Prefer first three working instances, then randomize the rest
+        preferred = NITTER_INSTANCES[:3]
+        others = NITTER_INSTANCES[3:]
+        random.shuffle(others)
+        try_order = [*preferred, *others]
+
+        from datetime import datetime, timedelta
+        to_dt = datetime.utcnow() + timedelta(days=1)  # Tomorrow to ensure we get today's tweets
+        from_dt = datetime.utcnow() - timedelta(days=2)  # Last 2 days to get recent tweets
+
+        tweets = []
+
+        def _is_reply_text(txt: str) -> bool:
+            t = (txt or "").strip()
+            # Yanıt tespiti: @ ile başlayan veya yaygın yanıt kalıpları
+            if not t:
+                return False
+            if t.startswith('@'):
+                return True
+            low = t.lower()
+            reply_markers = [
+                'replying to', 'in reply to', 'yanıt olarak', 'yanit olarak',
+                'cevap olarak', 'yanıtladı', 'cevapladı', 'replied to'
+            ]
+            return any(m in low for m in reply_markers)
+
+        def _is_quote_text(txt: str) -> bool:
+            low = (txt or '').lower()
+            quote_markers = ['quote tweet', 'quoted tweet', 'alıntı', 'alinti']
+            return any(m in low for m in quote_markers)
+        for inst in try_order:
+            try:
+                if not PNYTTER_AVAILABLE:
+                    raise RuntimeError("Pnytter mevcut değil")
+                print(f"[+] Pnytter instance deneniyor: {inst}")
+                pny = Pnytter(nitter_instances=[inst])
+                # Try a couple of times per instance to bypass transient 429/403
+                per_inst_attempts = 0
+                pny_tweets = None
+                while per_inst_attempts < 3 and pny_tweets is None:  # Increased attempts
+                    per_inst_attempts += 1
+                    try:
+                        # Always try without date filter first to get latest tweets
+                        try:
+                            pny_tweets = pny.get_user_tweets_list(TWITTER_SCREENNAME)
+                        except TypeError:
+                            # If date filtering is required, use a wider range
+                            pny_tweets = pny.get_user_tweets_list(
+                                TWITTER_SCREENNAME,
+                                filter_from=from_dt.strftime('%Y-%m-%d'),
+                                filter_to=to_dt.strftime('%Y-%m-%d'),
+                            )
+                        # Check if we got valid tweets
+                        if pny_tweets and len(pny_tweets) > 0:
+                            print(f"[+] {inst} başarılı: {len(pny_tweets)} tweet bulundu")
+                            break
+                        else:
+                            print(f"[UYARI] {inst} boş sonuç döndü")
+                            pny_tweets = None
+                    except Exception as inner_e:
+                        msg = str(inner_e)
+                        if '403' in msg and 'Forbidden' in msg:
+                            print(f"[UYARI] {inst} - 403 Forbidden (dosya izinleri sorunu), sonraki deneme...")
+                            sleep_s = 2 + per_inst_attempts + random.uniform(0, 1)
+                            time.sleep(sleep_s)
+                        elif '429' in msg:
+                            sleep_s = 5 + per_inst_attempts * 3 + random.uniform(0, 3)
+                            print(f"[UYARI] {inst} - 429 Too Many Requests -> {int(sleep_s)} sn bekle ve yeniden dene")
+                            time.sleep(sleep_s)
+                        elif 'No address associated with hostname' in msg or 'Failed to establish' in msg:
+                            print(f"[UYARI] {inst} erişilemez: {msg}")
+                            break  # Bu instance'ı atla
+                        elif 'Connection refused' in msg:
+                            print(f"[UYARI] {inst} bağlantı reddedildi")
+                            break  # Bu instance'ı atla
+                        else:
+                            print(f"[UYARI] {inst} beklenmeyen hata: {msg}")
+                            if per_inst_attempts >= 3:
+                                break
+
+                slice_count = max(count * 2, 15)  # Increased slice to catch more tweets
+                for t in pny_tweets[:slice_count]:
+                    tid = str(getattr(t, 'tweet_id', '') or '')
+                    txt = getattr(t, 'text', '') or ''
+                    if not tid:
+                        continue
+                    # Pinned kontrolü (varsa atla)
+                    if getattr(t, 'is_pinned', False):
+                        print(f"[INFO] Pinned tweet atlandı: {tid}")
+                        continue
+                    # Retweet heuristics (Pnytter explicit flag yok)
+                    if txt.strip().startswith('RT @'):
+                        # Metinden retweet sinyali -> kesin atla
+                        print(f"[INFO] Retweet (RT @ ile başlıyor) atlandı: {tid}")
+                        continue
+                    # Retweet alan/flag kontrolleri -> herhangi biri varsa kesin atla
+                    try:
+                        is_retweet_flag = False
+                        for rattr in (
+                            'is_retweet', 'retweet', 'retweeted', 'retweeted_status_id',
+                            'retweeted_status', 'retweeted_by', 'rt', 'is_rt'
+                        ):
+                            rval = getattr(t, rattr, None)
+                            if isinstance(rval, bool) and rval:
+                                is_retweet_flag = True
+                                break
+                            if rval not in (None, '', 0, False):
+                                is_retweet_flag = True
+                                break
+                        if is_retweet_flag:
+                            print(f"[INFO] Retweet bayrakları tespit edildi, atlandı: {tid}")
+                            continue
+                    except Exception:
+                        pass
+                    # Pnytter nesnesinde yanıtla ilgili alanlar varsa kontrol et
+                    is_reply_flag = False
+                    for attr in (
+                        'is_reply', 'is_reply_to', 'reply_to',
+                        'in_reply_to_status_id', 'in_reply_to_user_id', 'in_reply_to_screen_name'
+                    ):
+                        val = getattr(t, attr, None)
+                        if isinstance(val, bool) and val:
+                            is_reply_flag = True
+                            break
+                        if val not in (None, '', 0, False):
+                            is_reply_flag = True
+                            break
+                    # YANIT/ALINTI TESPİTİ: KESİN ATLA
+                    # Metin '@' ile başlıyorsa doğrudan yanıt kabul et
+                    if txt.strip().startswith('@'):
+                        print(f"[INFO] Reply (metin '@' ile başlıyor) atlandı: {tid}")
+                        continue
+                    # Alan/flag kontrolleri + metin sezgileri -> herhangi biri varsa atla
+                    if is_reply_flag or _is_reply_text(txt) or _is_quote_text(txt):
+                        print(f"[INFO] Yanıt/alıntı olduğundan atlandı: {tid}")
+                        continue
+                    # Ek kural: Kısa ve bağlamsız (URL/hashtag yok) metinler genelde yanıttır
+                    raw_txt = txt or ''
+                    has_url = bool(re.search(r'https?://\S+', raw_txt))
+                    has_hashtag = bool(re.search(r'#\w+', raw_txt))
+                    has_punct = any(ch in raw_txt for ch in [':', '-', '—', '!', '?', '"', '"', '"', '\''])
+                    has_domain_terms = any(k in raw_txt for k in ['BF', 'Battlefield', 'battlefield', 'BF6'])
+                    short_len_threshold = 50
+                    if (len(raw_txt.strip()) < short_len_threshold) and not (has_url or has_hashtag or has_punct or has_domain_terms):
+                        print(f"[INFO] Kısa/bağlamsız tweet atlandı (muhtemel yanıt): {tid} -> '{raw_txt[:80]}'")
+                        continue
+                    # Tweet'te medya var mı kontrol et
+                    has_media_indicator = any(indicator in raw_txt for indicator in ['pic.twitter.com', 'video.twitter.com', 'pbs.twimg.com'])
+                    
+                    # Nitter HTML'den medya URL'leri topla (çoklu instance dene)
+                    media_urls = _fetch_media_from_nitter_html_multi(TWITTER_SCREENNAME, tid, preferred=inst)
+                    
+                    # Medya beklenen ama alınamadıysa tweet'i atla
+                    if has_media_indicator and media_urls is None:
+                        print(f"[INFO] Medya bekleniyordu ama alınamadı, tweet atlanıyor: {tid}")
+                        continue
+                    
+                    # media_urls None ise boş liste yap
+                    if media_urls is None:
+                        media_urls = []
+                    
+                    tweets.append({
+                        'tweet_id': tid,
+                        'text': clean_tweet_text(txt),
+                        'media_urls': media_urls,
+                        'link': f"https://x.com/{TWITTER_SCREENNAME}/status/{tid}",
+                    })
+                    if len(tweets) >= count:
+                        break
+                if tweets:
+                    print(f"[+] Pnytter ile {len(tweets)} tweet bulundu ({inst})")
+                    return {"tweets": tweets}
+            except Exception as _per_inst_err:
+                error_msg = str(_per_inst_err)
+                if 'No address associated with hostname' in error_msg:
+                    print(f"[UYARI] {inst} DNS hatası - instance erişilemez")
+                elif 'Connection refused' in error_msg:
+                    print(f"[UYARI] {inst} bağlantı reddedildi - instance kapalı")
+                elif 'timeout' in error_msg.lower():
+                    print(f"[UYARI] {inst} timeout - instance yavaş")
+                else:
+                    print(f"[UYARI] Pnytter instance başarısız: {inst} -> {_per_inst_err}")
+                time.sleep(1)
+        print("[!] Pnytter ile uygun tweet bulunamadı, RSS fallback deneniyor")
+    except ImportError:
+        print("[UYARI] Pnytter kütüphanesi bulunamadı, RSS fallback deneniyor")
+    except Exception as e:
+        print(f"[UYARI] Pnytter genel hatası: {e}. RSS fallback deneniyor")
+
+    # 2) RSS fallback - önce twiiit.com dene (dinamik yönlendirme), sonra diğer instance'lar
+    # twiiit.com'u öncelikle dene (dinamik instance seçimi)
+    rss_instances_to_try = ["https://twiiit.com", "https://xcancel.com", "https://nitter.privacydev.net"]
+    # Sonra mevcut instance'ı ekle (eğer zaten listede değilse)
+    current_instance = NITTER_INSTANCES[CURRENT_NITTER_INDEX]
+    if current_instance not in rss_instances_to_try:
+        rss_instances_to_try.append(current_instance)
     
-    # Başarısız instance'ları en sona koy
-    failed_instances = [inst for inst, data in nitter_instance_failures.items() if data['failures'] >= _FAILURE_THRESHOLD]
-    for failed_instance in failed_instances:
-        if failed_instance in rss_instances_to_try:
-            rss_instances_to_try.remove(failed_instance)
-            # Cooldown süresi geçtiyse tekrar dene
-            if time.time() - data['last_failure'] > _COOLDOWN_PERIOD:
-                rss_instances_to_try.append(failed_instance)
-    
-    # Backup instance ekle
-    backup_instance = "https://nitter.poast.org"
-    if backup_instance not in rss_instances_to_try:
-        if backup_instance not in failed_instances:
+    # Tüm instance'ları dene (403 hatalarına karşı)
+    for backup_instance in NITTER_INSTANCES:
+        if backup_instance not in rss_instances_to_try:
             rss_instances_to_try.append(backup_instance)
     
-    target_username = screen_name or TWITTER_SCREENNAME
     for rss_instance in rss_instances_to_try:
-        url = f"{rss_instance}/{target_username}/rss"
+        url = f"{rss_instance}/{TWITTER_SCREENNAME}/rss"
         try:
             print(f"[+] RSS ile çekiliyor: {rss_instance}")
             ua_pool = [
@@ -696,7 +1025,7 @@ def get_latest_tweets_rss_fallback(count=3, screen_name=None):
                 'Cache-Control': 'max-age=0',
                 'X-Requested-With': 'XMLHttpRequest',  # AJAX request gibi görün
                 'Origin': rss_instance,  # Origin header ekle
-                'Referer': f"{rss_instance}/{target_username}",  # Referer ekle
+                'Referer': f"{rss_instance}/{TWITTER_SCREENNAME}",  # Referer ekle
             }
             # Session kullan ve tarayıcı benzeri davranış
             session = get_or_create_session(rss_instance)
@@ -729,15 +1058,8 @@ def get_latest_tweets_rss_fallback(count=3, screen_name=None):
                 link = link_elem.text
                 description = desc_elem.text if desc_elem is not None else ''
                 # Retweet heuristics
-                is_retweet = title.startswith('RT @') or 'retweeted' in description.lower()
-                if screen_name == TWITTER_SCREENNAME_SECONDARY:
-                    # bf6_tr hesabı için sadece retweet'leri işle
-                    if not is_retweet:
-                        continue
-                else:
-                    # Ana hesap için retweet'leri atla
-                    if is_retweet:
-                        continue
+                if title.startswith('RT @') or 'retweeted' in description.lower():
+                    continue
                 # Reply/Quote heuristics: @ ile başlıyorsa ya da yaygın kalıpları içeriyorsa
                 desc_low = (description or '').lower()
                 if (
@@ -764,7 +1086,7 @@ def get_latest_tweets_rss_fallback(count=3, screen_name=None):
                 has_media_indicator = 'pic.twitter.com' in description or any(indicator in description for indicator in ['video.twitter.com', 'pbs.twimg.com'])
                 
                 # Nitter HTML'den medya URL'leri topla (öncelikli, çoklu instance dene)
-                media_urls = _fetch_media_from_nitter_html_multi(target_username, tweet_id, preferred=rss_instance)
+                media_urls = _fetch_media_from_nitter_html_multi(TWITTER_SCREENNAME, tweet_id, preferred=rss_instance)
                 
                 # Fallback: RSS'te pic.twitter.com varsa ama medya alınamadıysa
                 if media_urls is None and 'pic.twitter.com' in description:
@@ -784,8 +1106,7 @@ def get_latest_tweets_rss_fallback(count=3, screen_name=None):
                     'tweet_id': tweet_id,
                     'text': tweet_text,
                     'media_urls': media_urls,
-                    'source_account': target_username,  # Hangi hesaptan geldiğini belirt
-                    'link': f"https://x.com/{target_username}/status/{tweet_id}",
+                    'link': link,
                 })
                 if len(tweets) >= count:
                     break
@@ -2576,10 +2897,8 @@ def main_loop():
     
     print("[+] Reddit Bot başlatılıyor...")
     print(f"[+] Subreddit: r/{SUBREDDIT}")
-    print(f"[+] Ana Twitter: @{TWITTER_SCREENNAME}")
-    print(f"[+] İkincil Twitter (retweet): @{TWITTER_SCREENNAME_SECONDARY}")
-    print("[+] Ana hesap: Retweet'ler atlanacak")
-    print("[+] İkincil hesap: Sadece retweet'ler işlenecek")
+    print(f"[+] Twitter: @{TWITTER_SCREENNAME}")
+    print("[+] Retweet'ler otomatik olarak atlanacak")
     print(f"[+] Şu ana kadar {len(posted_tweet_ids)} tweet işlenmiş")
     
     while True:
@@ -2587,60 +2906,24 @@ def main_loop():
             print("\n" + "="*50)
             print(f"[+] Tweet kontrol ediliyor... ({time.strftime('%Y-%m-%d %H:%M:%S')})")
             
-            # Ana hesap tweet'lerini kontrol et
-            print(f"[+] Ana hesap (@{TWITTER_SCREENNAME}) kontrol ediliyor...")
+            # Son 8 tweet'i al ve retweet kontrolü yap (daha fazla tweet kontrol et)
             tweets_data = get_latest_tweets_with_retweet_check(8)
             
             if isinstance(tweets_data, dict) and "error" in tweets_data:
-                print(f"[!] Ana hesap hatası: {tweets_data['error']}")
+                print(f"[!] Hata oluştu: {tweets_data['error']}")
                 print(f"[!] {NITTER_REQUEST_DELAY} saniye sonra tekrar denenecek...")
                 time.sleep(NITTER_REQUEST_DELAY)
                 continue
             elif not tweets_data:
-                print("[!] Ana hesap: Tweet bulunamadı veya API hatası.")
+                print("[!] Tweet bulunamadı veya API hatası.")
                 time.sleep(NITTER_REQUEST_DELAY)
                 continue
             
             tweets = tweets_data if isinstance(tweets_data, list) else tweets_data.get("tweets", [])
             if not tweets:
-                print("[!] Ana hesap: İşlenecek tweet bulunamadı.")
-                # Ana hesapta tweet yoksa ikincil hesabı kontrol et
-                print(f"[+] İkincil hesap (@{TWITTER_SCREENNAME_SECONDARY}) retweet kontrolü yapılıyor...")
-                secondary_tweets_data = get_latest_tweets_with_retweet_check(8, screen_name=TWITTER_SCREENNAME_SECONDARY)
-                
-                if isinstance(secondary_tweets_data, dict) and "error" in secondary_tweets_data:
-                    print(f"[!] İkincil hesap hatası: {secondary_tweets_data['error']}")
-                    time.sleep(NITTER_REQUEST_DELAY)
-                    continue
-                elif not secondary_tweets_data:
-                    print("[!] İkincil hesap: Retweet bulunamadı.")
-                    time.sleep(NITTER_REQUEST_DELAY)
-                    continue
-                
-                secondary_tweets = secondary_tweets_data if isinstance(secondary_tweets_data, list) else secondary_tweets_data.get("tweets", [])
-                if secondary_tweets:
-                    print(f"[+] İkincil hesapta {len(secondary_tweets)} retweet bulundu")
-                    tweets = secondary_tweets
-                else:
-                    print("[!] İkincil hesap: İşlenecek retweet bulunamadı.")
-                    time.sleep(NITTER_REQUEST_DELAY)
-                    continue
-            else:
-                # Ana hesapta tüm tweetler işlendiyse (8/8) ikincil hesabı da kontrol et
-                processed_count = sum(1 for tweet in tweets if str(tweet.get('tweet_id', tweet.get('id', ''))).strip() in posted_tweet_ids)
-                if processed_count == len(tweets) and len(tweets) >= 8:
-                    print(f"[+] Ana hesap tüm tweetleri işlenmiş ({processed_count}/{len(tweets)}), ikincil hesap kontrol ediliyor...")
-                    secondary_tweets_data = get_latest_tweets_with_retweet_check(8, screen_name=TWITTER_SCREENNAME_SECONDARY)
-                    
-                    if isinstance(secondary_tweets_data, dict) and "error" not in secondary_tweets_data:
-                        secondary_tweets = secondary_tweets_data if isinstance(secondary_tweets_data, list) else secondary_tweets_data.get("tweets", [])
-                        if secondary_tweets:
-                            print(f"[+] İkincil hesapta {len(secondary_tweets)} retweet bulundu, ana tweet'lerle birleştiriliyor")
-                            tweets.extend(secondary_tweets)
-                        else:
-                            print("[INFO] İkincil hesapta yeni retweet bulunamadı")
-                    else:
-                        print(f"[UYARI] İkincil hesap kontrolü başarısız: {secondary_tweets_data.get('error', 'Bilinmeyen hata')}")
+                print("[!] İşlenecek tweet bulunamadı.")
+                time.sleep(NITTER_REQUEST_DELAY)
+                continue
             
             # Eskiden yeniye işle - created_at/id'e göre deterministik sırala
             def _tweet_sort_key(td):
@@ -2706,9 +2989,7 @@ def main_loop():
                 posted_tweet_ids.add(tweet_id)
                 save_posted_tweet_id(tweet_id)
                 print(f"[+] Tweet ID kaydedildi (işlem öncesi): {tweet_id}")
-                # Tweet hangi hesaptan geldiğini belirle
-                tweet_source = tweet_data.get('source_account', TWITTER_SCREENNAME)
-                print(f"[+] Tweet linki: https://x.com/{tweet_source}/status/{tweet_id}")
+                print(f"[+] Tweet linki: https://x.com/{TWITTER_SCREENNAME}/status/{tweet_id}")
                 
                 # Tweet metni ve çeviri
                 text = tweet_data.get("text", "")
@@ -2803,8 +3084,7 @@ def main_loop():
                 ]
                 chosen_text = next((c for c in candidates if c), "")
                 if not chosen_text:
-                    tweet_source = tweet_data.get('source_account', TWITTER_SCREENNAME)
-                    chosen_text = f"@{tweet_source} paylaşımı - {tweet_id}"
+                    chosen_text = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
                 title_to_use, remainder_to_post = smart_split_title(chosen_text, 300)
                 print(f"[+] Kullanılacak başlık ({len(title_to_use)}): {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
                 if remainder_to_post:
@@ -2827,6 +3107,151 @@ def main_loop():
                 if tweet_index < len(tweets):
                     print(f"[+] Sonraki tweet için 5 dakika bekleniyor... ({tweet_index}/{len(tweets)} tamamlandı)")
                     time.sleep(300)
+            # EK: TheBFWire akışındaki @bf6_tr retweet'lerini (8/8 tamamlandıysa) aynı mantıkla işle
+            try:
+                if isinstance(tweets, list) and len(tweets) >= 8:
+                    print("\n" + "-"*50)
+                    print("[+] Ek görev: @bf6_tr retweet'leri işleniyor (aynı pipeline)...")
+                    rt_list = get_latest_bf6_retweets(8)
+                    if not rt_list:
+                        print("[INFO] İşlenecek @bf6_tr retweet'i bulunamadı")
+                    else:
+                        print(f"[+] {len(rt_list)} retweet bulundu (eskiden yeniye işlenecek)")
+                        for rt_index, tweet_data in enumerate(rt_list, 1):
+                            tweet_id = (
+                                (tweet_data.get("tweet_id") if isinstance(tweet_data, dict) else None)
+                                or (tweet_data.get("id") if isinstance(tweet_data, dict) else None)
+                                or (tweet_data.get("id_str") if isinstance(tweet_data, dict) else None)
+                                or (tweet_data.get("rest_id") if isinstance(tweet_data, dict) else None)
+                            )
+                            if tweet_id is not None:
+                                tweet_id = str(tweet_id).strip()
+                            if not tweet_id:
+                                print(f"[HATA] RT {rt_index}/{len(rt_list)} - Tweet ID bulunamadı!")
+                                continue
+                            if tweet_id in EXCLUDED_TWEET_IDS:
+                                print(f"[SKIP] Engelli tweet ID (RT): {tweet_id}")
+                                posted_tweet_ids.add(tweet_id)
+                                save_posted_tweet_id(tweet_id)
+                                continue
+                            if tweet_id in posted_tweet_ids:
+                                print(f"[!] RT {rt_index}/{len(rt_list)} zaten işlendi: {tweet_id}")
+                                continue
+                            print(f"[+] RT {rt_index}/{len(rt_list)} işleniyor: {tweet_id}")
+                            posted_tweet_ids.add(tweet_id)
+                            save_posted_tweet_id(tweet_id)
+                            print(f"[+] RT ID kaydedildi (işlem öncesi): {tweet_id}")
+                            print(f"[+] RT linki: https://x.com/{TWITTER_SCREENNAME}/status/{tweet_id}")
+
+                            text = tweet_data.get("text", "")
+                            print(f"[+] Orijinal RT Metin: {text[:100]}{'...' if len(text) > 100 else ''}")
+                            cleaned_text = clean_tweet_text(text)
+                            print(f"[+] Temizlenmiş RT Metin: {cleaned_text[:100]}{'...' if len(cleaned_text) > 100 else ''}")
+                            translated = translate_text(cleaned_text)
+                            if translated:
+                                print(f"[+] RT Çeviri: {translated[:100]}{'...' if len(translated) > 100 else ''}")
+                            else:
+                                print(f"[UYARI] RT çeviri başarısız, atlanıyor: {tweet_id}")
+                                continue
+
+                            print("[+] RT Medya URL'leri çıkarılıyor...")
+                            media_urls = get_media_urls_from_tweet_data(tweet_data)
+                            media_files = []
+                            image_urls = []
+                            video_urls = []
+                            for media_url in media_urls:
+                                u = media_url.lower()
+                                is_image = (
+                                    any(ext in u for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']) or
+                                    'format=jpg' in u or 'format=jpeg' in u or 'format=png' in u or 'format=webp' in u or
+                                    'pbs.twimg.com/media' in u
+                                )
+                                is_video = ('.mp4' in u or 'format=mp4' in u or 'video.twimg.com' in u)
+                                if is_image:
+                                    image_urls.append(media_url)
+                                elif is_video:
+                                    video_urls.append(media_url)
+                            print(f"[+] RT Medya analizi: {len(image_urls)} resim, {len(video_urls)} video")
+
+                            if len(image_urls) > 1:
+                                print("[+] RT: Birden fazla resim tespit edildi, toplu indirme başlatılıyor...")
+                                downloaded_images = download_multiple_images(image_urls, tweet_id)
+                                media_files.extend(downloaded_images)
+                            elif len(image_urls) == 1:
+                                media_url = image_urls[0]
+                                ext = os.path.splitext(media_url)[1].split("?")[0] or ".jpg"
+                                filename = f"temp_image_{tweet_id}_0{ext}"
+                                print(f"[+] RT Tek resim indiriliyor: {media_url[:50]}...")
+                                path = download_media(media_url, filename)
+                                if path:
+                                    media_files.append(path)
+                                    print(f"[+] RT Resim hazır: {path}")
+
+                            for i, media_url in enumerate(video_urls):
+                                try:
+                                    filename = f"temp_video_{tweet_id}_{i}.mp4"
+                                    print(f"[+] RT Video indiriliyor ({i+1}/{len(video_urls)}): {media_url[:50]}...")
+                                    path = download_media(media_url, filename)
+                                    if path:
+                                        converted = f"converted_{filename}"
+                                        print(f"[+] RT Video dönüştürülüyor: {path} -> {converted}")
+                                        converted_path = convert_video_to_reddit_format(path, converted)
+                                        if converted_path:
+                                            media_files.append(converted_path)
+                                            print(f"[+] RT Video dönüştürme başarılı: {converted_path}")
+                                        else:
+                                            print("[!] RT Video dönüştürme başarısız")
+                                        if os.path.exists(path):
+                                            os.remove(path)
+                                    else:
+                                        print(f"[!] RT Video indirilemedi: {media_url}")
+                                except Exception as media_e:
+                                    print(f"[HATA] RT Video işleme hatası: {media_e}")
+
+                            print(f"[+] RT Toplam {len(media_files)} medya dosyası hazır")
+
+                            original_text = tweet_data.get("text", "")
+                            has_media_in_original = any(ind in original_text for ind in ['pic.twitter.com', 'video.twitter.com', 'pbs.twimg.com'])
+                            if has_media_in_original and len(media_files) == 0:
+                                print(f"[UYARI] RT tweet'te medya var ama indirilemedi, atlanıyor: {tweet_id}")
+                                for fpath in media_files:
+                                    try:
+                                        if os.path.exists(fpath):
+                                            os.remove(fpath)
+                                    except Exception:
+                                        pass
+                                continue
+
+                            candidates = [
+                                (translated or "").strip(),
+                                (cleaned_text or "").strip(),
+                                (text or "").strip(),
+                            ]
+                            chosen_text = next((c for c in candidates if c), "")
+                            if not chosen_text:
+                                chosen_text = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
+                            title_to_use, remainder_to_post = smart_split_title(chosen_text, 300)
+                            print(f"[+] RT Kullanılacak başlık ({len(title_to_use)}): {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
+                            if remainder_to_post:
+                                print(f"[+] RT Başlığın kalan kısmı ({len(remainder_to_post)} karakter) gönderi açıklaması/yorum olarak eklenecek")
+                            print("[+] RT Reddit'e post gönderiliyor...")
+                            success = submit_post(title_to_use, media_files, text, remainder_text=remainder_to_post)
+                            if success:
+                                print(f"[+] RT başarıyla işlendi: {tweet_id}")
+                            else:
+                                print(f"[UYARI] RT işlenemedi ama ID zaten kaydedildi: {tweet_id}")
+                                for fpath in media_files:
+                                    try:
+                                        if os.path.exists(fpath):
+                                            os.remove(fpath)
+                                            print(f"[+] RT Geçici dosya silindi: {fpath}")
+                                    except Exception as cleanup_e:
+                                        print(f"[UYARI] RT dosya silinirken hata: {cleanup_e}")
+                            if rt_index < len(rt_list):
+                                print(f"[+] Sonraki RT için 5 dakika bekleniyor... ({rt_index}/{len(rt_list)} tamamlandı)")
+                                time.sleep(300)
+            except Exception as _rt_err:
+                print(f"[UYARI] @bf6_tr retweet işleme hatası: {_rt_err}")
         except Exception as loop_e:
             print(f"[HATA] Ana döngü hatası: {loop_e}")
             import traceback
