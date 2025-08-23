@@ -362,6 +362,98 @@ def _is_retweet_of_target(raw_text: str, target_screenname: str) -> bool:
             return True
     return False
 
+async def _get_bf6_retweets_twscrape(target: str, count: int = 3):
+    """bf6_tr (veya SECONDARY_RETWEET_TARGET) kullanıcısının zaman akışından
+    retweet olan öğeleri bulur ve retweet edilen ORİJİNAL tweet'leri döndürür.
+    """
+    try:
+        api = await init_twscrape_api()
+        # Hedef kullanıcıyı ID ile bulmaya çalış, yoksa login ile dene
+        target_id_env = (os.getenv("SECONDARY_RETWEET_TARGET_ID", "") or "").strip()
+        user = None
+        if target_id_env and target_id_env.isdigit():
+            try:
+                user = await api.user_by_id(int(target_id_env))
+            except Exception as _euid:
+                print(f"[UYARI] target user by id alınamadı: {target_id_env} -> {_euid}")
+        if not user:
+            user = await api.user_by_login(target)
+        if not user:
+            print(f"[HATA] Hedef kullanıcı bulunamadı: {target} / {target_id_env}")
+            return []
+
+        results = []
+        detail_lookups = 0
+        max_detail_lookups = max(1, count)
+
+        async for tweet in api.user_tweets(user.id, limit=count * 6):
+            # Retweet değilse atla
+            rt = getattr(tweet, 'retweetedTweet', None)
+            if not rt:
+                continue
+
+            # Medya topla (orijinal tweet)
+            media_urls = []
+            t_media = getattr(rt, 'media', None)
+            if not t_media or (
+                len(getattr(t_media, 'photos', []) or []) == 0 and
+                len(getattr(t_media, 'videos', []) or []) == 0 and
+                len(getattr(t_media, 'animated', []) or []) == 0
+            ):
+                if detail_lookups < max_detail_lookups:
+                    try:
+                        detail = await api.tweet_details(rt.id, wait=TWSCRAPE_DETAIL_TIMEOUT)
+                        detail_lookups += 1
+                        if detail and getattr(detail, 'media', None):
+                            t_media = detail.media
+                    except Exception as de:
+                        print(f"[UYARI] Orijinal tweet detay çekilemedi: {de}")
+
+            if t_media:
+                for photo in getattr(t_media, 'photos', []) or []:
+                    url = getattr(photo, 'url', None)
+                    if url:
+                        media_urls.append(url)
+                for video in getattr(t_media, 'videos', []) or []:
+                    variants = getattr(video, 'variants', []) or []
+                    if variants:
+                        best = max(variants, key=lambda x: getattr(x, 'bitrate', 0))
+                        vurl = getattr(best, 'url', None)
+                        if vurl:
+                            media_urls.append(vurl)
+
+            tweet_data = {
+                'id': str(getattr(rt, 'id', getattr(rt, 'id_str', ''))),
+                'text': getattr(rt, 'rawContent', ''),
+                'created_at': getattr(rt, 'date', None),
+                'media_urls': media_urls,
+                'url': getattr(rt, 'url', None)
+            }
+
+            results.append(tweet_data)
+            if len(results) >= count:
+                break
+
+        # Eskiden yeniye sırala
+        def _tw_key(td):
+            ts = td.get('created_at') if isinstance(td, dict) else None
+            tsv = 0
+            try:
+                if hasattr(ts, 'timestamp'):
+                    tsv = int(ts.timestamp())
+            except Exception:
+                tsv = 0
+            try:
+                return (tsv, int(str(td.get('id', '0'))))
+            except Exception:
+                return (tsv, 0)
+
+        results.sort(key=_tw_key)
+        return results
+    except Exception as e:
+        print(f"[UYARI] @bf6_tr retweet'leri alınamadı (async): {e}")
+        return []
+
 def get_latest_bf6_retweets(count: int = 3):
     """twscrape ile TWITTER_SCREENNAME zaman akışından sadece @bf6_tr retweet'lerini getirir.
     Başarısız olursa sessizce boş liste döner. Mevcut pipeline ile aynı veri şeklini üretir.
@@ -390,354 +482,6 @@ def get_latest_bf6_retweets(count: int = 3):
         print(f"[UYARI] @bf6_tr retweet'leri alınamadı: {e}")
         return []
 
-async def _get_bf6_retweets_twscrape(target: str, count: int = 3):
-    """Async: TWITTER_SCREENNAME akışından sadece belirli hedef (@bf6_tr) retweet'leri getirir."""
-    try:
-        api = await init_twscrape_api()
-        user = await api.user_by_login(TWITTER_SCREENNAME)
-        if not user:
-            print(f"[HATA] Kullanıcı bulunamadı: {TWITTER_SCREENNAME}")
-            return []
-
-        results = []
-        detail_lookups = 0
-        max_detail_lookups = max(1, count)
-        # Env üzerinden hedef kullanıcı id/alias bilgisi
-        aliases_env = os.getenv("SECONDARY_RETWEET_TARGET", target) or target
-        aliases = [a.strip().lstrip('@').lower() for a in aliases_env.split(',') if a.strip()]
-        target_id_env = (os.getenv("SECONDARY_RETWEET_TARGET_ID", "") or "").strip()
-
-        def _extract_retweeted_user(tweet_obj):
-            """Retweetin orijinal yazar bilgisini mümkün olduğunca çıkar (username, id)."""
-            # Sık görülen alanlar – hataya dayanıklı zincirlemeler
-            candidates = []
-            try:
-                rt = getattr(tweet_obj, 'retweetedTweet', None) or getattr(tweet_obj, 'retweet', None)
-                if rt is not None:
-                    candidates.append(rt)
-            except Exception:
-                pass
-            try:
-                ref = getattr(tweet_obj, 'referencedTweet', None) or getattr(tweet_obj, 'referencedTweets', None)
-                if ref is not None:
-                    candidates.append(ref)
-            except Exception:
-                pass
-            try:
-                rs = getattr(tweet_obj, 'retweeted_status', None)
-                if rs is not None:
-                    candidates.append(rs)
-            except Exception:
-                pass
-            # Bazı lib'lerde retweeted içerik doğrudan media/user alanlarında olabilir
-            candidates.append(tweet_obj)
-
-            username = None
-            uid = None
-            for c in candidates:
-                try:
-                    u = getattr(c, 'user', None)
-                    if u is not None:
-                        # username / screen_name
-                        un = getattr(u, 'username', None) or getattr(u, 'screen_name', None) or getattr(u, 'name', None)
-                        if isinstance(un, str) and un.strip():
-                            username = un.strip().lstrip('@')
-                        # id / id_str
-                        i = getattr(u, 'id', None) or getattr(u, 'id_str', None)
-                        if i is not None:
-                            try:
-                                uid = str(i)
-                            except Exception:
-                                pass
-                        if username or uid:
-                            break
-                except Exception:
-                    continue
-            return username, uid
-        async for tweet in api.user_tweets(user.id, limit=count * 6):
-            raw = getattr(tweet, 'rawContent', '') or ''
-            # Önce yapısal kontrol (daha güvenilir)
-            uname, uid = _extract_retweeted_user(tweet)
-            matched = False
-            if uid and target_id_env and uid == target_id_env:
-                matched = True
-            elif uname and uname.lower() in aliases:
-                matched = True
-            # Yapısal eşleşme yoksa metin tabanlı fallback
-            if not matched and not _is_retweet_of_target(raw, target):
-                continue
-
-            media_urls = []
-            t_media = getattr(tweet, 'media', None)
-            # Gerekirse detay çağrısı
-            if not t_media or (
-                len(getattr(t_media, 'photos', []) or []) == 0 and
-                len(getattr(t_media, 'videos', []) or []) == 0 and
-                len(getattr(t_media, 'animated', []) or []) == 0
-            ):
-                if detail_lookups < max_detail_lookups:
-                    try:
-                        detailed = await asyncio.wait_for(
-                            api.tweet_details(tweet.id),
-                            timeout=TWSCRAPE_DETAIL_TIMEOUT,
-                        )
-                        detail_lookups += 1
-                        if detailed and getattr(detailed, 'media', None):
-                            t_media = detailed.media
-                    except Exception:
-                        pass
-
-            if t_media:
-                for photo in getattr(t_media, 'photos', []) or []:
-                    url = getattr(photo, 'url', None)
-                    if url:
-                        media_urls.append(url)
-                for video in getattr(t_media, 'videos', []) or []:
-                    variants = getattr(video, 'variants', []) or []
-                    if variants:
-                        best = max(variants, key=lambda x: getattr(x, 'bitrate', 0))
-                        vurl = getattr(best, 'url', None)
-                        if vurl:
-                            media_urls.append(vurl)
-                for gif in getattr(t_media, 'animated', []) or []:
-                    vurl = getattr(gif, 'videoUrl', None)
-                    if vurl:
-                        media_urls.append(vurl)
-
-            # Medya hâlâ yoksa Nitter HTML üzerinden dene (retweet sayfası genelde medyayı gösterir)
-            if not media_urls:
-                try:
-                    mu = _fetch_media_from_nitter_html_multi(TWITTER_SCREENNAME, str(tweet.id))
-                    if mu:
-                        media_urls.extend(mu)
-                except Exception:
-                    pass
-
-            results.append({
-                'id': str(tweet.id),
-                'text': raw,
-                'created_at': getattr(tweet, 'date', None),
-                'media_urls': media_urls,
-                'url': getattr(tweet, 'url', None),
-            })
-            if len(results) >= count:
-                break
-
-        # Eskiden yeniye sırala
-        def _tw_key(td):
-            ts = td.get('created_at') if isinstance(td, dict) else None
-            tsv = 0.0
-            try:
-                if hasattr(ts, 'timestamp'):
-                    tsv = float(ts.timestamp())
-                elif isinstance(ts, (int, float)):
-                    tsv = float(ts)
-            except Exception:
-                tsv = 0.0
-            idv = 0
-            if isinstance(td, dict):
-                for k in ('id', 'tweet_id', 'id_str', 'rest_id'):
-                    v = td.get(k)
-                    if v is None:
-                        continue
-                    s = str(v).strip()
-                    if s.isdigit():
-                        try:
-                            idv = int(s)
-                            break
-                        except Exception:
-                            pass
-            return (tsv, idv)
-
-        try:
-            results.sort(key=_tw_key, reverse=False)
-        except Exception:
-            pass
-        return results
-    except Exception as e:
-        print(f"[HATA] twscrape (RT) async hatası: {e}")
-        return []
-
-def get_latest_tweets_with_retweet_check(count=3, retry_count=0):
-    """twscrape kullanarak son tweet'leri al, retweet/pin'leri atla, medya URL'lerini çıkar."""
-    global CURRENT_NITTER_INDEX, LAST_REQUEST_TIME
-    
-    # Rate limiting - son istekten beri yeterli zaman geçti mi?
-    current_time = time.time()
-    time_since_last_request = current_time - LAST_REQUEST_TIME
-    if time_since_last_request < MIN_REQUEST_INTERVAL:
-        wait_time = MIN_REQUEST_INTERVAL - time_since_last_request
-        print(f"[+] Rate limiting: {int(wait_time)} saniye bekleniyor...")
-        time.sleep(wait_time)
-    
-    LAST_REQUEST_TIME = time.time()
-    
-    # twscrape ile tweet'leri çek
-    try:
-        print("[+] twscrape ile tweet'ler çekiliyor...")
-        
-        # Async fonksiyonu çalıştır
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            tweets = loop.run_until_complete(get_latest_tweets_twscrape(count))
-        finally:
-            loop.close()
-        
-        if not tweets:
-            print("[UYARI] twscrape ile tweet bulunamadı, Pnytter fallback'e geçiliyor...")
-            return _fallback_pnytter_tweets(count, retry_count)
-        
-        print(f"[+] twscrape ile {len(tweets)} tweet bulundu")
-        return tweets
-        
-    except Exception as e:
-        print(f"[HATA] twscrape hatası: {e}")
-        print("[+] Pnytter fallback'e geçiliyor...")
-        return _fallback_pnytter_tweets(count, retry_count)
-
-async def get_latest_tweets_twscrape(count=3, retry_count=0):
-    """twscrape ile tweet'leri çek"""
-    try:
-        print("[+] twscrape ile tweet'ler çekiliyor...")
-        
-        # API'yi başlat
-        print(f"[DEBUG] twscrape accounts DB path: {ACCOUNTS_DB_PATH}")
-        # Tek bir API instance kullan (lock ve rate-limit yönetimi için daha stabil)
-        api = await init_twscrape_api()
-        print("[+] twscrape API başlatıldı")
-        
-        # Kullanıcı bilgilerini al
-        user = await api.user_by_login(TWITTER_SCREENNAME)
-        if not user:
-            print(f"[HATA] Kullanıcı bulunamadı: {TWITTER_SCREENNAME}")
-            return []
-        
-        # Tweet'leri çek (son gönderiler). Medya eksik çıkarsa tweet_details ile zenginleştir.
-        tweets_list = []
-        # Daha düşük limit: daha az detay çağrısı ve kilit kullanımı
-        async for tweet in api.user_tweets(user.id, limit=count * 3):
-            tweets_list.append(tweet)
-        
-        print(f"[+] twscrape ile {len(tweets_list)} tweet bulundu")
-        
-        # Tweet'leri filtrele ve medya çıkar
-        filtered_tweets = []
-        # TweetDetail kuyruğunu tüketmeyi sınırlamak için sayaç (daha düşük)
-        max_detail_lookups = max(1, count)
-        detail_lookups = 0
-        for i, tweet in enumerate(tweets_list):
-            # Debug: tweet obje yapısını göster (sadece ilk tweet için)
-            if i == 0:
-                print(f"[DEBUG] twscrape Tweet type: {type(tweet)}")
-                print(f"[DEBUG] twscrape Tweet attributes: {[attr for attr in dir(tweet) if not attr.startswith('_')]}")
-                
-            if hasattr(tweet, 'rawContent') and tweet.rawContent:
-                if tweet.rawContent.startswith('RT @') or 'RT @' in tweet.rawContent:
-                    print(f"[SKIP] Retweet atlandı: {tweet.id}")
-                    continue
-            
-            # Medya URL'lerini çıkar (gerekirse detay çağrısı ile zenginleştir)
-            media_urls = []
-            t_media = getattr(tweet, 'media', None)
-            # Eğer media boşsa, tweet_details ile tekrar dene
-            if not t_media or (
-                len(getattr(t_media, 'photos', []) or []) == 0 and
-                len(getattr(t_media, 'videos', []) or []) == 0 and
-                len(getattr(t_media, 'animated', []) or []) == 0
-            ):
-                # TweetDetail isteklerini sınırla
-                if detail_lookups < max_detail_lookups:
-                    try:
-                        detailed = await asyncio.wait_for(
-                            api.tweet_details(tweet.id),
-                            timeout=TWSCRAPE_DETAIL_TIMEOUT,
-                        )
-                        detail_lookups += 1
-                        if detailed and getattr(detailed, 'media', None):
-                            t_media = detailed.media
-                    except asyncio.TimeoutError:
-                        print(f"[UYARI] tweet_details zaman aşımı {tweet.id}, atlanıyor")
-                    except Exception as _detail_err:
-                        print(f"[UYARI] tweet_details alınamadı {tweet.id}: {_detail_err}")
-                else:
-                    # Detay sınırı aşıldıysa atla
-                    pass
-
-            if t_media:
-                # Fotoğraflar
-                for photo in getattr(t_media, 'photos', []) or []:
-                    url = getattr(photo, 'url', None)
-                    if url:
-                        media_urls.append(url)
-                # Videolar
-                for video in getattr(t_media, 'videos', []) or []:
-                    variants = getattr(video, 'variants', []) or []
-                    if variants:
-                        # bitrate'e göre en iyi MP4 seç
-                        best = max(variants, key=lambda x: getattr(x, 'bitrate', 0))
-                        vurl = getattr(best, 'url', None)
-                        if vurl:
-                            media_urls.append(vurl)
-                # GIF (animated)
-                for gif in getattr(t_media, 'animated', []) or []:
-                    vurl = getattr(gif, 'videoUrl', None)
-                    if vurl:
-                        media_urls.append(vurl)
-
-            # Medyası olmayanları atla (istek: medya yoksa gerek yok)
-            if not media_urls:
-                continue
-
-            # Tweet objesini uygun formata çevir
-            tweet_data = {
-                'id': str(tweet.id),
-                'text': tweet.rawContent,
-                'created_at': tweet.date,
-                'media_urls': media_urls,
-                'url': tweet.url
-            }
-
-            filtered_tweets.append(tweet_data)
-            if len(filtered_tweets) >= count:
-                break
-        
-        # twscrape dönüşünü deterministik sırala (eskiden yeniye)
-        def _tw_key(td):
-            ts = td.get('created_at') if isinstance(td, dict) else None
-            tsv = 0.0
-            try:
-                if hasattr(ts, 'timestamp'):
-                    tsv = float(ts.timestamp())
-                elif isinstance(ts, (int, float)):
-                    tsv = float(ts)
-            except Exception:
-                tsv = 0.0
-            idv = 0
-            if isinstance(td, dict):
-                for k in ('id', 'tweet_id', 'id_str', 'rest_id'):
-                    v = td.get(k)
-                    if v is None:
-                        continue
-                    s = str(v).strip()
-                    if s.isdigit():
-                        try:
-                            idv = int(s)
-                            break
-                        except Exception:
-                            pass
-            return (tsv, idv)
-
-        try:
-            filtered_tweets.sort(key=_tw_key, reverse=False)
-        except Exception:
-            pass
-        
-        return filtered_tweets
-        
-    except Exception as e:
-        print(f"[HATA] twscrape async hatası: {e}")
-        return []
 
 def _fallback_pnytter_tweets(count=3, retry_count=0):
     """Pnytter fallback fonksiyonu - Twint başarısız olursa kullanılır"""
