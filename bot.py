@@ -3114,20 +3114,14 @@ def main_loop():
                             print(f"[+] Orijinal RT Metin: {text[:100]}{'...' if len(text) > 100 else ''}")
                             cleaned_text = clean_tweet_text(text)
                             print(f"[+] Temizlenmiş RT Metin: {cleaned_text[:100]}{'...' if len(cleaned_text) > 100 else ''}")
-                            # 'Kaynak' başlığı sadece METİN SADECE LINKlerden ibaretse kullanılacak.
-                            # Karar için sadece URL'leri kaldır ve kontrol et (hashtagleri kaldırma):
+                            # 'Kaynak' BAŞLIĞI: yalnızca temizleme sonrası metin tamamen boşsa
                             fallback_source_title = None
-                            url_only_removed = re.sub(r'https?://\S+', '', text)
-                            url_only_removed = re.sub(r'www\.\S+', '', url_only_removed)
-                            url_only_removed = re.sub(r't\.co/\S+', '', url_only_removed)
-                            url_only_removed = re.sub(r'\s+', ' ', url_only_removed).strip()
-                            if not url_only_removed:
-                                # Metin URL'lerden ibaret -> Kaynak başlığı kullan
+                            if not cleaned_text.strip():
                                 rt_url = tweet_data.get("url") or f"https://x.com/i/web/status/{tweet_id}"
                                 rt_author = extract_username_from_tweet_url(rt_url)
                                 fallback_source_title = f"Kaynak: @{rt_author}"
                                 translated = None
-                                print(f"[INFO] RT metni sadece link, başlık kaynak olarak ayarlanacak: {fallback_source_title}")
+                                print(f"[INFO] RT temizlenince metin boş, başlık kaynak olarak ayarlanacak: {fallback_source_title}")
                             else:
                                 translated = translate_text(cleaned_text)
                             if translated:
@@ -3207,10 +3201,10 @@ def main_loop():
                                         pass
                                 continue
 
+                            # Raw 'text' KULLANMA: link sızmasını önlemek için sadece çeviri veya temiz metin kullan
                             candidates = [
                                 (translated or "").strip(),
                                 (cleaned_text or "").strip(),
-                                (text or "").strip(),
                             ]
                             chosen_text = next((c for c in candidates if c), "")
                             if not chosen_text:
