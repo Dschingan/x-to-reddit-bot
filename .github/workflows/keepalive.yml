@@ -2,7 +2,8 @@ name: Health Pinger
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # Her 5 dakikada bir (UTC)
+    - cron: "*/5 * * * *"   # Otomatik (UTC)
+  workflow_dispatch: {}      # Manuel tetikleme butonu
 
 concurrency:
   group: health-pinger
@@ -11,9 +12,11 @@ concurrency:
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Hit health endpoint
         run: |
+          set -e
           curl -sS -m 20 --retry 2 --retry-delay 5 \
             -H "User-Agent: gh-actions-pinger" \
             "https://x-to-reddit-bot.onrender.com/healthz"
