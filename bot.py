@@ -340,11 +340,27 @@ async def init_twscrape_api():
     return twscrape_api
 
 def _is_retweet_of_target(raw_text: str, target_screenname: str) -> bool:
-    """Metnin belirli bir hedef hesabın retweet'i olup olmadığını kontrol eder."""
+    """Metnin belirli hedef hesabın retweet'i olup olmadığını kontrol eder.
+    - Büyük/küçük harf duyarsız
+    - '@hedef' sonrası ':' opsiyonel
+    - Birden fazla alias destekler (virgülle ayrılmış)
+    """
     if not raw_text:
         return False
-    pattern = rf"^RT @{re.escape(target_screenname)}:\s*"
-    return bool(re.search(pattern, raw_text))
+    # Alias listesi: env üzerinden de verilebilir (örn: "bf6_tr,bf6tr,battlefield6tr")
+    aliases_env = os.getenv("SECONDARY_RETWEET_TARGET", target_screenname) or target_screenname
+    aliases = [a.strip().lstrip('@').lower() for a in aliases_env.split(',') if a.strip()]
+    txt = raw_text.strip()
+    if not txt.lower().startswith('rt '):
+        # RT ifadesi varsa ama farklı biçimde olabilir; yine de hızlı kontrol
+        if 'rt @' not in txt.lower():
+            return False
+    # Esnek desen: RT [boşluklar] @alias(:| )
+    for alias in aliases:
+        pattern = rf"^\s*RT\s+@{re.escape(alias)}\b\s*:?(\s|$)"
+        if re.search(pattern, txt, flags=re.IGNORECASE):
+            return True
+    return False
 
 def get_latest_bf6_retweets(count: int = 3):
     """twscrape ile TWITTER_SCREENNAME zaman akışından sadece @bf6_tr retweet'lerini getirir.
@@ -386,9 +402,69 @@ async def _get_bf6_retweets_twscrape(target: str, count: int = 3):
         results = []
         detail_lookups = 0
         max_detail_lookups = max(1, count)
+        # Env üzerinden hedef kullanıcı id/alias bilgisi
+        aliases_env = os.getenv("SECONDARY_RETWEET_TARGET", target) or target
+        aliases = [a.strip().lstrip('@').lower() for a in aliases_env.split(',') if a.strip()]
+        target_id_env = (os.getenv("SECONDARY_RETWEET_TARGET_ID", "") or "").strip()
+
+        def _extract_retweeted_user(tweet_obj):
+            """Retweetin orijinal yazar bilgisini mümkün olduğunca çıkar (username, id)."""
+            # Sık görülen alanlar – hataya dayanıklı zincirlemeler
+            candidates = []
+            try:
+                rt = getattr(tweet_obj, 'retweetedTweet', None) or getattr(tweet_obj, 'retweet', None)
+                if rt is not None:
+                    candidates.append(rt)
+            except Exception:
+                pass
+            try:
+                ref = getattr(tweet_obj, 'referencedTweet', None) or getattr(tweet_obj, 'referencedTweets', None)
+                if ref is not None:
+                    candidates.append(ref)
+            except Exception:
+                pass
+            try:
+                rs = getattr(tweet_obj, 'retweeted_status', None)
+                if rs is not None:
+                    candidates.append(rs)
+            except Exception:
+                pass
+            # Bazı lib'lerde retweeted içerik doğrudan media/user alanlarında olabilir
+            candidates.append(tweet_obj)
+
+            username = None
+            uid = None
+            for c in candidates:
+                try:
+                    u = getattr(c, 'user', None)
+                    if u is not None:
+                        # username / screen_name
+                        un = getattr(u, 'username', None) or getattr(u, 'screen_name', None) or getattr(u, 'name', None)
+                        if isinstance(un, str) and un.strip():
+                            username = un.strip().lstrip('@')
+                        # id / id_str
+                        i = getattr(u, 'id', None) or getattr(u, 'id_str', None)
+                        if i is not None:
+                            try:
+                                uid = str(i)
+                            except Exception:
+                                pass
+                        if username or uid:
+                            break
+                except Exception:
+                    continue
+            return username, uid
         async for tweet in api.user_tweets(user.id, limit=count * 6):
             raw = getattr(tweet, 'rawContent', '') or ''
-            if not _is_retweet_of_target(raw, target):
+            # Önce yapısal kontrol (daha güvenilir)
+            uname, uid = _extract_retweeted_user(tweet)
+            matched = False
+            if uid and target_id_env and uid == target_id_env:
+                matched = True
+            elif uname and uname.lower() in aliases:
+                matched = True
+            # Yapısal eşleşme yoksa metin tabanlı fallback
+            if not matched and not _is_retweet_of_target(raw, target):
                 continue
 
             media_urls = []
