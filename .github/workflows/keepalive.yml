@@ -2,11 +2,8 @@ name: Health Pinger
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # Her 5 dakikada bir (UTC)
-
-concurrency:
-  group: health-pinger
-  cancel-in-progress: false
+    - cron: "*/5 * * * *"   # Otomatik (UTC)
+  workflow_dispatch: {}      # Manuel tetikleme butonu için şart
 
 jobs:
   ping:
