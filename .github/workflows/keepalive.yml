@@ -1,37 +1,5 @@
-name: Keep Render Alive
-
-on:
-  schedule:
-    - cron: '*/5 * * * *'  # every 5 minutes
-  workflow_dispatch:
-
-jobs:
-  ping:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Ping service health endpoint
-        env:
-          KEEPALIVE_URL: ${{ secrets.KEEPALIVE_URL }}
+      - name: Ping health endpoint (secret)
         run: |
-          if [ -z "$KEEPALIVE_URL" ]; then
-            echo "KEEPALIVE_URL secret is not set. Set it in repository settings."
-            exit 1
-          fi
-          echo "Pinging $KEEPALIVE_URL ..."
-          set +e
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            --connect-timeout 5 --max-time 15 \
-            --retry 2 --retry-connrefused --location \
-            "$KEEPALIVE_URL")
-          CURL_EXIT=$?
-          set -e
-          if [ $CURL_EXIT -ne 0 ]; then
-            echo "curl exited with code $CURL_EXIT"
-            HTTP_CODE=${HTTP_CODE:-000}
-          fi
-          echo "HTTP $HTTP_CODE"
-          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 400 ]; then
-            echo "Ping failed with HTTP code $HTTP_CODE"
-            exit 1
-          fi
-          echo "Ping OK"
+          curl -sS -m 20 --retry 2 --retry-delay 5 \
+            -H "User-Agent: gh-actions-pinger" \
+            "${{ secrets.KEEPALIVE_URL }}"
