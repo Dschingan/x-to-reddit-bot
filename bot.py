@@ -427,7 +427,8 @@ async def _get_bf6_retweets_twscrape(target: str, count: int = 3):
                 'text': getattr(rt, 'rawContent', ''),
                 'created_at': getattr(rt, 'date', None),
                 'media_urls': media_urls,
-                'url': getattr(rt, 'url', None)
+                'url': getattr(rt, 'url', None),
+                'author_username': (getattr(getattr(rt, 'user', None), 'username', None) or None)
             }
 
             results.append(tweet_data)
@@ -3091,7 +3092,8 @@ def main_loop():
                             posted_tweet_ids.add(tweet_id)
                             save_posted_tweet_id(tweet_id)
                             print(f"[+] RT ID kaydedildi (işlem öncesi): {tweet_id}")
-                            print(f"[+] RT linki: https://x.com/{TWITTER_SCREENNAME}/status/{tweet_id}")
+                            rt_url = tweet_data.get("url") or f"https://x.com/i/web/status/{tweet_id}"
+                            print(f"[+] RT linki: {rt_url}")
 
                             text = tweet_data.get("text", "")
                             print(f"[+] Orijinal RT Metin: {text[:100]}{'...' if len(text) > 100 else ''}")
@@ -3180,7 +3182,23 @@ def main_loop():
                             chosen_text = next((c for c in candidates if c), "")
                             if not chosen_text:
                                 chosen_text = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
-                            title_to_use, remainder_to_post = smart_split_title(chosen_text, 300)
+                            # Kaynak kullanıcı adını belirle
+                            author_username = (tweet_data.get("author_username") or "").strip()
+                            if not author_username:
+                                try:
+                                    _u = (tweet_data.get("url") or "").strip()
+                                    m = re.match(r"https?://(?:x|twitter)\.com/([^/]+)/status/", _u)
+                                    if m:
+                                        author_username = m.group(1)
+                                except Exception:
+                                    author_username = ""
+
+                            # Başlığa Kaynak: @username ekle
+                            prefix = f"Kaynak: @{author_username}" if author_username else ""
+                            final_title_text = (
+                                f"{prefix} — {chosen_text}" if prefix and chosen_text else (prefix or chosen_text)
+                            )
+                            title_to_use, remainder_to_post = smart_split_title(final_title_text, 300)
                             print(f"[+] RT Kullanılacak başlık ({len(title_to_use)}): {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
                             if remainder_to_post:
                                 print(f"[+] RT Başlığın kalan kısmı ({len(remainder_to_post)} karakter) gönderi açıklaması/yorum olarak eklenecek")
