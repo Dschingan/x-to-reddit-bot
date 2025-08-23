@@ -2,7 +2,7 @@ name: Health Pinger
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # Her 5 dakikada bir (UTC)
+    - cron: "* * * * *"  # Her dakika (UTC)
 
 concurrency:
   group: health-pinger
