@@ -321,6 +321,15 @@ def clean_tweet_text(text):
     text = re.sub(r'www\.\S+', '', text)
     text = re.sub(r't\.co/\S+', '', text)
     text = re.sub(r'#\w+', '', text)
+    # "via @nickname" ve genel @mention'ları kaldır
+    # via @user (parantez içinde/sonunda olabilir)
+    text = re.sub(r'(?i)\bvia\s+@[-_a-zA-Z0-9]+', '', text)
+    # tüm @mention'ları kaldır (örn: @user, @User_Name)
+    text = re.sub(r'@[A-Za-z0-9_]+', '', text)
+    # Boş kalan parantez/dash kalıntılarını toparla
+    text = re.sub(r'\(\s*\)', '', text)
+    text = re.sub(r'\[\s*\]', '', text)
+    text = re.sub(r'\s*[-–—]\s*$', '', text)
     text = text.replace('|', '')
     text = re.sub(r'\s+', ' ', text).strip()
     return text
@@ -1537,6 +1546,9 @@ def translate_text(text):
             "no quotes, no labels. Do NOT translate these terms and keep their original casing: "
             "battlefield, free pass, battle pass, Operation Firestorm, Easter Egg, Plus, Trickshot.\n"
             "Preserve the original tweet's capitalization EXACTLY for all words where possible; do not change upper/lower casing from the source text.\n"
+            "If the input includes any mentions like @nickname or patterns like 'via @nickname', exclude them from the output entirely.\n"
+            "If the content appears to be a short gameplay/clip highlight rather than a news/article, compress it into ONE coherent Turkish sentence (no bullet points, no multiple sentences).\n"
+            "This translation will be used as a Reddit post title; ensure the output is clean, concise, and error-free as a title (no hashtags, no emojis, no trailing punctuation).\n"
             "Additionally, if the source text contains these tags/keywords, translate them EXACTLY as follows (preserve casing where appropriate):\n"
             "BREAKING => SON DAKİKA; LEAK => SIZINTI; HUMOUR => SÖYLENTİ.\n"
             "Don't make mistakes like this translation: \"What is your FINAL Rating of the Battlefield 6 Beta? (1-10) Turkish translation: Battlefield 6 Beta'nızın SON Derecelendirmesi nedir? (1-10)\" Should be: Battlefield 6 Beta için SON derecelendirmeniz nedir?\n\n"
@@ -2437,6 +2449,72 @@ def smart_split_title(text: str, max_len: int = 300):
     return title, remainder
 
 
+def split_title_and_bullets(text: str, max_len: int = 300):
+    """Bullet listesi tespit edilirse giriş kısmını başlık yapar,
+    maddeleri açıklamaya (satır satır) taşır. Aksi halde smart_split_title kullanır.
+    Desteklenen işaretler: •, —, ·, -, *, numaralı (1., 2., ...).
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return "", ""
+
+    has_bullets = False
+    title_part = raw
+    bullets = []
+
+    # 1) '•', '—', '·' ile ayrılmış maddeler
+    if any(ch in raw for ch in ["•", "—", "·"]):
+        parts = [p.strip() for p in re.split(r"\s*[•—·]\s*", raw)]
+        if len(parts) > 1:
+            has_bullets = True
+            title_part = parts[0]
+            bullets = [p for p in parts[1:] if p]
+    else:
+        # 2) '-' veya '*' ile başlayan maddeler (tek satırda olabilir)
+        first_dash = re.search(r"\s[-\*]\s+\S", raw)
+        if first_dash:
+            has_bullets = True
+            idx = first_dash.start()
+            title_part = raw[:idx].strip()
+            rest = raw[idx:].strip()
+            items = re.split(r"(?:^|\s)[-\*]\s+", rest)
+            bullets = [i.strip() for i in items if i.strip()]
+        else:
+            # 3) Numaralı maddeler: 1., 2., ...
+            first_num = re.search(r"\b\d+\.\s+\S", raw)
+            if first_num:
+                has_bullets = True
+                idx = first_num.start()
+                title_part = raw[:idx].strip()
+                rest = raw[idx:].strip()
+                items = re.split(r"\b\d+\.\s+", rest)
+                bullets = [i.strip() for i in items if i.strip()]
+
+    if not has_bullets:
+        return smart_split_title(raw, max_len)
+
+    # Başlığı sınırla, taşan kısmı açıklamaya ekle
+    title, overflow = smart_split_title(title_part, max_len)
+    remainder_lines = []
+    if overflow:
+        remainder_lines.append(overflow)
+    # Kapanış notlarını (ör. "Toplamda 28 adet.") son maddeden ayır
+    closing_note = ""
+    if bullets:
+        m = re.search(r"(Toplamda\s+\d+\s+(adet|öğe|madde)\.?)\s*$", bullets[-1], flags=re.IGNORECASE)
+        if m:
+            closing_note = m.group(1).strip()
+            bullets[-1] = bullets[-1][:m.start()].rstrip()
+            if not bullets[-1]:
+                bullets.pop()
+    for b in bullets:
+        remainder_lines.append(f"• {b}")
+    if closing_note:
+        remainder_lines.append(closing_note)
+    remainder = "\n".join(remainder_lines).strip()
+    return title, remainder
+
+
 def submit_post(title, media_files, original_tweet_text="", remainder_text: str = ""):
     """Geliştirilmiş post gönderme fonksiyonu - AI flair seçimi ile"""
     subreddit = reddit.subreddit(SUBREDDIT)
@@ -3053,7 +3131,7 @@ def main_loop():
                 chosen_text = next((c for c in candidates if c), "")
                 if not chosen_text:
                     chosen_text = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
-                title_to_use, remainder_to_post = smart_split_title(chosen_text, 300)
+                title_to_use, remainder_to_post = split_title_and_bullets(chosen_text, 300)
                 print(f"[+] Kullanılacak başlık ({len(title_to_use)}): {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
                 if remainder_to_post:
                     print(f"[+] Başlığın kalan kısmı ({len(remainder_to_post)} karakter) gönderi açıklaması/yorum olarak eklenecek")
@@ -3215,7 +3293,7 @@ def main_loop():
                                 else:
                                     # Eski davranış: genel fallback (Kaynak kullanma!)
                                     chosen_text = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
-                            title_to_use, remainder_to_post = smart_split_title(chosen_text, 300)
+                            title_to_use, remainder_to_post = split_title_and_bullets(chosen_text, 300)
                             print(f"[+] RT Kullanılacak başlık ({len(title_to_use)}): {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
                             if remainder_to_post:
                                 print(f"[+] RT Başlığın kalan kısmı ({len(remainder_to_post)} karakter) gönderi açıklaması/yorum olarak eklenecek")
