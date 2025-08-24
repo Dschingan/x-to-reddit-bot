@@ -1535,7 +1535,8 @@ def translate_text(text):
         prompt = (
             "Translate the text from English to Turkish. Output ONLY the translation with no extra words, "
             "no quotes, no labels. Do NOT translate these terms and keep their original casing: "
-            "battlefield, free pass, battle pass, Operation Firestorm.\n"
+            "battlefield, free pass, battle pass, Operation Firestorm, Easter Egg, Plus, Trickshot.\n"
+            "Preserve the original tweet's capitalization EXACTLY for all words where possible; do not change upper/lower casing from the source text.\n"
             "Additionally, if the source text contains these tags/keywords, translate them EXACTLY as follows (preserve casing where appropriate):\n"
             "BREAKING => SON DAKİKA; LEAK => SIZINTI; HUMOUR => SÖYLENTİ.\n"
             "Don't make mistakes like this translation: \"What is your FINAL Rating of the Battlefield 6 Beta? (1-10) Turkish translation: Battlefield 6 Beta'nızın SON Derecelendirmesi nedir? (1-10)\" Should be: Battlefield 6 Beta için SON derecelendirmeniz nedir?\n\n"
