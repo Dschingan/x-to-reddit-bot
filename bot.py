@@ -153,6 +153,12 @@ USE_DB_FOR_POSTED_IDS = bool(DATABASE_URL)
 # If true, bot MUST have DB; otherwise exit instead of using file fallback
 FAIL_IF_DB_UNAVAILABLE = os.getenv("FAIL_IF_DB_UNAVAILABLE", "true").lower() == "true"
 
+# Retention and dedupe configuration
+# How many posted tweet IDs to retain in storage (DB/file)
+POSTED_IDS_RETENTION = int(os.getenv("POSTED_IDS_RETENTION", "200"))
+# If enabled, skip any tweet with id <= last seen numeric id at startup/runtime
+HIGH_WATERMARK_ENABLED = os.getenv("HIGH_WATERMARK_ENABLED", "true").lower() == "true"
+
 # Translate cache (avoid repeated Gemini calls for identical input)
 TRANSLATE_CACHE_MAX = int(os.getenv("TRANSLATE_CACHE_MAX", "500"))
 try:
@@ -2891,6 +2897,7 @@ def load_posted_tweet_ids():
             print(f"[UYARI] DB'den posted_tweet_ids yüklenemedi, dosyaya düşülecek: {e}")
     # 2) Dosya fallback
     posted_ids_file = "posted_tweet_ids.txt"
+    alt_posted_ids_file = "posted_tweets_ids.txt"  # legacy/mistyped filename support
     posted_ids = set()
     try:
         if os.path.exists(posted_ids_file):
@@ -2902,6 +2909,16 @@ def load_posted_tweet_ids():
             print(f"[+] (Fallback) {len(posted_ids)} adet önceki tweet ID'si dosyadan yüklendi")
         else:
             print("[INFO] (Fallback) posted_tweet_ids.txt mevcut değil; yeni oluşturulabilir")
+        # Try alternate legacy filename and merge
+        if os.path.exists(alt_posted_ids_file):
+            alt_count_before = len(posted_ids)
+            with open(alt_posted_ids_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    tweet_id = line.strip()
+                    if tweet_id:
+                        posted_ids.add(tweet_id)
+            merged = len(posted_ids) - alt_count_before
+            print(f"[INFO] (Fallback) Legacy file 'posted_tweets_ids.txt' okundu, {merged} ek ID birleşti")
     except Exception as e:
         print(f"[UYARI] (Fallback) Posted tweet IDs yüklenirken hata: {e}")
     return posted_ids
@@ -2915,7 +2932,7 @@ def save_posted_tweet_id(tweet_id):
             _db_save_posted_id(tweet_id)
             # Son 8 kaydı tut, eskilerini sil
             try:
-                _db_prune_posted_ids_keep_latest(8)
+                _db_prune_posted_ids_keep_latest(POSTED_IDS_RETENTION)
             except Exception as _prune_e:
                 print(f"[UYARI] (DB) Prune başarısız: {_prune_e}")
             print(f"[+] (DB) Tweet ID kaydedildi: {tweet_id}")
@@ -2931,7 +2948,7 @@ def save_posted_tweet_id(tweet_id):
             f.write(f"{tweet_id}\n")
         # Dosyada da son 8 kaydı tut
         try:
-            _file_prune_posted_ids_keep_latest(posted_ids_file, 8)
+            _file_prune_posted_ids_keep_latest(posted_ids_file, POSTED_IDS_RETENTION)
         except Exception as _fprune_e:
             print(f"[UYARI] (Fallback) Prune başarısız: {_fprune_e}")
         print(f"[+] (Fallback) Tweet ID dosyaya kaydedildi: {tweet_id}")
@@ -3287,6 +3304,12 @@ def get_latest_tweets_with_retweet_check(count: int = 8):
 def main_loop():
     # Persistent storage ile posted tweet IDs'leri yükle
     posted_tweet_ids = load_posted_tweet_ids()
+    # Compute high-watermark from persisted IDs
+    try:
+        _numeric_ids = [int(str(s)) for s in posted_tweet_ids if str(s).isdigit()]
+        max_seen_id = max(_numeric_ids) if _numeric_ids else 0
+    except Exception:
+        max_seen_id = 0
     
     print("[+] Reddit Bot başlatılıyor...")
     print(f"[+] Subreddit: r/{SUBREDDIT}")
@@ -3372,7 +3395,24 @@ def main_loop():
                     print(f"[SKIP] Engelli tweet ID (gönderilmeyecek): {tweet_id}")
                     posted_tweet_ids.add(tweet_id)
                     save_posted_tweet_id(tweet_id)
+                    # Update watermark if needed
+                    try:
+                        if HIGH_WATERMARK_ENABLED and str(tweet_id).isdigit():
+                            ti = int(tweet_id)
+                            if ti > max_seen_id:
+                                max_seen_id = ti
+                    except Exception:
+                        pass
                     continue
+                
+                # High-watermark filter: skip anything older/equal than last seen
+                if HIGH_WATERMARK_ENABLED and max_seen_id:
+                    try:
+                        if str(tweet_id).isdigit() and int(tweet_id) <= max_seen_id:
+                            print(f"[SKIP] High-watermark nedeniyle atlandı (<= {max_seen_id}): {tweet_id}")
+                            continue
+                    except Exception:
+                        pass
                 
                 if tweet_id in posted_tweet_ids:
                     print(f"[!] Tweet {tweet_index}/{len(tweets)} zaten işlendi: {tweet_id}")
@@ -3383,6 +3423,14 @@ def main_loop():
                 save_posted_tweet_id(tweet_id)
                 print(f"[+] Tweet ID kaydedildi (işlem öncesi): {tweet_id}")
                 print(f"[+] Tweet linki: https://x.com/{TWITTER_SCREENNAME}/status/{tweet_id}")
+                # Update watermark after save
+                try:
+                    if HIGH_WATERMARK_ENABLED and str(tweet_id).isdigit():
+                        ti = int(tweet_id)
+                        if ti > max_seen_id:
+                            max_seen_id = ti
+                except Exception:
+                    pass
                 
                 # Tweet metni ve çeviri
                 text = tweet_data.get("text", "")
