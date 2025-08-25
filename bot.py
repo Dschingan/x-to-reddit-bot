@@ -1656,11 +1656,12 @@ FLAIR_OPTIONS = {
     "Sızıntı": "351fe58c-6be0-11f0-bcb4-9e6d710db689"
 }
 
-def select_flair_with_ai(title, original_tweet_text=""):
+def select_flair_with_ai(title, original_tweet_text="", has_video: bool = False):
     """AI ile otomatik flair seçimi"""
     print("[+] AI ile flair seçimi başlatılıyor...")
     print(f"[DEBUG] Başlık: {title}")
     print(f"[DEBUG] Orijinal tweet: {original_tweet_text[:100]}..." if original_tweet_text else "[DEBUG] Orijinal tweet yok")
+    print(f"[DEBUG] Video var mı: {'Evet' if has_video else 'Hayır'}")
     
     # Önce basit kural tabanlı flair seçimi deneyelim
     title_lower = title.lower()
@@ -1695,29 +1696,75 @@ def select_flair_with_ai(title, original_tweet_text=""):
         # API key kontrolü
         ai_api_key = os.getenv("OPENAI_API_KEY")
         if not ai_api_key:
-            print("[!] OPENAI_API_KEY bulunamadı, kural tabanlı seçim kullanılıyor")
-            return selected_flair_id
+            print("[!] OPENAI_API_KEY bulunamadı, Gemini ile deneniyor")
+            try:
+                # Gemini istemcisi ve model
+                gclient = genai.Client()
+                g_model_primary = os.getenv("GEMINI_MODEL_PRIMARY", "gemini-2.5-flash-lite").strip()
+                g_model_fallback = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash").strip()
+
+                g_prompt = (
+                    "Aşağıdaki içeriği analiz et ve en uygun Reddit flair'ini seç. Sadece aşağıdaki seçeneklerden BİRİNİ aynen döndür (başka hiçbir şey yazma):\n"
+                    "Haberler | Klip | Tartışma | Soru | İnceleme | Kampanya | Arkaplan | Sızıntı\n\n"
+                    "Kural: Eğer video VAR ve metin haber/duyuru gibi değilse 'Klip' seçeneğine öncelik ver. Haber duyurusu ise 'Haberler' uygundur.\n\n"
+                    f"Başlık: {title}\n"
+                    f"Video: {'Evet' if has_video else 'Hayır'}\n"
+                    + (f"Orijinal Tweet: {original_tweet_text}\n" if original_tweet_text else "") +
+                    "Yalnızca seçimi döndür."
+                )
+
+                def _ask_gemini(model_name: str) -> str:
+                    resp = gclient.models.generate_content(
+                        model=model_name,
+                        contents=g_prompt,
+                        config=types.GenerateContentConfig(
+                            thinking_config=types.ThinkingConfig(thinking_budget=0)
+                        ),
+                    )
+                    return (getattr(resp, 'text', '') or '').strip()
+
+                ai_suggestion = ""
+                try:
+                    ai_suggestion = _ask_gemini(g_model_primary)
+                except Exception as ge1:
+                    print(f"[UYARI] Gemini flair (primary) hata: {ge1}")
+                if not ai_suggestion and g_model_fallback and g_model_fallback != g_model_primary:
+                    try:
+                        ai_suggestion = _ask_gemini(g_model_fallback)
+                    except Exception as ge2:
+                        print(f"[UYARI] Gemini flair (fallback) hata: {ge2}")
+
+                if ai_suggestion:
+                    ai_clean = ai_suggestion.strip().strip('#').strip('"').strip()
+                    # Tam eşleşme veya içerme ile eşleştir
+                    for flair_name, flair_id in FLAIR_OPTIONS.items():
+                        if ai_clean.lower() == flair_name.lower() or flair_name.lower() in ai_clean.lower() or ai_clean.lower() in flair_name.lower():
+                            print(f"[+] Gemini seçilen flair: {flair_name} (ID: {flair_id})")
+                            return flair_id
+                    print(f"[!] Gemini önerisi eşleşmedi ({ai_clean}), kural tabanlı seçim kullanılıyor: {selected_flair}")
+                    return selected_flair_id
+                else:
+                    print("[!] Gemini sonuç üretmedi, kural tabanlı seçim kullanılıyor")
+                    return selected_flair_id
+            except Exception as ge:
+                print(f"[UYARI] Gemini fallback genel hata: {ge}")
+                return selected_flair_id
         
         # OpenAI API için prompt hazırla
-        content_to_analyze = f"Başlık: {title}"
+        content_to_analyze = f"Başlık: {title}\nVideo: {'Evet' if has_video else 'Hayır'}"
         if original_tweet_text:
             content_to_analyze += f"\nOrijinal Tweet: {original_tweet_text}"
         
         prompt = f"""Aşağıdaki Battlefield 6 ile ilgili içeriği analiz et ve en uygun flair'i seç.
 
+Kurallar:
+- Eğer video VAR ve metin haber/duyuru gibi değilse 'Klip' seçeneğine öncelik ver.
+- Haber/duyuru ise 'Haberler' uygundur.
+
 İçerik:
 {content_to_analyze}
 
-Mevcut flair seçenekleri:
-1. Haberler - Oyun haberleri, duyurular, resmi açıklamalar
-2. Klip - Video klipler, gameplay videoları
-3. Tartışma - Genel tartışmalar, görüşler
-4. Soru - Sorular ve yardım istekleri
-5. İnceleme - Oyun incelemeleri, değerlendirmeler
-6. Kampanya - Kampanya modu ile ilgili içerik
-7. Arkaplan - Oyun arkaplanı, hikaye, lore
-8. Sızıntı - Sızıntılar, leak'ler, söylentiler
-
+Sadece şu seçeneklerden birini döndür: Haberler, Klip, Tartışma, Soru, İnceleme, Kampanya, Arkaplan, Sızıntı
 Sadece flair adını yaz (örnek: Haberler). Başka bir şey yazma."""
         
         # OpenAI API çağrısı
@@ -2656,7 +2703,8 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
     print(f"[+] Medya analizi: {len(image_files)} resim, {len(video_files)} video")
 
     # AI ile flair seçimi (gallery dahil tüm yollar için önce seç)
-    selected_flair_id = select_flair_with_ai(title, original_tweet_text)
+    has_video = len(video_files) > 0
+    selected_flair_id = select_flair_with_ai(title, original_tweet_text, has_video=has_video)
     print(f"[+] Seçilen flair ID: {selected_flair_id}")
     
     # Önce resimleri gallery olarak yükle (eğer birden fazla resim varsa)
