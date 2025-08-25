@@ -153,6 +153,15 @@ USE_DB_FOR_POSTED_IDS = bool(DATABASE_URL)
 # If true, bot MUST have DB; otherwise exit instead of using file fallback
 FAIL_IF_DB_UNAVAILABLE = os.getenv("FAIL_IF_DB_UNAVAILABLE", "true").lower() == "true"
 
+# Translate cache (avoid repeated Gemini calls for identical input)
+TRANSLATE_CACHE_MAX = int(os.getenv("TRANSLATE_CACHE_MAX", "500"))
+try:
+    from collections import OrderedDict
+except Exception:
+    OrderedDict = dict  # very rare fallback; order eviction won't be perfect
+TRANSLATE_CACHE = OrderedDict()
+TRANSLATE_CACHE_LOCK = threading.Lock()
+
 # Belirli tweet ID'lerini asla Reddit'e göndermeyin (kullanıcı isteği)
 # Bu ID'ler işlenmiş olarak da işaretlenir, böylece tekrar denenmez
 EXCLUDED_TWEET_IDS = {
@@ -1552,10 +1561,24 @@ def translate_text(text):
     try:
         if not text or not text.strip():
             return None
+        # Cache lookup (normalized key)
+        key = text.strip()
+        with TRANSLATE_CACHE_LOCK:
+            cached = TRANSLATE_CACHE.get(key)
+            if cached is not None:
+                # touch LRU order if available
+                try:
+                    TRANSLATE_CACHE.move_to_end(key)
+                except Exception:
+                    pass
+                return cached
 
         # Gemini client (API anahtarı ortam değişkeni: GEMINI_API_KEY)
         # Ortam değişkeni yoksa client init hata verebilir; yakalayalım
         client = genai.Client()
+        # Modeller: primary ve fallback env ile ayarlanabilir
+        model_primary = os.getenv("GEMINI_MODEL_PRIMARY", "gemini-2.5-flash-lite").strip()
+        model_fallback = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash").strip()
 
         # Talimat: sadece ham çeviri, belirli terimler çevrilmez.
         prompt = (
@@ -1571,16 +1594,49 @@ def translate_text(text):
             "Text:\n" + text.strip()
         )
 
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_budget=0)
-            ),
-        )
-        out = (resp.text or "").strip()
-        # Boş veya değişmemişse None döndür (muhtemelen zaten TR veya başarısız)
-        if out and out != text.strip():
+        def _translate_with(model_name: str):
+            resp = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(thinking_budget=0)
+                ),
+            )
+            out_local = (resp.text or "").strip()
+            if out_local and out_local != text.strip():
+                # Cache write-through + basit LRU tahliyesi
+                try:
+                    with TRANSLATE_CACHE_LOCK:
+                        TRANSLATE_CACHE[key] = out_local
+                        try:
+                            TRANSLATE_CACHE.move_to_end(key)
+                        except Exception:
+                            pass
+                        try:
+                            while len(TRANSLATE_CACHE) > TRANSLATE_CACHE_MAX:
+                                TRANSLATE_CACHE.popitem(last=False)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                return out_local
+            return None
+
+        # Önce primary modeli dene
+        out = None
+        try:
+            out = _translate_with(model_primary)
+        except Exception as e:
+            print(f"[UYARI] Gemini model hata ({model_primary}): {e}")
+
+        # Başarısızsa fallback modeli dene
+        if not out and model_fallback and model_fallback != model_primary:
+            try:
+                out = _translate_with(model_fallback)
+            except Exception as e:
+                print(f"[UYARI] Gemini model hata ({model_fallback}): {e}")
+
+        if out:
             return out
         print("[UYARI] Çeviri boş döndü veya orijinal ile aynı")
         return None
