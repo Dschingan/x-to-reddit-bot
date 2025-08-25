@@ -1808,6 +1808,8 @@ def convert_video_to_reddit_format(input_path, output_path):
             
         except Exception as probe_e:
             print(f"[UYARI] Video bilgisi alınamadı: {probe_e}")
+            # Süre bilinmiyorsa makul bir süre kullan
+            duration = 120.0
         
         # OPTIMIZE EDİLMİŞ FFmpeg komutu - 4K video ve bellek sorunları için
         cmd = [
@@ -1816,7 +1818,7 @@ def convert_video_to_reddit_format(input_path, output_path):
             "-c:v", "libx264",
             "-profile:v", "baseline",  # En uyumlu profil
             "-level", "3.1",  # Daha düşük level (daha az bellek)
-            "-preset", "fast",  # Hızlı işlem için
+            "-preset", "veryfast",  # Daha hızlı işlem için
             "-crf", "28",  # Daha yüksek CRF (küçük dosya)
             "-maxrate", "2M",  # Düşük bitrate
             "-bufsize", "4M",  # Küçük buffer
@@ -1841,8 +1843,10 @@ def convert_video_to_reddit_format(input_path, output_path):
         
         print(f"[+] Reddit uyumlu FFmpeg komutu çalıştırılıyor...")
         print(f"[DEBUG] Komut: {' '.join(cmd[:10])}...")  # İlk 10 parametreyi göster
+        # Süreye göre uyarlanabilir timeout (min 5dk, max 15dk)
+        conv_timeout = int(max(300, min(900, duration * 8)))
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # 5 dakika timeout
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=conv_timeout)
         
         if result.returncode != 0:
             print(f"[HATA] FFmpeg başarısız (code: {result.returncode})")
@@ -1875,8 +1879,50 @@ def convert_video_to_reddit_format(input_path, output_path):
             return None
             
     except subprocess.TimeoutExpired:
-        print("[HATA] FFmpeg timeout - Video çok karmaşık")
-        return None
+        print("[HATA] FFmpeg timeout - bir fallback ile yeniden denenecek")
+        try:
+            # Daha agresif: ultrafast preset, biraz daha düşük bitrate, aynı 720p/24fps
+            fallback_cmd = [
+                "ffmpeg",
+                "-i", input_path,
+                "-c:v", "libx264",
+                "-profile:v", "baseline",
+                "-level", "3.1",
+                "-preset", "ultrafast",
+                "-crf", "30",
+                "-maxrate", "1.5M",
+                "-bufsize", "3M",
+                "-g", "30",
+                "-keyint_min", "30",
+                "-sc_threshold", "0",
+                "-c:a", "aac",
+                "-b:a", "96k",
+                "-ar", "44100",
+                "-ac", "2",
+                "-movflags", "+faststart",
+                "-pix_fmt", "yuv420p",
+                "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:flags=fast_bilinear,pad=ceil(iw/2)*2:ceil(ih/2)*2,fps=24",
+                "-r", "24",
+                "-avoid_negative_ts", "make_zero",
+                "-fflags", "+genpts",
+                "-map_metadata", "-1",
+                "-threads", "2",
+                "-y",
+                output_path
+            ]
+            print("[+] Fallback FFmpeg komutu çalıştırılıyor (ultrafast)...")
+            fb_timeout = 900  # 15 dakika son şans
+            fb_res = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=fb_timeout)
+            if fb_res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                print("[+] Fallback dönüştürme başarılı")
+                return output_path
+            else:
+                print(f"[HATA] Fallback FFmpeg başarısız (code: {fb_res.returncode})")
+                print(f"[HATA] Fallback stderr: {fb_res.stderr[:500]}")
+                return None
+        except subprocess.TimeoutExpired:
+            print("[HATA] Fallback FFmpeg de timeout verdi")
+            return None
     except Exception as e:
         print(f"[HATA] Video dönüştürme hatası: {e}")
         return None
