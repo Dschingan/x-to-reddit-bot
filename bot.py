@@ -2959,7 +2959,7 @@ def _db_prune_posted_ids_keep_latest(limit: int = 8):
                     DELETE FROM posted_tweet_ids
                     WHERE id NOT IN (
                         SELECT id FROM posted_tweet_ids
-                        ORDER BY created_at DESC
+                        ORDER BY created_at DESC, id DESC
                         LIMIT %s
                     )
                     """,
@@ -3028,7 +3028,7 @@ def _db_prune_posted_retweets_keep_latest(limit: int = 3):
                     DELETE FROM posted_retweet_ids
                     WHERE id NOT IN (
                         SELECT id FROM posted_retweet_ids
-                        ORDER BY created_at DESC
+                        ORDER BY created_at DESC, id DESC
                         LIMIT %s
                     )
                     """,
