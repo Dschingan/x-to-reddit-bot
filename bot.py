@@ -2913,6 +2913,11 @@ def save_posted_tweet_id(tweet_id):
         try:
             _ensure_posted_ids_table()
             _db_save_posted_id(tweet_id)
+            # Son 8 kaydı tut, eskilerini sil
+            try:
+                _db_prune_posted_ids_keep_latest(8)
+            except Exception as _prune_e:
+                print(f"[UYARI] (DB) Prune başarısız: {_prune_e}")
             print(f"[+] (DB) Tweet ID kaydedildi: {tweet_id}")
             return
         except Exception as e:
@@ -2924,6 +2929,11 @@ def save_posted_tweet_id(tweet_id):
     try:
         with open(posted_ids_file, 'a', encoding='utf-8') as f:
             f.write(f"{tweet_id}\n")
+        # Dosyada da son 8 kaydı tut
+        try:
+            _file_prune_posted_ids_keep_latest(posted_ids_file, 8)
+        except Exception as _fprune_e:
+            print(f"[UYARI] (Fallback) Prune başarısız: {_fprune_e}")
         print(f"[+] (Fallback) Tweet ID dosyaya kaydedildi: {tweet_id}")
     except Exception as e:
         print(f"[UYARI] (Fallback) Tweet ID kaydedilirken hata: {e}")
@@ -2937,6 +2947,140 @@ _POSTED_IDS_TABLE_SQL = (
     "    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n"
     ")"
 )
+
+def _db_prune_posted_ids_keep_latest(limit: int = 8):
+    """posted_tweet_ids tablosunda yalnızca en yeni 'limit' kadar kaydı (created_at DESC) bırak."""
+    conn = _db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM posted_tweet_ids
+                    WHERE id NOT IN (
+                        SELECT id FROM posted_tweet_ids
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    )
+                    """,
+                    (limit,),
+                )
+    finally:
+        conn.close()
+
+def _file_prune_posted_ids_keep_latest(file_path: str = "posted_tweet_ids.txt", limit: int = 8):
+    """Dosyada son 'limit' satırı koru, eskileri sil."""
+    try:
+        if not os.path.exists(file_path):
+            return
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+        if len(lines) <= limit:
+            return
+        to_keep = lines[-limit:]
+        with open(file_path, 'w', encoding='utf-8') as f:
+            for tid in to_keep:
+                f.write(f"{tid}\n")
+        print(f"[+] (Prune) {file_path} son {limit} ID ile güncellendi")
+    except Exception as e:
+        print(f"[UYARI] (Prune) Dosya temizleme hatası: {e}")
+
+# -------------------- Repost (bf6_tr) storage helpers --------------------
+_POSTED_RT_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS posted_retweet_ids (\n"
+    "    id BIGINT PRIMARY KEY,\n"
+    "    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n"
+    ")"
+)
+
+def _ensure_posted_retweet_ids_table():
+    conn = _db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(_POSTED_RT_TABLE_SQL)
+    finally:
+        conn.close()
+
+def _db_save_posted_retweet_id(tweet_id: str):
+    try:
+        id_int = int(str(tweet_id))
+    except Exception:
+        return
+    conn = _db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO posted_retweet_ids (id) VALUES (%s) ON CONFLICT (id) DO NOTHING",
+                    (id_int,),
+                )
+    finally:
+        conn.close()
+
+def _db_prune_posted_retweets_keep_latest(limit: int = 3):
+    conn = _db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM posted_retweet_ids
+                    WHERE id NOT IN (
+                        SELECT id FROM posted_retweet_ids
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    )
+                    """,
+                    (limit,),
+                )
+    finally:
+        conn.close()
+
+def _file_prune_posted_retweets_keep_latest(file_path: str = "posted_retweet_ids.txt", limit: int = 3):
+    try:
+        if not os.path.exists(file_path):
+            return
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+        if len(lines) <= limit:
+            return
+        to_keep = lines[-limit:]
+        with open(file_path, 'w', encoding='utf-8') as f:
+            for tid in to_keep:
+                f.write(f"{tid}\n")
+        print(f"[+] (Prune) {file_path} son {limit} RT ID ile güncellendi")
+    except Exception as e:
+        print(f"[UYARI] (Prune) RT dosya temizleme hatası: {e}")
+
+def save_posted_retweet_id(tweet_id):
+    """bf6_tr repost ID'sini kalıcı depoya yaz ve sadece son 3 kaydı tut."""
+    if USE_DB_FOR_POSTED_IDS:
+        try:
+            _ensure_posted_retweet_ids_table()
+            _db_save_posted_retweet_id(tweet_id)
+            try:
+                _db_prune_posted_retweets_keep_latest(3)
+            except Exception as _rt_prune_e:
+                print(f"[UYARI] (DB) RT prune başarısız: {_rt_prune_e}")
+            print(f"[+] (DB) RT ID kaydedildi: {tweet_id}")
+            return
+        except Exception as e:
+            if FAIL_IF_DB_UNAVAILABLE:
+                raise RuntimeError(f"DB gerekli ancak erişilemedi (save RT): {e}")
+            print(f"[UYARI] (DB) RT ID kaydedilemedi, dosyaya düşülecek: {e}")
+    # Fallback file mode
+    rt_file = "posted_retweet_ids.txt"
+    try:
+        with open(rt_file, 'a', encoding='utf-8') as f:
+            f.write(f"{tweet_id}\n")
+        try:
+            _file_prune_posted_retweets_keep_latest(rt_file, 3)
+        except Exception as _frt_e:
+            print(f"[UYARI] (Fallback) RT prune başarısız: {_frt_e}")
+        print(f"[+] (Fallback) RT ID dosyaya kaydedildi: {tweet_id}")
+    except Exception as e:
+        print(f"[UYARI] (Fallback) RT ID kaydedilirken hata: {e}")
 
 def _db_connect():
     """Get a psycopg2 connection using DATABASE_URL.
@@ -3361,7 +3505,7 @@ def main_loop():
                 if isinstance(tweets, list) and len(tweets) >= 8:
                     print("\n" + "-"*50)
                     print("[+] Ek görev: @bf6_tr retweet'leri işleniyor (aynı pipeline)...")
-                    rt_list = get_latest_bf6_retweets(8)
+                    rt_list = get_latest_bf6_retweets(3)
                     if not rt_list:
                         print("[INFO] İşlenecek @bf6_tr retweet'i bulunamadı")
                     else:
@@ -3382,6 +3526,8 @@ def main_loop():
                                 print(f"[SKIP] Engelli tweet ID (RT): {tweet_id}")
                                 posted_tweet_ids.add(tweet_id)
                                 save_posted_tweet_id(tweet_id)
+                                # Ayrı repost storage'ına da yaz ve 3'e prune et
+                                save_posted_retweet_id(tweet_id)
                                 continue
                             if tweet_id in posted_tweet_ids:
                                 print(f"[!] RT {rt_index}/{len(rt_list)} zaten işlendi: {tweet_id}")
@@ -3389,6 +3535,8 @@ def main_loop():
                             print(f"[+] RT {rt_index}/{len(rt_list)} işleniyor: {tweet_id}")
                             posted_tweet_ids.add(tweet_id)
                             save_posted_tweet_id(tweet_id)
+                            # Ayrı repost storage'ına da yaz ve 3'e prune et
+                            save_posted_retweet_id(tweet_id)
                             print(f"[+] RT ID kaydedildi (işlem öncesi): {tweet_id}")
                             print(f"[+] RT linki: https://x.com/{TWITTER_SCREENNAME}/status/{tweet_id}")
 
