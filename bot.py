@@ -150,6 +150,8 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Posted IDs storage backend selector
 USE_DB_FOR_POSTED_IDS = bool(DATABASE_URL)
+# If true, bot MUST have DB; otherwise exit instead of using file fallback
+FAIL_IF_DB_UNAVAILABLE = os.getenv("FAIL_IF_DB_UNAVAILABLE", "true").lower() == "true"
 
 # Belirli tweet ID'lerini asla Reddit'e göndermeyin (kullanıcı isteği)
 # Bu ID'ler işlenmiş olarak da işaretlenir, böylece tekrar denenmez
@@ -1368,6 +1370,21 @@ def start_background_worker():
     with _worker_lock:
         if _worker_started:
             return
+        # DB preflight: if DB is mandatory, ensure we can connect and create table
+        if USE_DB_FOR_POSTED_IDS and FAIL_IF_DB_UNAVAILABLE:
+            try:
+                _ensure_posted_ids_table()
+                print("[WEB] DB preflight OK: posted_tweet_ids table ensured")
+            except Exception as e:
+                print(f"[HATA] DB preflight başarısız: {e}")
+                # Fail fast: exit the process so Render restarts with proper env
+                try:
+                    sys.exit(1)
+                except SystemExit:
+                    raise
+                except Exception:
+                    # As a fallback, re-raise to stop background worker
+                    raise
         def _run():
             # main_loop zaten kendi içinde sonsuz döngüye sahip
             try:
@@ -2765,6 +2782,8 @@ def load_posted_tweet_ids():
             print(f"[+] DB'den {len(ids)} adet önceki tweet ID'si yüklendi")
             return set(ids)
         except Exception as e:
+            if FAIL_IF_DB_UNAVAILABLE:
+                raise RuntimeError(f"DB gerekli ancak erişilemedi (load): {e}")
             print(f"[UYARI] DB'den posted_tweet_ids yüklenemedi, dosyaya düşülecek: {e}")
     # 2) Dosya fallback
     posted_ids_file = "posted_tweet_ids.txt"
@@ -2793,6 +2812,8 @@ def save_posted_tweet_id(tweet_id):
             print(f"[+] (DB) Tweet ID kaydedildi: {tweet_id}")
             return
         except Exception as e:
+            if FAIL_IF_DB_UNAVAILABLE:
+                raise RuntimeError(f"DB gerekli ancak erişilemedi (save): {e}")
             print(f"[UYARI] (DB) Tweet ID kaydedilemedi, dosyaya düşülecek: {e}")
     # 2) Dosya fallback
     posted_ids_file = "posted_tweet_ids.txt"
@@ -2814,11 +2835,38 @@ _POSTED_IDS_TABLE_SQL = (
 )
 
 def _db_connect():
-    """Get a psycopg2 connection using DATABASE_URL."""
+    """Get a psycopg2 connection using DATABASE_URL.
+    Defensively sanitize common misconfigurations like values starting with
+    'DATABASE_URL=' or surrounding quotes coming from platform dashboards.
+    """
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL env yok")
-    # Render provides a full URL; sslmode is already included usually
-    conn = psycopg2.connect(DATABASE_URL)
+    # Sanitize value: strip spaces/newlines
+    dsn = (DATABASE_URL or "").strip()
+    # Strip accidental leading key e.g. "DATABASE_URL=postgres://..."
+    if dsn.lower().startswith("database_url="):
+        dsn = dsn.split("=", 1)[1].strip()
+    # Strip surrounding quotes if present
+    if (dsn.startswith('"') and dsn.endswith('"')) or (dsn.startswith("'") and dsn.endswith("'")):
+        dsn = dsn[1:-1]
+    # Brief masked log to help diagnose format issues (do not print secrets)
+    try:
+        masked = dsn
+        if "://" in masked and "@" in masked:
+            # postgres://user:pass@host -> mask pass
+            proto, rest = masked.split("://", 1)
+            creds_host = rest.split("@", 1)
+            if len(creds_host) == 2:
+                creds, hostpart = creds_host
+                if ":" in creds:
+                    u, _p = creds.split(":", 1)
+                    creds = f"{u}:***"
+                masked = f"{proto}://{creds}@{hostpart}"
+        print(f"[DEBUG] Using DB DSN: {masked}")
+    except Exception:
+        pass
+    # Connect
+    conn = psycopg2.connect(dsn)
     return conn
 
 def _ensure_posted_ids_table():
