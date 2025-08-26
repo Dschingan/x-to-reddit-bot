@@ -22,6 +22,8 @@ from bs4 import BeautifulSoup
 import asyncio
 from twscrape import API, gather
 from types import SimpleNamespace
+import shutil
+import m3u8
 # Pnytter opsiyonel (pydantic çakışması nedeniyle requirements dışına alındı)
 try:
     from pnytter import Pnytter
@@ -381,6 +383,143 @@ async def init_twscrape_api():
         twscrape_api = API(ACCOUNTS_DB_PATH)
         print("[+] twscrape API başlatıldı")
     return twscrape_api
+
+async def _get_best_media_urls(tweet_id: int | str) -> tuple[str | None, str | None]:
+    """twscrape ile tweet detaylarından en iyi MP4 ve HLS URL'lerini bul.
+    Dönüş: (best_mp4_url, best_hls_url)
+    """
+    try:
+        api = await init_twscrape_api()
+        try:
+            detail = await asyncio.wait_for(api.tweet_details(int(tweet_id)), timeout=TWSCRAPE_DETAIL_TIMEOUT)
+        except Exception as te:
+            print(f"[UYARI] tweet_details timeout/hata: {te}")
+            detail = None
+        if not detail or not getattr(detail, "media", None):
+            print("[UYARI] Tweet detayında medya bulunamadı")
+            return None, None
+
+        videos = getattr(detail.media, "videos", []) or []
+        if not videos:
+            print("[UYARI] Video medyası yok")
+            return None, None
+
+        mp4_candidates: list[tuple[int, str]] = []
+        hls_candidates: list[tuple[int, str]] = []
+        for v in videos:
+            variants = getattr(v, "variants", []) or []
+            if os.getenv("ACCOUNTS_PRINT_VARIANTS", "false").lower() == "true":
+                print(f"[DEBUG] Variants: {[getattr(x,'url',None) for x in variants]}")
+            for var in variants:
+                url = getattr(var, "url", None)
+                br = getattr(var, "bitrate", 0) or 0
+                if not url:
+                    continue
+                ul = url.lower()
+                if ul.endswith(".m3u8"):
+                    hls_candidates.append((br, url))
+                elif ".mp4" in ul or ul.endswith(".mp4"):
+                    mp4_candidates.append((br, url))
+
+        best_mp4 = max(mp4_candidates, key=lambda x: x[0])[1] if mp4_candidates else None
+        best_hls = max(hls_candidates, key=lambda x: x[0])[1] if hls_candidates else None
+        if best_mp4:
+            print(f"[+] MP4 aday bulundu: {best_mp4}")
+        else:
+            print("[INFO] MP4 varyantı bulunamadı")
+        if best_hls:
+            print(f"[+] HLS aday bulundu: {best_hls}")
+        return best_mp4, best_hls
+    except Exception as e:
+        print(f"[HATA] twscrape media çözümleme hatası: {e}")
+        return None, None
+
+def _download_hls_py(hls_url: str, filename: str) -> str | None:
+    """FFmpeg yoksa saf-Python HLS indirme (Render uyumlu)."""
+    try:
+        playlist = m3u8.load(hls_url)
+        if not playlist or not playlist.segments:
+            print("[UYARI] HLS playlist boş veya geçersiz")
+            return None
+        base = hls_url.rsplit('/', 1)[0]
+        with open(filename, 'wb') as out:
+            for seg in playlist.segments:
+                surl = seg.uri
+                if not surl.startswith('http'):
+                    surl = f"{base}/{surl}"
+                try:
+                    r = requests.get(surl, timeout=30)
+                    if r.status_code == 200:
+                        out.write(r.content)
+                    else:
+                        print(f"[UYARI] Segment indirilemedi: {surl} -> {r.status_code}")
+                        return None
+                except Exception as se:
+                    print(f"[UYARI] Segment hatası: {se}")
+                    return None
+        return filename
+    except Exception as e:
+        print(f"[HATA] HLS py indirme hatası: {e}")
+        return None
+
+def download_best_video_for_tweet(tweet_id: str | int, out_filename: str) -> str | None:
+    """Tweet için en kaliteli videoyu indir (HLS tercihli, sonra MP4, opsiyonel yt-dlp)."""
+    try:
+        # 1) En iyi URL'leri al (async)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            best_mp4, best_hls = loop.run_until_complete(_get_best_media_urls(tweet_id))
+        finally:
+            loop.close()
+
+        # 2) Önce HLS dene
+        if best_hls:
+            ffmpeg_path = shutil.which('ffmpeg')
+            if ffmpeg_path:
+                print("[+] HLS ffmpeg ile indiriliyor...")
+                cmd = [ffmpeg_path, '-y', '-i', best_hls, '-c', 'copy', out_filename]
+                try:
+                    subprocess.run(cmd, check=True, timeout=300)
+                    if os.path.exists(out_filename) and os.path.getsize(out_filename) > 0:
+                        return out_filename
+                except subprocess.CalledProcessError as cpe:
+                    print(f"[UYARI] ffmpeg HLS indirimi başarısız: {cpe}")
+                except subprocess.TimeoutExpired:
+                    print("[UYARI] ffmpeg HLS indirmesi zaman aşımı")
+            # Saf Python HLS
+            if os.getenv('USE_PY_HLS', 'true').lower() == 'true':
+                print("[+] HLS saf-Python ile indiriliyor...")
+                hls_path = _download_hls_py(best_hls, out_filename)
+                if hls_path:
+                    return hls_path
+
+        # 3) MP4 varyantı ile indir
+        if best_mp4:
+            print("[+] MP4 varyantı indiriliyor...")
+            path = download_media(best_mp4, out_filename)
+            if path:
+                return path
+
+        # 4) Son çare: yt-dlp (opsiyonel)
+        if os.getenv('USE_YTDLP', 'false').lower() == 'true':
+            try:
+                print("[+] yt-dlp fallback deneniyor...")
+                url = f"https://x.com/i/web/status/{tweet_id}"
+                cmd = [
+                    'yt-dlp', '-f', 'bv*+ba/b[ext=mp4]/bv/best', '-o', out_filename, url
+                ]
+                subprocess.run(cmd, check=True, timeout=600)
+                if os.path.exists(out_filename) and os.path.getsize(out_filename) > 0:
+                    return out_filename
+            except Exception as yte:
+                print(f"[UYARI] yt-dlp fallback başarısız: {yte}")
+
+        print("[UYARI] En kaliteli video indirilemedi")
+        return None
+    except Exception as e:
+        print(f"[HATA] En kaliteli video indirirken: {e}")
+        return None
 
 def _is_retweet_of_target(raw_text: str, target_screenname: str) -> bool:
     """Metnin belirli hedef hesabın retweet'i olup olmadığını kontrol eder.
@@ -3484,12 +3623,12 @@ def main_loop():
                         media_files.append(path)
                         print(f"[+] Resim hazır: {path}")
                 
-                # Videolar
-                for i, media_url in enumerate(video_urls):
+                # Videolar (twscrape üzerinden en kaliteli varyant)
+                if video_urls:
                     try:
-                        filename = f"temp_video_{tweet_id}_{i}.mp4"
-                        print(f"[+] Video indiriliyor ({i+1}/{len(video_urls)}): {media_url[:50]}...")
-                        path = download_media(media_url, filename)
+                        filename = f"temp_video_{tweet_id}_0.mp4"
+                        print("[+] En kaliteli video indiriliyor (twscrape/HLS öncelikli)...")
+                        path = download_best_video_for_tweet(tweet_id, filename)
                         if path:
                             converted = f"converted_{filename}"
                             print(f"[+] Video dönüştürülüyor: {path} -> {converted}")
@@ -3502,7 +3641,7 @@ def main_loop():
                             if os.path.exists(path):
                                 os.remove(path)
                         else:
-                            print(f"[!] Video indirilemedi: {media_url}")
+                            print("[!] Video indirilemedi (best-quality yoluyla)")
                     except Exception as media_e:
                         print(f"[HATA] Video işleme hatası: {media_e}")
                 
@@ -3648,11 +3787,11 @@ def main_loop():
                                     media_files.append(path)
                                     print(f"[+] RT Resim hazır: {path}")
 
-                            for i, media_url in enumerate(video_urls):
+                            if video_urls:
                                 try:
-                                    filename = f"temp_video_{tweet_id}_{i}.mp4"
-                                    print(f"[+] RT Video indiriliyor ({i+1}/{len(video_urls)}): {media_url[:50]}...")
-                                    path = download_media(media_url, filename)
+                                    filename = f"temp_video_{tweet_id}_0.mp4"
+                                    print("[+] RT En kaliteli video indiriliyor (twscrape/HLS öncelikli)...")
+                                    path = download_best_video_for_tweet(tweet_id, filename)
                                     if path:
                                         converted = f"converted_{filename}"
                                         print(f"[+] RT Video dönüştürülüyor: {path} -> {converted}")
@@ -3665,7 +3804,7 @@ def main_loop():
                                         if os.path.exists(path):
                                             os.remove(path)
                                     else:
-                                        print(f"[!] RT Video indirilemedi: {media_url}")
+                                        print("[!] RT Video indirilemedi (best-quality yoluyla)")
                                 except Exception as media_e:
                                     print(f"[HATA] RT Video işleme hatası: {media_e}")
 
