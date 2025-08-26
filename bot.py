@@ -1590,13 +1590,17 @@ def translate_text(text):
         prompt = (
             "Translate the text from English to Turkish. Output ONLY the translation with no extra words, "
             "no quotes, no labels. Do NOT translate these terms and keep their original casing: "
-            "battlefield, free pass, battle pass, Operation Firestorm, Easter Egg, Plus, Trickshot.\n"
+            "Battlefield, Free Pass, Battle Pass, Operation Firestorm, Easter Egg, Plus, Trickshot, Support, Recon, Assault, Engineer.\n"
             "Preserve the original tweet's capitalization EXACTLY for all words where possible; do not change upper/lower casing from the source text.\n"
             "If the input includes any mentions like @nickname or patterns like 'via @nickname', exclude them from the output entirely.\n"
             "If the content appears to be a short gameplay/clip highlight rather than a news/article, compress it into ONE coherent Turkish sentence (no bullet points, no multiple sentences).\n"
             "Additionally, if the source text contains these tags/keywords, translate them EXACTLY as follows (preserve casing where appropriate):\n"
             "BREAKING => SON DAKİKA; LEAK => SIZINTI; HUMOUR => SÖYLENTİ.\n"
-            "Don't make mistakes like this translation: \"What is your FINAL Rating of the Battlefield 6 Beta? (1-10) Turkish translation: Battlefield 6 Beta'nızın SON Derecelendirmesi nedir? (1-10)\" Should be: Battlefield 6 Beta için SON derecelendirmeniz nedir?\n\n"
+            "Remove any first-person opinions or subjective phrases (e.g., 'I think', 'IMO', 'bence', 'bana göre'); keep only neutral, factual content.\n"
+            "Before finalizing, ensure the Turkish output is coherent and not nonsensical; if any part seems odd, fix it for clarity while staying faithful to the source.\n\n"
+            "Important: When translating phrases like 'your [THING] rating', do NOT add Turkish possessive suffixes to game/brand names. Prefer the structure '[NAME] için ... derecelendirmeniz' instead of '[NAME]'nızın ...'.\n"
+            "Example: 'What is your FINAL Rating of the Battlefield 6 Beta? (1-10)' -> 'Battlefield 6 Beta için FINAL derecelendirmeniz nedir? (1-10)'.\n\n"
+            "Idioms: Translate 'can\'t wait' / 'cannot wait' / 'can NOT wait' as positive excitement -> 'sabırsızlanıyorum' (NOT 'sabırsızlanamam'). If the English uses emphasis (e.g., NOT in caps), you may emphasize the Turkish verb (e.g., SABIRSIZLANIYORUM) but do not change the meaning to negative.\n\n"
             "Text:\n" + text.strip()
         )
 
