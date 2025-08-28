@@ -24,6 +24,7 @@ from twscrape import API, gather
 from types import SimpleNamespace
 import shutil
 import m3u8
+import unicodedata
 # Pnytter opsiyonel (pydantic çakışması nedeniyle requirements dışına alındı)
 try:
     from pnytter import Pnytter
@@ -126,6 +127,60 @@ from base64 import b64decode
 # RedditWarp imports
 import redditwarp.SYNC
 from redditwarp.SYNC import Client as RedditWarpClient
+
+# --- Localization helpers (Unicode + casing) ---
+def _nfc(s: str) -> str:
+    """Return NFC-normalized text to keep Turkish diacritics stable."""
+    try:
+        return unicodedata.normalize('NFC', s) if isinstance(s, str) else s
+    except Exception:
+        return s
+
+def _is_all_caps_like(s: str) -> bool:
+    """Heuristic: treat as ALL CAPS if >=80% of letters are uppercase and there is at least one letter."""
+    letters = [ch for ch in s if ch.isalpha()]
+    if not letters:
+        return False
+    upp = sum(1 for ch in letters if ch.isupper())
+    return (upp / max(1, len(letters))) >= 0.8
+
+def _deshout_en_sentence_case(s: str) -> str:
+    """Convert shouty English text to sentence case to improve translation quality.
+    Keeps non-letter characters as is. Simple sentence boundary heuristic."""
+    try:
+        s_low = s.lower()
+        out = []
+        make_upper = True
+        for ch in s_low:
+            out.append(ch.upper() if make_upper and ch.isalpha() else ch)
+            if ch in '.!?\n':
+                make_upper = True
+            elif ch.isalpha():
+                make_upper = False
+        return ''.join(out)
+    except Exception:
+        return s
+
+# --- Countdown detection helper ---
+def _extract_countdown_days(text: str):
+    """Detect patterns like '44 Days Until ...' in text and return the day count as int.
+    Returns None if not found. Case-insensitive, tolerant of extra spaces and punctuation.
+    """
+    try:
+        if not text:
+            return None
+        # Normalize whitespace
+        t = ' '.join(str(text).split())
+        # Common patterns: '44 Days Until', '10 day until', '3 DAYS UNTIL'
+        m = re.search(r"\b(\d{1,3})\s*(day|days)\s+until\b", t, flags=re.IGNORECASE)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                return None
+        return None
+    except Exception:
+        return None
 
 # Windows encoding sorununu güvenli şekilde çöz (buffer olmayabilir)
 if sys.platform.startswith('win'):
@@ -1706,8 +1761,13 @@ def translate_text(text):
     try:
         if not text or not text.strip():
             return None
+        # Normalize input to NFC first
+        original_text = _nfc(text)
+        # If text is shouty ALL CAPS, create a de-shouted version for translation
+        input_for_translation = _deshout_en_sentence_case(original_text) if _is_all_caps_like(original_text) else original_text
+
         # Cache lookup (normalized key)
-        key = text.strip()
+        key = input_for_translation.strip()
         with TRANSLATE_CACHE_LOCK:
             cached = TRANSLATE_CACHE.get(key)
             if cached is not None:
@@ -1727,14 +1787,16 @@ def translate_text(text):
 
         # Talimat: sadece ham çeviri, belirli terimler çevrilmez.
         prompt = (
-            "Translate the text from English to Turkish. Output ONLY the translation with no extra words, "
+            "Translate the text from English (source: en) to Turkish (target: tr). Output ONLY the translation with no extra words, "
             "no quotes, no labels. Do NOT translate these terms and keep their original casing: "
             "Battlefield, Free Pass, Battle Pass, Operation Firestorm, Easter Egg, Plus, Trickshot, Support, Recon, Assault, Engineer.\n"
             "Preserve the original tweet's capitalization EXACTLY for all words where possible; do not change upper/lower casing from the source text.\n"
+            "Translate ALL parts of the text into Turkish EXCEPT the protected terms listed above. Do NOT leave any sentence or common word in English.\n"
+            "Apply strict capitalization preservation primarily to protected terms and proper nouns; for translated Turkish words, use natural Turkish casing.\n"
             "If the input includes any mentions like @nickname or patterns like 'via @nickname', exclude them from the output entirely.\n"
             "If the content appears to be a short gameplay/clip highlight rather than a news/article, compress it into ONE coherent Turkish sentence (no bullet points, no multiple sentences).\n"
             "Additionally, if the source text contains these tags/keywords, translate them EXACTLY as follows (preserve casing where appropriate):\n"
-            "BREAKING => SON DAKİKA; LEAK => SIZINTI; HUMOUR => SÖYLENTİ.\n"
+            "BREAKING => Son Dakika; LEAK => Sızıntı; HUMOUR => Söylenti.\n"
             "Remove any first-person opinions or subjective phrases (e.g., 'I think', 'IMO', 'bence', 'bana göre'); keep only neutral, factual content.\n"
             "Before finalizing, ensure the Turkish output is coherent and natural; do NOT produce two unrelated sentences or add stray quoted fragments. If any part seems odd, fix it for clarity while staying faithful to the source.\n\n"
             "Important: When translating phrases like 'your [THING] rating', do NOT add Turkish possessive suffixes to game/brand names. Prefer the structure '[NAME] için ... derecelendirmeniz' instead of '[NAME]'nızın ...'.\n"
@@ -1742,8 +1804,9 @@ def translate_text(text):
             "Idioms: Translate 'can't wait' / 'cannot wait' / 'can NOT wait' as positive excitement -> 'sabırsızlanıyorum' (NOT 'sabırsızlanamam'). If the English uses emphasis (e.g., NOT in caps), you may emphasize the Turkish verb (e.g., SABIRSIZLANIYORUM) but do not change the meaning to negative.\n"
             "Meme pattern '... be like': Translate patterns such as 'waiting BF6 be like...' as 'BF6’yı beklemek böyle bir şey...' or '[X] böyle bir şey...' Do NOT produce literal 'bekliyorum sanki' or similar unnatural phrasing.\n"
             "Consistency: Never introduce or switch to a different game/series/version that is not in the source. If the source mentions 'Battlefield 2042', do not output 'Battlefield 6', and vice versa. Keep titles and versions consistent with the input.\n"
-            "Natural wording: Translate generic English gaming terms to proper Turkish instead of mixing languages (e.g., translate 'cosmetics' as 'kozmetikler' when not a protected proper noun; avoid forms like 'Cosmetics'ler'). Keep protected terms listed above in English as instructed.\n\n"
-            "Text:\n" + text.strip()
+            "Natural wording: Translate generic English gaming terms to proper Turkish instead of mixing languages (e.g., translate 'cosmetics' as 'kozmetikler' when not a protected proper noun; avoid forms like 'Cosmetics'ler'). Keep protected terms listed above in English as instructed.\n"
+            "Use correct Turkish diacritics (ç, ğ, ı, İ, ö, ş, ü) and keep Unicode in NFC form. Preserve basic punctuation and line breaks.\n\n"
+            "Text:\n" + input_for_translation.strip()
         )
 
         def _translate_with(model_name: str):
@@ -1754,7 +1817,7 @@ def translate_text(text):
                     thinking_config=types.ThinkingConfig(thinking_budget=0)
                 ),
             )
-            out_local = (resp.text or "").strip()
+            out_local = _nfc((resp.text or "").strip())
             if out_local and out_local != text.strip():
                 # Cache write-through + basit LRU tahliyesi
                 try:
@@ -1789,6 +1852,7 @@ def translate_text(text):
                 print(f"[UYARI] Gemini model hata ({model_fallback}): {e}")
 
         if out:
+            # If original was ALL CAPS, avoid re-uppercasing Turkish output blindly; keep natural casing
             return out
         print("[UYARI] Çeviri boş döndü veya orijinal ile aynı")
         return None
@@ -3583,6 +3647,14 @@ def main_loop():
                 print(f"[+] Orijinal Tweet: {text[:100]}{'...' if len(text) > 100 else ''}")
                 cleaned_text = clean_tweet_text(text)
                 print(f"[+] Temizlenmiş Tweet: {cleaned_text[:100]}{'...' if len(cleaned_text) > 100 else ''}")
+                # Countdown filter: skip if pattern like 'XX days until' and XX > 10
+                try:
+                    cd_days = _extract_countdown_days(text) or _extract_countdown_days(cleaned_text)
+                except Exception:
+                    cd_days = None
+                if cd_days is not None and cd_days > 10:
+                    print(f"[SKIP] Geri sayım ({cd_days} gün) > 10: {tweet_id}")
+                    continue
                 translated = translate_text(cleaned_text)
                 if translated:
                     print(f"[+] Çeviri: {translated[:100]}{'...' if len(translated) > 100 else ''}")
@@ -3738,6 +3810,14 @@ def main_loop():
                             print(f"[+] Orijinal RT Metin: {text[:100]}{'...' if len(text) > 100 else ''}")
                             cleaned_text = clean_tweet_text(text)
                             print(f"[+] Temizlenmiş RT Metin: {cleaned_text[:100]}{'...' if len(cleaned_text) > 100 else ''}")
+                            # Countdown filter for RT: skip if 'XX days until' and XX > 10
+                            try:
+                                cd_days = _extract_countdown_days(text) or _extract_countdown_days(cleaned_text)
+                            except Exception:
+                                cd_days = None
+                            if cd_days is not None and cd_days > 10:
+                                print(f"[SKIP] RT Geri sayım ({cd_days} gün) > 10: {tweet_id}")
+                                continue
                             # 'Kaynak' BAŞLIĞI: yalnızca temizleme sonrası metin tamamen boşsa
                             fallback_source_title = None
                             if not cleaned_text.strip():
