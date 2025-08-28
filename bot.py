@@ -1736,10 +1736,13 @@ def translate_text(text):
             "Additionally, if the source text contains these tags/keywords, translate them EXACTLY as follows (preserve casing where appropriate):\n"
             "BREAKING => SON DAKİKA; LEAK => SIZINTI; HUMOUR => SÖYLENTİ.\n"
             "Remove any first-person opinions or subjective phrases (e.g., 'I think', 'IMO', 'bence', 'bana göre'); keep only neutral, factual content.\n"
-            "Before finalizing, ensure the Turkish output is coherent and not nonsensical; if any part seems odd, fix it for clarity while staying faithful to the source.\n\n"
+            "Before finalizing, ensure the Turkish output is coherent and natural; do NOT produce two unrelated sentences or add stray quoted fragments. If any part seems odd, fix it for clarity while staying faithful to the source.\n\n"
             "Important: When translating phrases like 'your [THING] rating', do NOT add Turkish possessive suffixes to game/brand names. Prefer the structure '[NAME] için ... derecelendirmeniz' instead of '[NAME]'nızın ...'.\n"
             "Example: 'What is your FINAL Rating of the Battlefield 6 Beta? (1-10)' -> 'Battlefield 6 Beta için FINAL derecelendirmeniz nedir? (1-10)'.\n\n"
-            "Idioms: Translate 'can\'t wait' / 'cannot wait' / 'can NOT wait' as positive excitement -> 'sabırsızlanıyorum' (NOT 'sabırsızlanamam'). If the English uses emphasis (e.g., NOT in caps), you may emphasize the Turkish verb (e.g., SABIRSIZLANIYORUM) but do not change the meaning to negative.\n\n"
+            "Idioms: Translate 'can't wait' / 'cannot wait' / 'can NOT wait' as positive excitement -> 'sabırsızlanıyorum' (NOT 'sabırsızlanamam'). If the English uses emphasis (e.g., NOT in caps), you may emphasize the Turkish verb (e.g., SABIRSIZLANIYORUM) but do not change the meaning to negative.\n"
+            "Meme pattern '... be like': Translate patterns such as 'waiting BF6 be like...' as 'BF6’yı beklemek böyle bir şey...' or '[X] böyle bir şey...' Do NOT produce literal 'bekliyorum sanki' or similar unnatural phrasing.\n"
+            "Consistency: Never introduce or switch to a different game/series/version that is not in the source. If the source mentions 'Battlefield 2042', do not output 'Battlefield 6', and vice versa. Keep titles and versions consistent with the input.\n"
+            "Natural wording: Translate generic English gaming terms to proper Turkish instead of mixing languages (e.g., translate 'cosmetics' as 'kozmetikler' when not a protected proper noun; avoid forms like 'Cosmetics'ler'). Keep protected terms listed above in English as instructed.\n\n"
             "Text:\n" + text.strip()
         )
 
