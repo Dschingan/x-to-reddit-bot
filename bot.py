@@ -1860,6 +1860,77 @@ def translate_text(text):
         print(f"[UYARI] Gemini çeviri hatası: {e}")
         return None
 
+# --- Joke note detection & auto-comment ---
+def _extract_joke_note(text: str) -> str | None:
+    """Heuristically detect a short 'joke' note from the original tweet text.
+    Returns a concise line to translate and post, or None.
+    """
+    try:
+        if not text:
+            return None
+        t = (text or "").strip()
+        low = t.lower()
+        # Markers in TR/EN commonly used by authors
+        markers = [
+            "şaka", "saka", "espri", "mizah", "şakaydı", "şaka yapıyorum",
+            "joke", "jk", "kidding", "just kidding", "this is a joke", "parody", "satire"
+        ]
+        if not any(m in low for m in markers):
+            return None
+        # Try to extract the sentence containing the marker
+        # Simple split by punctuation and line breaks
+        import re as _re
+        parts = _re.split(r"(?<=[.!?\n])\s+", t)
+        for p in parts:
+            pl = p.lower()
+            if any(m in pl for m in markers):
+                # Keep a concise snippet
+                return p.strip()[:300]
+        # Fallback to entire text if markers exist but sentence split missed
+        return t[:300]
+    except Exception:
+        return None
+
+def _maybe_post_joke_comment(praw_submission_or_id, title: str, subreddit_name: str, original_tweet_text: str):
+    """If the original tweet contains a joke note, translate and post as a comment.
+    Accepts either a PRAW Submission, an ID string, or attempts title-based lookup.
+    """
+    try:
+        note = _extract_joke_note(original_tweet_text)
+        if not note:
+            return
+        # Translate to Turkish if it's not already
+        translated = translate_text(note) or note
+        comment_text = f"Not: Tweet sahibi şaka yaptığını belirtiyor — {translated}"
+        # Resolve submission
+        subm = None
+        if hasattr(praw_submission_or_id, "reply"):
+            subm = praw_submission_or_id
+        elif isinstance(praw_submission_or_id, str) and praw_submission_or_id:
+            try:
+                subm = reddit.submission(id=praw_submission_or_id)
+            except Exception:
+                subm = None
+        # As a last resort, try find by recent posts with same title
+        if not subm and title:
+            try:
+                sr_obj = reddit.subreddit(subreddit_name)
+                for s in sr_obj.new(limit=10):
+                    author_name = getattr(s.author, 'name', '') or ''
+                    if author_name.lower() == (REDDIT_USERNAME or '').lower() and s.title == title:
+                        subm = s
+                        break
+            except Exception:
+                pass
+        if subm:
+            try:
+                subm.reply(comment_text)
+                print("[+] Şaka notu yorum olarak eklendi")
+            except Exception as ce:
+                print(f"[UYARI] Şaka notu yorum eklenemedi: {ce}")
+    except Exception as e:
+        print(f"[UYARI] Şaka notu işlenemedi: {e}")
+
 # AI-powered flair selection system
 FLAIR_OPTIONS = {
     "Haberler": "a3c0f742-22de-11f0-9e24-7a8b08eb260a",
@@ -1871,6 +1942,82 @@ FLAIR_OPTIONS = {
     "Arkaplan": "33ea1cfa-69c4-11f0-8376-9a5b50ce03e6",
     "Sızıntı": "351fe58c-6be0-11f0-bcb4-9e6d710db689"
 }
+
+# Reverse lookup for flair name by hardcoded ID (to recover name if IDs drift)
+_FLAIR_NAME_BY_ID = {vid: k for k, vid in FLAIR_OPTIONS.items()}
+
+# Cache subreddit flair templates to avoid rate limit
+_FLAIR_TEMPLATE_CACHE: dict[str, list[dict]] = {}
+
+def _fetch_link_flair_templates(subreddit_name: str) -> list[dict]:
+    """Fetch available link flair templates for a subreddit using PRAW.
+    Returns a list of dicts with keys like 'id' and 'text'. Caches results per process.
+    """
+    try:
+        if subreddit_name in _FLAIR_TEMPLATE_CACHE and _FLAIR_TEMPLATE_CACHE[subreddit_name]:
+            return _FLAIR_TEMPLATE_CACHE[subreddit_name]
+        sr = reddit.subreddit(subreddit_name)
+        # PRAW: SubredditFlair link templates
+        # Some versions expose via sr.flair.link_templates
+        templates = []
+        try:
+            templates = list(getattr(sr.flair, 'link_templates', []) or [])
+        except Exception:
+            pass
+        # Fallback: sr.flair.templates may include both; filter link flairs if present
+        if not templates:
+            try:
+                templates = list(getattr(sr.flair, 'templates', []) or [])
+            except Exception:
+                templates = []
+        # Normalize
+        norm = []
+        for t in templates:
+            # PRAW returns objects or dicts depending on version
+            tid = getattr(t, 'id', None) if not isinstance(t, dict) else t.get('id')
+            text = getattr(t, 'text', None) if not isinstance(t, dict) else t.get('text')
+            if tid and text is not None:
+                norm.append({'id': str(tid), 'text': str(text)})
+        _FLAIR_TEMPLATE_CACHE[subreddit_name] = norm
+        print(f"[INFO] r/{subreddit_name} mevcut link flair'leri: {[n['text']+':'+n['id'] for n in norm]}")
+        return norm
+    except Exception as e:
+        print(f"[UYARI] Flair template'ları alınamadı (r/{subreddit_name}): {e}")
+        return []
+
+def _resolve_flair_id_for_subreddit(subreddit_name: str, flair_id: str | None, flair_name_guess: str | None) -> str | None:
+    """Ensure flair_id exists on subreddit; if not, try to find by flair text.
+    Returns a valid flair_id or None if not resolvable.
+    """
+    try:
+        templates = _fetch_link_flair_templates(subreddit_name)
+        if not templates:
+            return None
+        ids = {t['id'] for t in templates}
+        if flair_id and str(flair_id) in ids:
+            return str(flair_id)
+        # Try by name guess (case-insensitive)
+        if flair_name_guess:
+            fl = flair_name_guess.strip().lower()
+            # Prefer exact text match
+            for t in templates:
+                if t['text'].strip().lower() == fl:
+                    return t['id']
+            # Then substring match
+            for t in templates:
+                tt = t['text'].strip().lower()
+                if fl in tt or tt in fl:
+                    return t['id']
+        # If we had an ID not present, try inferring name from our reverse map
+        if flair_id and flair_id in _FLAIR_NAME_BY_ID:
+            inferred = _FLAIR_NAME_BY_ID[flair_id].strip().lower()
+            for t in templates:
+                if t['text'].strip().lower() == inferred:
+                    return t['id']
+        return None
+    except Exception as e:
+        print(f"[UYARI] Flair ID çözümlenemedi: {e}")
+        return None
 
 def select_flair_with_ai(title, original_tweet_text="", has_video: bool = False):
     """AI ile otomatik flair seçimi"""
@@ -2351,24 +2498,27 @@ def upload_gallery_via_redditwarp(title, image_paths, subreddit_name, flair_id=N
                 print(f"[+] Gallery başarıyla oluşturuldu - ID: {submission_id}")
                 # Flair uygula (mümkünse)
                 try:
-                    if flair_id:
+                    # Try to resolve flair per subreddit before applying
+                    effective_flair_id = _resolve_flair_id_for_subreddit(subreddit_name, flair_id, _FLAIR_NAME_BY_ID.get(flair_id)) if flair_id else None
+                    if effective_flair_id and submission_id and isinstance(submission_id, str):
                         try:
-                            # Öncelikle ID ile dene
-                            if submission_id and isinstance(submission_id, str) and submission_id:
-                                praw_sub = reddit.submission(id=submission_id)
-                                praw_sub.flair.select(flair_id)
-                                print(f"[+] Gallery flair uygulandı (ID ile): {flair_id}")
-                            else:
-                                # Başlığa göre yakın zamanda oluşturulan gönderiyi bul
-                                sr_obj = reddit.subreddit(subreddit_name)
-                                for s in sr_obj.new(limit=10):
-                                    author_name = getattr(s.author, 'name', '') or ''
-                                    if author_name.lower() == (REDDIT_USERNAME or '').lower() and s.title == title:
-                                        s.flair.select(flair_id)
-                                        print(f"[+] Gallery flair uygulandı (arama ile): {flair_id}")
-                                        break
+                            praw_sub = reddit.submission(id=submission_id)
+                            praw_sub.flair.select(effective_flair_id)
+                            print(f"[+] Gallery flair uygulandı: {effective_flair_id}")
                         except Exception as fe:
                             print(f"[UYARI] Gallery flair uygulanamadı: {fe}")
+                    elif effective_flair_id:
+                        # Başlığa göre yakın zamanda oluşturulan gönderiyi bul
+                        try:
+                            sr_obj = reddit.subreddit(subreddit_name)
+                            for s in sr_obj.new(limit=10):
+                                author_name = getattr(s.author, 'name', '') or ''
+                                if author_name.lower() == (REDDIT_USERNAME or '').lower() and s.title == title:
+                                    s.flair.select(effective_flair_id)
+                                    print(f"[+] Gallery flair uygulandı (arama ile): {effective_flair_id}")
+                                    break
+                        except Exception as fe2:
+                            print(f"[UYARI] Gallery flair uygulanamadı (arama): {fe2}")
                 except Exception:
                     pass
                 # Başarılı gönderiden sonra disk temizliği
@@ -2404,8 +2554,10 @@ def upload_gallery_via_redditwarp(title, image_paths, subreddit_name, flair_id=N
                             # Flair uygula
                             try:
                                 if flair_id:
-                                    s.flair.select(flair_id)
-                                    print(f"[+] Gallery flair uygulandı (doğrulama): {flair_id}")
+                                    efid = _resolve_flair_id_for_subreddit(subreddit_name, flair_id, _FLAIR_NAME_BY_ID.get(flair_id))
+                                    if efid:
+                                        s.flair.select(efid)
+                                        print(f"[+] Gallery flair uygulandı (doğrulama): {efid}")
                             except Exception as fe:
                                 print(f"[UYARI] Gallery flair uygulanamadı (doğrulama): {fe}")
                             # Başarılı kabul et ve dosyaları temizle
@@ -2443,8 +2595,10 @@ def upload_gallery_via_redditwarp(title, image_paths, subreddit_name, flair_id=N
                         # Flair uygula
                         try:
                             if flair_id:
-                                s.flair.select(flair_id)
-                                print(f"[+] Gallery flair uygulandı (hata sonrası doğrulama): {flair_id}")
+                                efid = _resolve_flair_id_for_subreddit(subreddit_name, flair_id, _FLAIR_NAME_BY_ID.get(flair_id))
+                                if efid:
+                                    s.flair.select(efid)
+                                    print(f"[+] Gallery flair uygulandı (hata sonrası doğrulama): {efid}")
                         except Exception as fe:
                             print(f"[UYARI] Gallery flair uygulanamadı (hata sonrası doğrulama): {fe}")
                         # Başarılı kabul et ve dosyaları temizle
@@ -2644,9 +2798,11 @@ def upload_video_via_redditwarp(title, media_path, subreddit_name, flair_id=None
                 # Flair uygula (ID mevcutsa)
                 try:
                     if flair_id:
-                        praw_sub = reddit.submission(id=submission_id)
-                        praw_sub.flair.select(flair_id)
-                        print(f"[+] Video flair uygulandı (ID ile): {flair_id}")
+                        efid = _resolve_flair_id_for_subreddit(subreddit_name, flair_id, _FLAIR_NAME_BY_ID.get(flair_id))
+                        if efid:
+                            praw_sub = reddit.submission(id=submission_id)
+                            praw_sub.flair.select(efid)
+                            print(f"[+] Video flair uygulandı (ID ile): {efid}")
                 except Exception as fe:
                     print(f"[UYARI] Video flair uygulanamadı (ID ile): {fe}")
             else:
@@ -2660,13 +2816,15 @@ def upload_video_via_redditwarp(title, media_path, subreddit_name, flair_id=None
             # Flair yoksa, başlığa göre en son gönderiyi bulup uygula
             if (not submission_id) and flair_id:
                 try:
-                    sr_obj = reddit.subreddit(subreddit_name)
-                    for s in sr_obj.new(limit=10):
-                        author_name = getattr(s.author, 'name', '') or ''
-                        if author_name.lower() == (REDDIT_USERNAME or '').lower() and s.title == title:
-                            s.flair.select(flair_id)
-                            print(f"[+] Video flair uygulandı (arama ile): {flair_id}")
-                            break
+                    efid = _resolve_flair_id_for_subreddit(subreddit_name, flair_id, _FLAIR_NAME_BY_ID.get(flair_id)) if flair_id else None
+                    if efid:
+                        sr_obj = reddit.subreddit(subreddit_name)
+                        for s in sr_obj.new(limit=10):
+                            author_name = getattr(s.author, 'name', '') or ''
+                            if author_name.lower() == (REDDIT_USERNAME or '').lower() and s.title == title:
+                                s.flair.select(efid)
+                                print(f"[+] Video flair uygulandı (arama ile): {efid}")
+                                break
                 except Exception as fe:
                     print(f"[UYARI] Video flair uygulanamadı (arama ile): {fe}")
 
@@ -2783,8 +2941,10 @@ def upload_video_via_reddit_api(title, media_path, subreddit_name, flair_id=None
             # Flair uygula
             try:
                 if flair_id:
-                    submission.flair.select(flair_id)
-                    print(f"[+] Video flair uygulandı (PRAW): {flair_id}")
+                    efid = _resolve_flair_id_for_subreddit(subreddit_name, flair_id, _FLAIR_NAME_BY_ID.get(flair_id))
+                    if efid:
+                        submission.flair.select(efid)
+                        print(f"[+] Video flair uygulandı (PRAW): {efid}")
             except Exception as fe:
                 print(f"[UYARI] Video flair uygulanamadı (PRAW): {fe}")
             # Başarılıysa Submission nesnesini döndür
@@ -2871,11 +3031,25 @@ def try_alternative_upload(title, media_path, subreddit, flair_id=None):
     # 2. Son çare: Sadece başlık gönder
     try:
         print("[!] Son çare: Text post gönderiliyor...")
-        submission = subreddit.submit(
-            title=title + " [Video yüklenemedi - Twitter'dan izleyebilirsiniz]", 
-            selftext="",
-            flair_id=flair_id
-        )
+        # Flair'ı subreddit'te doğrula
+        try:
+            sr_name = getattr(subreddit, 'display_name', None) or str(subreddit)
+            # Normalize possible 'r/name' formats
+            sr_name = sr_name.replace('r/','').lstrip('/')
+        except Exception:
+            sr_name = str(subreddit)
+        efid = _resolve_flair_id_for_subreddit(sr_name, flair_id, _FLAIR_NAME_BY_ID.get(flair_id) if flair_id else None) if flair_id else None
+        if efid:
+            submission = subreddit.submit(
+                title=title + " [Video yüklenemedi - Twitter'dan izleyebilirsiniz]", 
+                selftext="",
+                flair_id=efid
+            )
+        else:
+            submission = subreddit.submit(
+                title=title + " [Video yüklenemedi - Twitter'dan izleyebilirsiniz]", 
+                selftext=""
+            )
         print(f"[+] Text post gönderildi: {submission.url}")
         return True
     except Exception as text_e:
@@ -2922,6 +3096,10 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
     has_video = len(video_files) > 0
     selected_flair_id = select_flair_with_ai(title, original_tweet_text, has_video=has_video)
     print(f"[+] Seçilen flair ID: {selected_flair_id}")
+    # Resolve flair for this subreddit; if not valid, we'll omit flair during submit
+    effective_flair_id = _resolve_flair_id_for_subreddit(SUBREDDIT, selected_flair_id, _FLAIR_NAME_BY_ID.get(selected_flair_id)) if selected_flair_id else None
+    if not effective_flair_id and selected_flair_id:
+        print(f"[UYARI] Seçilen flair bu subredditte yok. Flair'siz gönderilecek. (ID: {selected_flair_id})")
     
     # Önce resimleri gallery olarak yükle (eğer birden fazla resim varsa)
     if len(image_files) > 1:
@@ -2937,6 +3115,8 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
                         print(f"[+] Geçici resim silindi: {img_path}")
                 except Exception as cleanup_e:
                     print(f"[UYARI] Resim silinirken hata: {cleanup_e}")
+            # Gallery için başlığa göre şaka yorumunu dene
+            _maybe_post_joke_comment(None, title, SUBREDDIT, original_tweet_text)
             return True
         else:
             # Fallback öncesi, Reddit'te gönderi oluşmuş mı kontrol et
@@ -2969,8 +3149,13 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
         # Medya yoksa sadece text post
         try:
             print("[+] Medya yok, text post gönderiliyor.")
-            submission = subreddit.submit(title=title, selftext=(remainder_text or ""), flair_id=selected_flair_id)
+            if effective_flair_id:
+                submission = subreddit.submit(title=title, selftext=(remainder_text or ""), flair_id=effective_flair_id)
+            else:
+                submission = subreddit.submit(title=title, selftext=(remainder_text or ""))
             print(f"[+] Text post gönderildi: {submission.url}")
+            # Tweet sahibinin şaka notunu yorum olarak ekle
+            _maybe_post_joke_comment(submission, title, SUBREDDIT, original_tweet_text)
             return True
         except Exception as e:
             print(f"[HATA] Text post hatası: {e}")
@@ -2996,7 +3181,10 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
         if ext in [".jpg", ".jpeg", ".png", ".gif"]:
             # Resim yükleme
             print(f"[+] Resim gönderiliyor: {media_path}")
-            submission = subreddit.submit_image(title=title, image_path=media_path, flair_id=selected_flair_id)
+            if effective_flair_id:
+                submission = subreddit.submit_image(title=title, image_path=media_path, flair_id=effective_flair_id)
+            else:
+                submission = subreddit.submit_image(title=title, image_path=media_path)
             print(f"[+] Resim başarıyla gönderildi: {submission.url}")
             # Uzun metnin kalanı yorum olarak ekle
             try:
@@ -3005,6 +3193,8 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
                     print("[+] Başlığın kalan kısmı yorum olarak eklendi")
             except Exception as ce:
                 print(f"[UYARI] Kalan metin yorum olarak eklenemedi: {ce}")
+            # Şaka notunu ekle
+            _maybe_post_joke_comment(submission, title, SUBREDDIT, original_tweet_text)
             return True
             
         elif ext in [".mp4", ".mov", ".webm"]:
@@ -3016,8 +3206,13 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
             if file_size > max_video_size:
                 print(f"[HATA] Video çok büyük ({file_size} bytes). Limit: {max_video_size} bytes")
                 # Büyük video için text post gönder
-                submission = subreddit.submit(title=title + " [Video çok büyük - Twitter linkini kontrol edin]", selftext=(remainder_text or ""), flair_id=selected_flair_id)
+                if effective_flair_id:
+                    submission = subreddit.submit(title=title + " [Video çok büyük - Twitter linkini kontrol edin]", selftext=(remainder_text or ""), flair_id=effective_flair_id)
+                else:
+                    submission = subreddit.submit(title=title + " [Video çok büyük - Twitter linkini kontrol edin]", selftext=(remainder_text or ""))
                 print(f"[+] Text post gönderildi: {submission.url}")
+                # Şaka notunu ekle
+                _maybe_post_joke_comment(submission, title, SUBREDDIT, original_tweet_text)
                 return True
             
             # Video upload denemesi
@@ -3051,24 +3246,44 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
                             print(f"[UYARI] RedditWarp sonrası yorum ekleme başarısız: {se}")
                 except Exception as ve:
                     print(f"[UYARI] Video yorum ekleme başarısız: {ve}")
+                # Şaka notunu ekle
+                try:
+                    if hasattr(result, "reply"):
+                        _maybe_post_joke_comment(result, title, SUBREDDIT, original_tweet_text)
+                    elif isinstance(result, str):
+                        _maybe_post_joke_comment(result, title, SUBREDDIT, original_tweet_text)
+                    else:
+                        _maybe_post_joke_comment(None, title, SUBREDDIT, original_tweet_text)
+                except Exception as _je:
+                    print(f"[UYARI] Şaka notu eklenemedi (video): {_je}")
                 return True
             else:
                 print("[!] Video yüklenemedi, alternatif yöntemler deneniyor...")
                 # Alternatif yöntem dene
                 alt_success = try_alternative_upload(title, media_path, subreddit)
                 if alt_success:
+                    # Alternatif yol ile gönderildiyse başlık bazlı şaka yorumunu dene
+                    _maybe_post_joke_comment(None, title, SUBREDDIT, original_tweet_text)
                     return True
                 else:
                     # Son çare text post
                     print("[!] Tüm yöntemler başarısız, text post gönderiliyor...")
-                    submission = subreddit.submit(title=title + " [Video yüklenemedi - Twitter linkini kontrol edin]", selftext=(remainder_text or ""), flair_id=selected_flair_id)
+                    if effective_flair_id:
+                        submission = subreddit.submit(title=title + " [Video yüklenemedi - Twitter linkini kontrol edin]", selftext=(remainder_text or ""), flair_id=effective_flair_id)
+                    else:
+                        submission = subreddit.submit(title=title + " [Video yüklenemedi - Twitter linkini kontrol edin]", selftext=(remainder_text or ""))
                     print(f"[+] Alternatif text post gönderildi: {submission.url}")
+                    _maybe_post_joke_comment(submission, title, SUBREDDIT, original_tweet_text)
                     return True
                 
         else:
             print(f"[!] Desteklenmeyen dosya türü: {ext}")
-            submission = subreddit.submit(title=title, selftext=(remainder_text or ""), flair_id=selected_flair_id)
+            if effective_flair_id:
+                submission = subreddit.submit(title=title, selftext=(remainder_text or ""), flair_id=effective_flair_id)
+            else:
+                submission = subreddit.submit(title=title, selftext=(remainder_text or ""))
             print(f"[+] Text post gönderildi: {submission.url}")
+            _maybe_post_joke_comment(submission, title, SUBREDDIT, original_tweet_text)
             return True
             
     except Exception as e:
@@ -3077,8 +3292,12 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
         # Hata durumunda bile text post göndermeyi dene
         try:
             print("[!] Hata sonrası text post deneniyor...")
-            submission = subreddit.submit(title=title + " [Medya yüklenemedi]", selftext=(remainder_text or ""), flair_id=selected_flair_id)
+            if effective_flair_id:
+                submission = subreddit.submit(title=title + " [Medya yüklenemedi]", selftext=(remainder_text or ""), flair_id=effective_flair_id)
+            else:
+                submission = subreddit.submit(title=title + " [Medya yüklenemedi]", selftext=(remainder_text or ""))
             print(f"[+] Hata sonrası text post gönderildi: {submission.url}")
+            _maybe_post_joke_comment(submission, title, SUBREDDIT, original_tweet_text)
             return True
         except Exception as text_e:
             print(f"[HATA] Text post bile gönderilemedi: {text_e}")
