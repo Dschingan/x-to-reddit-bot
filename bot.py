@@ -1795,6 +1795,7 @@ def translate_text(text):
             "Translate ALL parts of the text into Turkish EXCEPT the protected terms listed above. Do NOT leave any sentence or common word in English.\n"
             "If the input includes any mentions like @nickname or patterns like 'via @nickname', exclude them from the output entirely.\n"
             "If the content appears to be a short gameplay/clip highlight rather than a news/article, compress it into ONE coherent Turkish sentence (no bullet points, no multiple sentences).\n"
+            "Special rule: If the text is exactly 'W', translate it as 'İyi'; if exactly 'L', translate it as 'Kötü'; if the text is 'W or L?' or 'W/L?', translate it as 'İyi mi, Kötü mü?'.\n"
             "Special phrases like 'Day 1' should be translated contextually: use 'Çıkış günü' or other natural Turkish phrase when referring to game launch. "
             "Other idiomatic phrases like 'now that X is purchasable' should be rendered smoothly in Turkish, e.g., 'artık X mevcut olduğundan' or 'X satın alınabildiği için'.\n"
             "Additionally, if the source text contains these tags/keywords, translate them EXACTLY as follows (preserve casing where appropriate):\n"
