@@ -1786,32 +1786,30 @@ def translate_text(text):
         model_fallback = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash").strip()
 
         # Talimat: sadece ham çeviri, belirli terimler çevrilmez.
-prompt = (
-    "Translate the text from English (source: en) to Turkish (target: tr). Output ONLY the translation with no extra words, "
-    "no quotes, no labels. Do NOT translate these terms and keep their original casing: "
-    "Battlefield, Free Pass, Battle Pass, Operation Firestorm, Easter Egg, Plus, Trickshot, Support, Recon, Assault, Engineer.\n"
-    "Special rule: If the text is exactly 'W', translate it as 'İyi'; if exactly 'L', translate it as 'Kötü'; "
-    "if the text is 'W or L?' or 'W/L?', translate it as 'İyi mi, Kötü mü?'.\n"
-    "Preserve the original tweet's capitalization EXACTLY for all words where possible; do not change upper/lower casing from the source text, "
-    "but apply strict capitalization preservation ONLY to protected terms and proper nouns; Turkish words should use natural Turkish casing.\n"
-    "Translate ALL parts of the text into Turkish EXCEPT the protected terms listed above. Do NOT leave any sentence or common word in English.\n"
-    "If the input includes any mentions like @nickname or patterns like 'via @nickname', exclude them from the output entirely.\n"
-    "If the content appears to be a short gameplay/clip highlight rather than a news/article, compress it into ONE coherent Turkish sentence (no bullet points, no multiple sentences).\n"
-    "Special phrases like 'Day 1' should be translated contextually: use 'Çıkış günü' or other natural Turkish phrase when referring to game launch. "
-    "Other idiomatic phrases like 'now that X is purchasable' should be rendered smoothly in Turkish, e.g., 'artık X mevcut olduğundan' or 'X satın alınabildiği için'.\n"
-    "Additionally, if the source text contains these tags/keywords, translate them EXACTLY as follows (preserve casing where appropriate):\n"
-    "BREAKING => Son Dakika; LEAK => Sızıntı; HUMOUR => Söylenti.\n"
-    "Remove any first-person opinions or subjective phrases (e.g., 'I think', 'IMO', 'bence', 'bana göre'); keep only neutral, factual content.\n"
-    "Before finalizing, ensure the Turkish output is coherent and natural; do NOT produce two unrelated sentences or add stray quoted fragments. If any part seems odd, fix it for clarity while staying faithful to the source.\n\n"
-    "Important: When translating phrases like 'your [THING] rating', do NOT add Turkish possessive suffixes to game/brand names. Prefer the structure '[NAME] için ... derecelendirmeniz' instead of '[NAME]'nızın ...'.\n"
-    "Example: 'What is your FINAL Rating of the Battlefield 6 Beta? (1-10)' -> 'Battlefield 6 Beta için FINAL derecelendirmeniz nedir? (1-10)'.\n\n"
-    "Idioms: Translate 'can't wait' / 'cannot wait' / 'can NOT wait' as positive excitement -> 'sabırsızlanıyorum' (NOT 'sabırsızlanamam'). If the English uses emphasis (e.g., NOT in caps), you may emphasize the Turkish verb (e.g., SABIRSIZLANIYORUM) but do not change the meaning to negative.\n"
-    "Meme pattern '... be like': Translate patterns such as 'waiting BF6 be like...' as 'BF6’yı beklemek böyle bir şey...' or '[X] böyle bir şey...' Do NOT produce literal 'bekliyorum sanki' or similar unnatural phrasing.\n"
-    "Consistency: Never introduce or switch to a different game/series/version that is not in the source. If the source mentions 'Battlefield 2042', do not output 'Battlefield 6', and vice versa. Keep titles and versions consistent with the input.\n"
-    "Natural wording: Translate generic English gaming terms to proper Turkish instead of mixing languages (e.g., translate 'cosmetics' as 'kozmetikler' when not a protected proper noun; avoid forms like 'Cosmetics'ler'). Keep protected terms listed above in English as instructed.\n"
-    "Use correct Turkish diacritics (ç, ğ, ı, İ, ö, ş, ü) and keep Unicode in NFC form. Preserve basic punctuation and line breaks.\n\n"
-    "Text:\n" + input_for_translation.strip()
-)
+        prompt = (
+            "Translate the text from English (source: en) to Turkish (target: tr). Output ONLY the translation with no extra words, "
+            "no quotes, no labels. Do NOT translate these terms and keep their original casing: "
+            "Battlefield, Free Pass, Battle Pass, Operation Firestorm, Easter Egg, Plus, Trickshot, Support, Recon, Assault, Engineer.\n"
+            "Preserve the original tweet's capitalization EXACTLY for all words where possible; do not change upper/lower casing from the source text, "
+            "but apply strict capitalization preservation ONLY to protected terms and proper nouns; Turkish words should use natural Turkish casing.\n"
+            "Translate ALL parts of the text into Turkish EXCEPT the protected terms listed above. Do NOT leave any sentence or common word in English.\n"
+            "If the input includes any mentions like @nickname or patterns like 'via @nickname', exclude them from the output entirely.\n"
+            "If the content appears to be a short gameplay/clip highlight rather than a news/article, compress it into ONE coherent Turkish sentence (no bullet points, no multiple sentences).\n"
+            "Special phrases like 'Day 1' should be translated contextually: use 'Çıkış günü' or other natural Turkish phrase when referring to game launch. "
+            "Other idiomatic phrases like 'now that X is purchasable' should be rendered smoothly in Turkish, e.g., 'artık X mevcut olduğundan' or 'X satın alınabildiği için'.\n"
+            "Additionally, if the source text contains these tags/keywords, translate them EXACTLY as follows (preserve casing where appropriate):\n"
+            "BREAKING => Son Dakika; LEAK => Sızıntı; HUMOUR => Söylenti.\n"
+            "Remove any first-person opinions or subjective phrases (e.g., 'I think', 'IMO', 'bence', 'bana göre'); keep only neutral, factual content.\n"
+            "Before finalizing, ensure the Turkish output is coherent and natural; do NOT produce two unrelated sentences or add stray quoted fragments. If any part seems odd, fix it for clarity while staying faithful to the source.\n\n"
+            "Important: When translating phrases like 'your [THING] rating', do NOT add Turkish possessive suffixes to game/brand names. Prefer the structure '[NAME] için ... derecelendirmeniz' instead of '[NAME]'nızın ...'.\n"
+            "Example: 'What is your FINAL Rating of the Battlefield 6 Beta? (1-10)' -> 'Battlefield 6 Beta için FINAL derecelendirmeniz nedir? (1-10)'.\n\n"
+            "Idioms: Translate 'can't wait' / 'cannot wait' / 'can NOT wait' as positive excitement -> 'sabırsızlanıyorum' (NOT 'sabırsızlanamam'). If the English uses emphasis (e.g., NOT in caps), you may emphasize the Turkish verb (e.g., SABIRSIZLANIYORUM) but do not change the meaning to negative.\n"
+            "Meme pattern '... be like': Translate patterns such as 'waiting BF6 be like...' as 'BF6’yı beklemek böyle bir şey...' or '[X] böyle bir şey...' Do NOT produce literal 'bekliyorum sanki' or similar unnatural phrasing.\n"
+            "Consistency: Never introduce or switch to a different game/series/version that is not in the source. If the source mentions 'Battlefield 2042', do not output 'Battlefield 6', and vice versa. Keep titles and versions consistent with the input.\n"
+            "Natural wording: Translate generic English gaming terms to proper Turkish instead of mixing languages (e.g., translate 'cosmetics' as 'kozmetikler' when not a protected proper noun; avoid forms like 'Cosmetics'ler'). Keep protected terms listed above in English as instructed.\n"
+            "Use correct Turkish diacritics (ç, ğ, ı, İ, ö, ş, ü) and keep Unicode in NFC form. Preserve basic punctuation and line breaks.\n\n"
+            "Text:\n" + input_for_translation.strip()
+        )
 
         def _translate_with(model_name: str):
             resp = client.models.generate_content(
