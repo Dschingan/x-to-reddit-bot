@@ -1753,10 +1753,11 @@ def _fetch_media_with_gallery_dl(screen_name: str, tweet_id: str, instance_base:
         print(f"[UYARI] gallery-dl fallback genel hata: {e}")
         return []
 
-def translate_text(text):
+def translate_text(text, has_video: bool = False):
     """Gemini 2.5 Flash ile İngilizce -> Türkçe çeviri.
     Çıkış: Sadece ham çeviri (ek açıklama, tırnak, etiket vs. yok).
     Özel terimleri ÇEVİRME: battlefield, free pass, battle pass.
+    has_video: Kaynak tweet'te video varsa True (ör: 'reload' -> 'Şarjör').
     """
     try:
         if not text or not text.strip():
@@ -1786,6 +1787,7 @@ def translate_text(text):
         model_fallback = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash").strip()
 
         # Talimat: sadece ham çeviri, belirli terimler çevrilmez.
+        # Bağlam satırı: video var/yok bilgisi ile özel kurallar uygulanır.
         prompt = (
             "Translate the text from English (source: en) to Turkish (target: tr). Output ONLY the translation with no extra words, "
             "no quotes, no labels. Do NOT translate these terms and keep their original casing: "
@@ -1809,6 +1811,9 @@ def translate_text(text):
             "NEVER output the awkward phrase 'sızıntı oldu'.\n"
             "For gaming phrasing, translate 'Intro Gameplay' as 'giriş oynanışı' (or 'açılış oynanışı' if it reads more naturally in context).\n"
             "Remove any first-person opinions or subjective phrases (e.g., 'I think', 'IMO', 'bence', 'bana göre'); keep only neutral, factual content.\n"
+            "Before finalizing, re-read your Turkish output and ensure it is coherent and faithful: do NOT invent numbers, durations (e.g., '3-5 gün'), hedging words (e.g., 'sanki', 'gibi', 'muhtemelen') unless they EXIST in the English. Remove any such additions. Do NOT add or change meaning.\n"
+            "Do not translate 'Campaign' in a video game context as 'Kampanya'; prefer 'Hikaye' (or 'Hikaye modu' if fits better). Translate 'Campaign Early Access' as 'Hikaye Erken Erişimi'.\n"
+            f"Context: HAS_VIDEO={'true' if has_video else 'false'} — If HAS_VIDEO is true AND the English contains the word 'reload', translate 'reload' specifically as 'Şarjör' (capitalize S). Otherwise, translate naturally (do NOT use 'Şarjör').\n"
             "Before finalizing, ensure the Turkish output is coherent and natural; do NOT produce two unrelated sentences or add stray quoted fragments. If any part seems odd, fix it for clarity while staying faithful to the source.\n\n"
             "Important: When translating phrases like 'your [THING] rating', do NOT add Turkish possessive suffixes to game/brand names. Prefer the structure '[NAME] için ... derecelendirmeniz' instead of '[NAME]'nızın ...'.\n"
             "Example: 'What is your FINAL Rating of the Battlefield 6 Beta? (1-10)' -> 'Battlefield 6 Beta için FINAL derecelendirmeniz nedir? (1-10)'.\n\n"
@@ -3885,14 +3890,8 @@ def main_loop():
                 if cd_days is not None and cd_days > 10:
                     print(f"[SKIP] Geri sayım ({cd_days} gün) > 10: {tweet_id}")
                     continue
-                translated = translate_text(cleaned_text)
-                if translated:
-                    print(f"[+] Çeviri: {translated[:100]}{'...' if len(translated) > 100 else ''}")
-                else:
-                    print(f"[UYARI] Çeviri başarısız, tweet atlanıyor: {tweet_id}")
-                    continue
                 
-                # Medya çıkarımı
+                # Medya çıkarımı (önce video var mı tespit et)
                 print("[+] Medya URL'leri çıkarılıyor...")
                 media_urls = get_media_urls_from_tweet_data(tweet_data)
                 media_files = []
@@ -3912,6 +3911,14 @@ def main_loop():
                     elif is_video:
                         video_urls.append(media_url)
                 print(f"[+] Medya analizi: {len(image_urls)} resim, {len(video_urls)} video")
+
+                # Medya bağlamıyla çeviri (reload->Şarjör vb.)
+                translated = translate_text(cleaned_text, has_video=bool(video_urls))
+                if translated:
+                    print(f"[+] Çeviri: {translated[:100]}{'...' if len(translated) > 100 else ''}")
+                else:
+                    print(f"[UYARI] Çeviri başarısız, tweet atlanıyor: {tweet_id}")
+                    continue
                 
                 # Resimler
                 if len(image_urls) > 1:
@@ -4057,7 +4064,26 @@ def main_loop():
                                 translated = None
                                 print(f"[INFO] RT temizlenince metin boş, başlık kaynak olarak ayarlanacak: {fallback_source_title}")
                             else:
-                                translated = translate_text(cleaned_text)
+                                # Önce medya çıkar ve video var mı tespit et
+                                print("[+] RT Medya URL'leri çıkarılıyor...")
+                                media_urls = get_media_urls_from_tweet_data(tweet_data)
+                                media_files = []
+                                image_urls = []
+                                video_urls = []
+                                for media_url in media_urls:
+                                    u = media_url.lower()
+                                    is_image = (
+                                        any(ext in u for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']) or
+                                        'format=jpg' in u or 'format=jpeg' in u or 'format=png' in u or 'format=webp' in u or
+                                        'pbs.twimg.com/media' in u
+                                    )
+                                    is_video = ('.mp4' in u or 'format=mp4' in u or 'video.twimg.com' in u)
+                                    if is_image:
+                                        image_urls.append(media_url)
+                                    elif is_video:
+                                        video_urls.append(media_url)
+                                print(f"[+] RT Medya analizi: {len(image_urls)} resim, {len(video_urls)} video")
+                                translated = translate_text(cleaned_text, has_video=bool(video_urls))
                             if translated:
                                 print(f"[+] RT Çeviri: {translated[:100]}{'...' if len(translated) > 100 else ''}")
                             elif fallback_source_title:
@@ -4066,25 +4092,6 @@ def main_loop():
                             else:
                                 print(f"[UYARI] RT çeviri başarısız, atlanıyor: {tweet_id}")
                                 continue
-
-                            print("[+] RT Medya URL'leri çıkarılıyor...")
-                            media_urls = get_media_urls_from_tweet_data(tweet_data)
-                            media_files = []
-                            image_urls = []
-                            video_urls = []
-                            for media_url in media_urls:
-                                u = media_url.lower()
-                                is_image = (
-                                    any(ext in u for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']) or
-                                    'format=jpg' in u or 'format=jpeg' in u or 'format=png' in u or 'format=webp' in u or
-                                    'pbs.twimg.com/media' in u
-                                )
-                                is_video = ('.mp4' in u or 'format=mp4' in u or 'video.twimg.com' in u)
-                                if is_image:
-                                    image_urls.append(media_url)
-                                elif is_video:
-                                    video_urls.append(media_url)
-                            print(f"[+] RT Medya analizi: {len(image_urls)} resim, {len(video_urls)} video")
 
                             if len(image_urls) > 1:
                                 print("[+] RT: Birden fazla resim tespit edildi, toplu indirme başlatılıyor...")
