@@ -268,6 +268,29 @@ MAX_RETRIES = 2  # Maximum number of retries for failed requests (azaltıldı)
 MIN_REQUEST_INTERVAL = 30  # Minimum seconds between any requests
 LAST_REQUEST_TIME = 0  # Son istek zamanı
 TWSCRAPE_DETAIL_TIMEOUT = 8  # seconds to wait for tweet_details before skipping
+REDDIT_MAX_VIDEO_SECONDS = int(os.getenv("REDDIT_MAX_VIDEO_SECONDS", "900"))
+
+# Scheduled weekly player-finder post config (stateless, configurable via env)
+def _parse_days_env(val: str) -> set[int]:
+    out: set[int] = set()
+    try:
+        for p in (val or "").split(","):
+            p = p.strip()
+            if not p:
+                continue
+            try:
+                d = int(p)
+                if 1 <= d <= 31:
+                    out.add(d)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out or {1, 10, 20, 30}
+
+SCHEDULED_PIN_DAYS = _parse_days_env(os.getenv("SCHEDULED_PIN_DAYS", "1,10,20,30"))
+SCHEDULED_PIN_HOUR = int(os.getenv("SCHEDULED_PIN_HOUR", "9"))
+SCHEDULED_PIN_TITLE_PREFIX = os.getenv("SCHEDULED_PIN_TITLE_PREFIX", "Haftalık Oyuncu Arama Ana Başlığı - (")
 
 # PRAW konfigürasyonunu Reddit API kurallarına uygun şekilde optimize et
 reddit = praw.Reddit(
@@ -2427,6 +2450,143 @@ def convert_video_to_reddit_format(input_path, output_path):
         print(f"[HATA] Video dönüştürme hatası: {e}")
         return None
 
+def get_video_duration_seconds(path: str) -> float | None:
+    """ffprobe ile video süresini saniye cinsinden döndür. Hata halinde None döner."""
+    try:
+        cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", path]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        info = json.loads(res.stdout or "{}")
+        dur = float(info.get("format", {}).get("duration", "nan"))
+        if dur != dur:  # NaN kontrolü
+            return None
+        return dur
+    except Exception as e:
+        print(f"[UYARI] Video süresi alınamadı: {e}")
+        return None
+
+# --- Scheduled weekly "Oyuncu Arama" post helper (stateless) ---
+def _create_and_pin_weekly_post_if_due() -> None:
+    """On days 1,10,20,30 at/after 09:00 local time, create the weekly thread and pin it to top.
+    Uses PRAW and requires moderator permissions on the subreddit.
+    """
+    try:
+        lt = time.localtime()
+        day = lt.tm_mday
+        hour = lt.tm_hour
+        # Only run on specified days and time >= configured hour
+        if day not in SCHEDULED_PIN_DAYS or hour < SCHEDULED_PIN_HOUR:
+            return
+        today_key = time.strftime("%Y-%m-%d", lt)
+
+        # Build title and body
+        tarih = time.strftime("%d.%m.%Y", lt)
+        title = f"{SCHEDULED_PIN_TITLE_PREFIX}{tarih})"
+        body = (
+            "**Hoş geldiniz!**\n\n"
+            "Bu başlık, takım/oyuncu bulmanızı kolaylaştırmak amacıyla oluşturulmuştur. Eğer birlikte oyun oynayabileceğiniz yeni kişiler arıyorsanız doğru yerdesiniz! Aşağıda belirtildiği şekilde yorum yaparak takım arkadaşı arayabilirsiniz. Böylece benzer oyunlara ve tercihlere sahip oyuncular kolayca bir araya gelebilir.\n\n"
+            "**Lütfen yorumlarınızda şunları belirtmeyi unutmayın:**\n\n"
+            "* Oyun platformunuz (PC, PlayStation, Xbox vb.)\n"
+            "* Oyun içi kullanıcı adınız\n"
+            "* Mikrofonlu/suz bilgisi\n"
+            "* Genellikle oynadığınız veya oynayacağınız görev birimi (assault, medic, recon vb.)\n\n"
+            "Bu bilgiler sayesinde, benzer oyun ve oyun tarzlarına sahip kişilerle daha kolay iletişim kurabilirsiniz.\n\n"
+            "**Yorumların sıralanması:**\n\n"
+            "Yorumlar sistem tarafından otomatik olarak en yeni yorumdan en eski yoruma doğru sıralanmaktadır. Böylece en güncel oyunculara ve taleplere kolayca ulaşabilirsiniz.\n\n"
+            "Her seviyeden oyuncuya açıktır, saygılı ve destekleyici bir ortam yaratmayı amaçlıyoruz. Keyifli oyunlar!"
+        )
+
+        # Stateless dedupe: scan recent posts for today's weekly thread
+        sr = reddit.subreddit(SUBREDDIT)
+        try:
+            for s in sr.new(limit=30):
+                try:
+                    author_name = getattr(s.author, 'name', '') or ''
+                except Exception:
+                    author_name = ''
+                s_title = getattr(s, 'title', '') or ''
+                try:
+                    created_utc = int(getattr(s, 'created_utc', 0) or 0)
+                except Exception:
+                    created_utc = 0
+                s_local = time.localtime(created_utc) if created_utc else None
+                s_key = time.strftime("%Y-%m-%d", s_local) if s_local else ''
+                if (
+                    author_name.lower() == (REDDIT_USERNAME or '').lower()
+                    and s_title.startswith(SCHEDULED_PIN_TITLE_PREFIX)
+                    and s_key == today_key
+                ):
+                    print(f"[INFO] Bugünün haftalık başlığı zaten mevcut: https://reddit.com{s.permalink}")
+                    return
+        except Exception as scan_e:
+            print(f"[UYARI] Mevcut haftalık gönderiler taranamadı: {scan_e}")
+
+        print("[+] Haftalık oyuncu arama gönderisi oluşturuluyor ve sabitleniyor...")
+        submission = sr.submit(title=title, selftext=body, send_replies=False, resubmit=False)
+        if submission:
+            try:
+                # Pin to top (slot 1) and set suggested sort to 'new'
+                submission.mod.sticky(state=True, bottom=False)
+                try:
+                    submission.mod.suggested_sort("new")
+                except Exception as se:
+                    print(f"[UYARI] suggested_sort ayarlanamadı: {se}")
+                print(f"[+] Haftalık gönderi oluşturuldu ve sabitlendi: https://reddit.com{submission.permalink}")
+
+                # Unsticky older megathreads so only the newest stays pinned
+                try:
+                    for slot in (1, 2):
+                        try:
+                            stickied = sr.sticky(number=slot)
+                        except Exception:
+                            stickied = None
+                        if not stickied:
+                            continue
+                        try:
+                            st_author = getattr(stickied.author, 'name', '') or ''
+                        except Exception:
+                            st_author = ''
+                        st_title = getattr(stickied, 'title', '') or ''
+                        if (
+                            stickied.id != submission.id and
+                            st_author.lower() == (REDDIT_USERNAME or '').lower() and
+                            st_title.startswith(SCHEDULED_PIN_TITLE_PREFIX)
+                        ):
+                            try:
+                                stickied.mod.sticky(state=False)
+                                print(f"[+] Eski haftalık başlık unsticky yapıldı: https://reddit.com{stickied.permalink}")
+                            except Exception as ue:
+                                print(f"[UYARI] Unsticky başarısız: {ue}")
+                except Exception as sweep_e:
+                    print(f"[UYARI] Sticky temizleme sırasında hata: {sweep_e}")
+                # Extra sweep: scan recent posts and unsticky any lingering older stickied megathreads
+                try:
+                    for s in sr.new(limit=100):
+                        try:
+                            if getattr(s, 'id', None) == submission.id:
+                                continue
+                            if not getattr(s, 'stickied', False):
+                                continue
+                            author_name = getattr(s.author, 'name', '') or ''
+                            s_title = getattr(s, 'title', '') or ''
+                            if (
+                                author_name.lower() == (REDDIT_USERNAME or '').lower() and
+                                s_title.startswith(SCHEDULED_PIN_TITLE_PREFIX)
+                            ):
+                                try:
+                                    s.mod.sticky(state=False)
+                                    print(f"[+] Eski stickied gönderi unsticky yapıldı: https://reddit.com{s.permalink}")
+                                except Exception as ue2:
+                                    print(f"[UYARI] Unsticky (scan) başarısız: {ue2}")
+                        except Exception:
+                            continue
+                except Exception as scan_uns_e:
+                    print(f"[UYARI] Ek sticky tarama/temizleme hatası: {scan_uns_e}")
+            except Exception as me:
+                print(f"[UYARI] Gönderi sabitleme/moderasyon işlemi başarısız: {me}")
+        else:
+            print("[UYARI] Haftalık gönderi oluşturulamadı (PRAW submit falsy)")
+    except Exception as e:
+        print(f"[UYARI] Haftalık gönderi oluşturma hatası: {e}")
 def upload_gallery_via_redditwarp(title, image_paths, subreddit_name, flair_id=None):
     """RedditWarp ile birden fazla resmi gallery olarak yükle"""
     if not redditwarp_client:
@@ -3767,6 +3927,8 @@ def main_loop():
         try:
             print("\n" + "="*50)
             print(f"[+] Tweet kontrol ediliyor... ({time.strftime('%Y-%m-%d %H:%M:%S')})")
+            # Önce planlı haftalık gönderiyi kontrol et/oluştur
+            _create_and_pin_weekly_post_if_due()
             
             # Son 8 tweet'i al ve retweet kontrolü yap (daha fazla tweet kontrol et)
             tweets_data = get_latest_tweets_with_retweet_check(8)
@@ -3943,6 +4105,25 @@ def main_loop():
                         print("[+] En kaliteli video indiriliyor (twscrape/HLS öncelikli)...")
                         path = download_best_video_for_tweet(tweet_id, filename)
                         if path:
+                            # Süre kontrolü: Reddit limitini aşarsa tüm tweet'i atla
+                            dur = get_video_duration_seconds(path)
+                            if dur is not None and dur > REDDIT_MAX_VIDEO_SECONDS:
+                                print(f"[SKIP] Video çok uzun ({dur:.1f}s > {REDDIT_MAX_VIDEO_SECONDS}s). Tweet atlanıyor: {tweet_id}")
+                                try:
+                                    if os.path.exists(path):
+                                        os.remove(path)
+                                except Exception:
+                                    pass
+                                # Önceden indirilen medya (resimler) varsa temizle
+                                for fpath in media_files:
+                                    try:
+                                        if os.path.exists(fpath):
+                                            os.remove(fpath)
+                                    except Exception:
+                                        pass
+                                # Sonraki tweet'e geç
+                                continue
+
                             converted = f"converted_{filename}"
                             print(f"[+] Video dönüştürülüyor: {path} -> {converted}")
                             converted_path = convert_video_to_reddit_format(path, converted)
@@ -4114,6 +4295,24 @@ def main_loop():
                                     print("[+] RT En kaliteli video indiriliyor (twscrape/HLS öncelikli)...")
                                     path = download_best_video_for_tweet(tweet_id, filename)
                                     if path:
+                                        # Süre kontrolü: Reddit limitini aşarsa tüm RT tweet'i atla
+                                        dur = get_video_duration_seconds(path)
+                                        if dur is not None and dur > REDDIT_MAX_VIDEO_SECONDS:
+                                            print(f"[SKIP] RT Video çok uzun ({dur:.1f}s > {REDDIT_MAX_VIDEO_SECONDS}s). RT atlanıyor: {tweet_id}")
+                                            try:
+                                                if os.path.exists(path):
+                                                    os.remove(path)
+                                            except Exception:
+                                                pass
+                                            for fpath in media_files:
+                                                try:
+                                                    if os.path.exists(fpath):
+                                                        os.remove(fpath)
+                                                except Exception:
+                                                    pass
+                                            # Bir sonraki RT'ye geç
+                                            continue
+
                                         converted = f"converted_{filename}"
                                         print(f"[+] RT Video dönüştürülüyor: {path} -> {converted}")
                                         converted_path = convert_video_to_reddit_format(path, converted)
