@@ -291,6 +291,7 @@ def _parse_days_env(val: str) -> set[int]:
 SCHEDULED_PIN_DAYS = _parse_days_env(os.getenv("SCHEDULED_PIN_DAYS", "1,10,20,30"))
 SCHEDULED_PIN_HOUR = int(os.getenv("SCHEDULED_PIN_HOUR", "9"))
 SCHEDULED_PIN_TITLE_PREFIX = os.getenv("SCHEDULED_PIN_TITLE_PREFIX", "Haftalık Oyuncu Arama Ana Başlığı - (")
+SCHEDULED_PIN_ENABLED = (os.getenv("SCHEDULED_PIN_ENABLED", "true").strip().lower() == "true")
 
 # PRAW konfigürasyonunu Reddit API kurallarına uygun şekilde optimize et
 reddit = praw.Reddit(
@@ -2470,6 +2471,9 @@ def _create_and_pin_weekly_post_if_due() -> None:
     Uses PRAW and requires moderator permissions on the subreddit.
     """
     try:
+        # Global toggle
+        if not SCHEDULED_PIN_ENABLED:
+            return
         lt = time.localtime()
         day = lt.tm_mday
         hour = lt.tm_hour
