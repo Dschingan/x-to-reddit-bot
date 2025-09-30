@@ -410,8 +410,16 @@ def clean_tweet_text(text):
     text = re.sub(r'\[\s*\]', '', text)
     text = re.sub(r'\s*[-–—]\s*$', '', text)
     text = text.replace('|', '')
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    # Satır sonlarını koru, sadece aynı satırdaki fazla boşlukları temizle
+    # \n karakterlerini geçici olarak koruma altına al
+    text = text.replace('\n', '|||NEWLINE|||')
+    text = re.sub(r'\s+', ' ', text)  # Fazla boşlukları tek boşluğa çevir
+    text = text.replace('|||NEWLINE|||', '\n')  # Satır sonlarını geri getir
+    # Satır başı/sonundaki gereksiz boşlukları temizle ama satır sonlarını koru
+    lines = text.split('\n')
+    lines = [line.strip() for line in lines]
+    text = '\n'.join(lines)
+    return text.strip()
 
 def extract_username_from_tweet_url(url: str) -> str:
     """Tweet URL'sinden kullanıcı adını çıkar.
