@@ -26,6 +26,7 @@ from types import SimpleNamespace
 import shutil
 import m3u8
 import unicodedata
+import logging
 # Pnytter kaldırıldı - sadece TWSCRAPE kullanılacak
 # Lazy import için Google AI modüllerini kaldır - ihtiyaç duyulduğunda import edilecek
 
@@ -257,9 +258,12 @@ def _parse_days_env(val: str) -> set[int]:
                 continue
     except Exception:
         pass
-    return out or {1, 10, 20, 30}
+    return out or set()
 
-SCHEDULED_PIN_DAYS = _parse_days_env(os.getenv("SCHEDULED_PIN_DAYS", "1,10,20,30"))
+# New: allow scheduling by weekday (0=Mon .. 6=Sun). Default 4 (Friday).
+SCHEDULED_PIN_WEEKDAY = int(os.getenv("SCHEDULED_PIN_WEEKDAY", "4"))
+# Backward-compat: if SCHEDULED_PIN_DAYS provided, it will be used only if WEEKDAY is invalid (<0 or >6).
+SCHEDULED_PIN_DAYS = _parse_days_env(os.getenv("SCHEDULED_PIN_DAYS", ""))
 SCHEDULED_PIN_HOUR = int(os.getenv("SCHEDULED_PIN_HOUR", "9"))
 SCHEDULED_PIN_TITLE_PREFIX = os.getenv("SCHEDULED_PIN_TITLE_PREFIX", "Haftalık Oyuncu Arama Ana Başlığı - (")
 SCHEDULED_PIN_ENABLED = (os.getenv("SCHEDULED_PIN_ENABLED", "true").strip().lower() == "true")
@@ -434,6 +438,19 @@ async def init_twscrape_api():
             print("[UYARI] accounts.db bulunamadı, twscrape erişimi başarısız olabilir")
         elif not os.access(ACCOUNTS_DB_PATH, os.R_OK):
             print("[UYARI] accounts.db dosyası okunamıyor (izin)")
+        # Optional: enable verbose native twscrape logs
+        try:
+            if os.getenv("TWSCRAPE_DEBUG", "false").strip().lower() == "true":
+                # Set up root logger minimally if not configured
+                if not logging.getLogger().handlers:
+                    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+                # Verbose for twscrape and httpx
+                logging.getLogger("twscrape").setLevel(logging.DEBUG)
+                logging.getLogger("twscrape.api").setLevel(logging.DEBUG)
+                logging.getLogger("httpx").setLevel(logging.WARNING)
+                print("[INFO] TWSCRAPE_DEBUG etkin: twscrape native logları DEBUG seviyesinde")
+        except Exception:
+            pass
         twscrape_api = API(ACCOUNTS_DB_PATH)
         print("[+] twscrape API başlatıldı")
     return twscrape_api
@@ -1541,7 +1558,9 @@ def get_video_duration_seconds(path: str) -> float | None:
 
 # --- Scheduled weekly "Oyuncu Arama" post helper (stateless) ---
 def _create_and_pin_weekly_post_if_due() -> None:
-    """On days 1,10,20,30 at/after 09:00 local time, create the weekly thread and pin it to top.
+    """Scheduled weekly megathread creator.
+    Primary schedule: every Friday (weekday=4) at/after configured hour.
+    Fallback schedule: specified days-of-month in `SCHEDULED_PIN_DAYS` if WEEKDAY invalid.
     Uses PRAW and requires moderator permissions on the subreddit.
     """
     try:
@@ -1550,9 +1569,19 @@ def _create_and_pin_weekly_post_if_due() -> None:
             return
         lt = time.localtime()
         day = lt.tm_mday
+        wday = lt.tm_wday  # 0=Mon .. 6=Sun
         hour = lt.tm_hour
-        # Only run on specified days and time >= configured hour
-        if day not in SCHEDULED_PIN_DAYS or hour < SCHEDULED_PIN_HOUR:
+
+        run_today = False
+        # Prefer weekday schedule if valid
+        if 0 <= SCHEDULED_PIN_WEEKDAY <= 6:
+            run_today = (wday == SCHEDULED_PIN_WEEKDAY) and (hour >= SCHEDULED_PIN_HOUR)
+        else:
+            # Fallback to day-of-month list if provided
+            if SCHEDULED_PIN_DAYS:
+                run_today = (day in SCHEDULED_PIN_DAYS) and (hour >= SCHEDULED_PIN_HOUR)
+
+        if not run_today:
             return
         today_key = time.strftime("%Y-%m-%d", lt)
 
