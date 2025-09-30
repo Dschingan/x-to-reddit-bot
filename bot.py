@@ -20,6 +20,7 @@ from PIL import Image
 import io
 from bs4 import BeautifulSoup
 import asyncio
+import threading
 from twscrape import API, gather
 from types import SimpleNamespace
 import shutil
@@ -29,7 +30,6 @@ import unicodedata
 # Lazy import için Google AI modüllerini kaldır - ihtiyaç duyulduğunda import edilecek
 
 # FastAPI for web service - lazy import
-# import threading - lazy import
 # from fastapi import FastAPI, Request - lazy import
 # from fastapi.responses import PlainTextResponse - lazy import
 # import uvicorn - lazy import
@@ -749,6 +749,14 @@ _worker_started = False
 _worker_lock = None
 app = None
 
+def get_instance_health_status() -> bool:
+    """Basit sağlık durumu: arka plan işçisi başladı mı?"""
+    try:
+        return bool(_worker_started)
+    except Exception:
+        # Varsayılan: servis ayakta kabul et
+        return True
+
 def _init_fastapi():
     """🧹 FastAPI lazy initialization"""
     global app, _worker_lock
@@ -816,6 +824,10 @@ def _init_fastapi():
                 _worker_started = True
     
     return app
+
+# Expose ASGI app for 'uvicorn bot:app' imports (Render)
+# This keeps local execution via `python bot.py` working as well.
+app = _init_fastapi()
 
 # 🧹 Route tanımları _init_fastapi() fonksiyonuna taşındı
 
