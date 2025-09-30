@@ -789,9 +789,11 @@ def _init_fastapi():
             except Exception:
                 return PlainTextResponse("ok", status_code=200)
 
-        @app.get("/ping")
-        async def ping():
-            # Basit canlılık kontrolü (JSON)
+        @app.api_route("/ping", methods=["GET", "HEAD"])
+        async def ping(request: Request):
+            # Basit canlılık kontrolü
+            if request.method == "HEAD":
+                return PlainTextResponse("", status_code=200)
             return {"status": "alive"}
 
         @app.on_event("startup")
