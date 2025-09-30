@@ -237,6 +237,8 @@ EXCLUDED_TWEET_IDS = {
 
 # Nitter konfigürasyonu kaldırıldı - sadece TWSCRAPE kullanılacak
 TWITTER_SCREENNAME = "TheBFWire"
+# Twitter User ID (tercih edilen yöntem - daha güvenilir)
+TWITTER_USER_ID = os.getenv("TWITTER_USER_ID", "1939708158051500032").strip()
 MIN_REQUEST_INTERVAL = 30  # Minimum seconds between any requests
 LAST_REQUEST_TIME = 0  # Son istek zamanı
 TWSCRAPE_DETAIL_TIMEOUT = 8  # seconds to wait for tweet_details before skipping
@@ -2908,9 +2910,10 @@ def get_latest_tweets_with_retweet_check(count: int = 8):
                 tweets_generator = None
                 try:
                     api = await init_twscrape_api()
-                    # Kullanıcıyı login ile getir
-                    user = await api.user_by_login(TWITTER_SCREENNAME)
+                    # Kullanıcıyı ID ile getir (daha güvenilir)
+                    user = await api.user_by_id(int(TWITTER_USER_ID))
                     if not user:
+                        print(f"[HATA] Twitter kullanıcısı bulunamadı: ID {TWITTER_USER_ID}")
                         return []
                     
                     # 🧹 Generator kullan - büyük listeleri RAM'e yükleme
@@ -3014,7 +3017,7 @@ def main_loop():
     
     print("[+] Reddit Bot başlatılıyor...")
     print(f"[+] Subreddit: r/{SUBREDDIT}")
-    print(f"[+] Twitter: @{TWITTER_SCREENNAME}")
+    print(f"[+] Twitter: @{TWITTER_SCREENNAME} (ID: {TWITTER_USER_ID})")
     print("[+] Retweet'ler otomatik olarak atlanacak")
     print(f"[+] Şu ana kadar {len(posted_tweet_ids)} tweet işlenmiş")
     
