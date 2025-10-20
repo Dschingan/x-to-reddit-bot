@@ -2322,33 +2322,9 @@ def try_alternative_upload(title, media_path, subreddit, flair_id=None):
     except Exception as e:
         print(f"[HATA] Alternatif yükleme başarısız: {e}")
     
-    # 2. Son çare: Sadece başlık gönder
-    try:
-        print("[!] Son çare: Text post gönderiliyor...")
-        # Flair'ı subreddit'te doğrula
-        try:
-            sr_name = getattr(subreddit, 'display_name', None) or str(subreddit)
-            # Normalize possible 'r/name' formats
-            sr_name = sr_name.replace('r/','').lstrip('/')
-        except Exception:
-            sr_name = str(subreddit)
-        efid = _resolve_flair_id_for_subreddit(sr_name, flair_id, _FLAIR_NAME_BY_ID.get(flair_id) if flair_id else None) if flair_id else None
-        if efid:
-            submission = subreddit.submit(
-                title=title + " [Video yüklenemedi - Twitter'dan izleyebilirsiniz]", 
-                selftext="",
-                flair_id=efid
-            )
-        else:
-            submission = subreddit.submit(
-                title=title + " [Video yüklenemedi - Twitter'dan izleyebilirsiniz]", 
-                selftext=""
-            )
-        print(f"[+] Text post gönderildi: {submission.url}")
-        return True
-    except Exception as text_e:
-        print(f"[HATA] Text post bile gönderilemedi: {text_e}")
-        return False
+    # 2. Son çare text post kaldırıldı: medya başarısız olursa burada dur
+    print("[!] Alternatifler de başarısız oldu, text post fallback devre dışı. İşlem sonlandırılıyor.")
+    return False
 
 def smart_split_title(text: str, max_len: int = 300):
     """Metni başlık ve kalan olarak akıllıca ayırır.
@@ -2499,15 +2475,8 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
             max_video_size = 512 * 1024 * 1024  # 512MB
             if file_size > max_video_size:
                 print(f"[HATA] Video çok büyük ({file_size} bytes). Limit: {max_video_size} bytes")
-                # Büyük video için text post gönder
-                if effective_flair_id:
-                    submission = subreddit.submit(title=title + " [Video çok büyük - Twitter linkini kontrol edin]", selftext=(remainder_text or ""), flair_id=effective_flair_id)
-                else:
-                    submission = subreddit.submit(title=title + " [Video çok büyük - Twitter linkini kontrol edin]", selftext=(remainder_text or ""))
-                print(f"[+] Text post gönderildi: {submission.url}")
-                # Şaka notunu ekle
-                _maybe_post_joke_comment(submission, title, SUBREDDIT, original_tweet_text)
-                return True
+                # Text post fallback kaldırıldı
+                return False
             
             # Video upload denemesi
             result = upload_video_via_reddit_api(title, media_path, SUBREDDIT, selected_flair_id)
@@ -2560,15 +2529,8 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
                     _maybe_post_joke_comment(None, title, SUBREDDIT, original_tweet_text)
                     return True
                 else:
-                    # Son çare text post
-                    print("[!] Tüm yöntemler başarısız, text post gönderiliyor...")
-                    if effective_flair_id:
-                        submission = subreddit.submit(title=title + " [Video yüklenemedi - Twitter linkini kontrol edin]", selftext=(remainder_text or ""), flair_id=effective_flair_id)
-                    else:
-                        submission = subreddit.submit(title=title + " [Video yüklenemedi - Twitter linkini kontrol edin]", selftext=(remainder_text or ""))
-                    print(f"[+] Alternatif text post gönderildi: {submission.url}")
-                    _maybe_post_joke_comment(submission, title, SUBREDDIT, original_tweet_text)
-                    return True
+                    # Son çare text post kaldırıldı
+                    return False
                 
         else:
             print(f"[!] Desteklenmeyen dosya türü: {ext}")
@@ -2583,19 +2545,29 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
     except Exception as e:
         print(f"[HATA] Post gönderimi başarısız: {e}")
         
-        # Hata durumunda bile text post göndermeyi dene
+        # Özel durum: Reddit PRAW 'Websocket error. Check your media file. Your post may still have been created.'
+        # Bu hata geldiğinde ve medya varsa ASLA text post gönderme.
         try:
-            print("[!] Hata sonrası text post deneniyor...")
-            if effective_flair_id:
-                submission = subreddit.submit(title=title + " [Medya yüklenemedi]", selftext=(remainder_text or ""), flair_id=effective_flair_id)
-            else:
-                submission = subreddit.submit(title=title + " [Medya yüklenemedi]", selftext=(remainder_text or ""))
-            print(f"[+] Hata sonrası text post gönderildi: {submission.url}")
-            _maybe_post_joke_comment(submission, title, SUBREDDIT, original_tweet_text)
-            return True
-        except Exception as text_e:
-            print(f"[HATA] Text post bile gönderilemedi: {text_e}")
+            err_msg = str(e).lower()
+        except Exception:
+            err_msg = ""
+
+        if (media_files and len(media_files) > 0) and ("websocket error" in err_msg and "check your media file" in err_msg):
+            print("[!] Websocket error sonrası text post atlanıyor (medya var). Reddit'te gönderi oluşmuş olabilir, kontrol ediliyor...")
+            # Son 10 gönderide başlığa bakarak oluşmuş mu kontrol et
+            try:
+                for s in subreddit.new(limit=10):
+                    author_name = getattr(s.author, 'name', '') or ''
+                    if author_name.lower() == (REDDIT_USERNAME or '').lower() and s.title == title:
+                        print(f"[+] Gönderi aslında oluşturulmuş: {s.url}")
+                        return True
+            except Exception as chk_e:
+                print(f"[UYARI] Hata sonrası doğrulama yapılamadı: {chk_e}")
+            # Emin olamıyorsak başarısız say ve tekrar denemeye bırak
             return False
+
+        # Diğer hatalarda text post fallback devre dışı
+        return False
     finally:
         # Geçici dosyaları temizle
         try:
