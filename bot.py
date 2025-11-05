@@ -243,6 +243,11 @@ MIN_REQUEST_INTERVAL = 30  # Minimum seconds between any requests
 LAST_REQUEST_TIME = 0  # Son istek zamanı
 TWSCRAPE_DETAIL_TIMEOUT = 8  # seconds to wait for tweet_details before skipping
 REDDIT_MAX_VIDEO_SECONDS = int(os.getenv("REDDIT_MAX_VIDEO_SECONDS", "900"))
+ 
+# Optional: process specific tweet id(s) via environment
+PROCESS_TWEET_ID = (os.getenv("PROCESS_TWEET_ID", "") or "").strip()
+PROCESS_TWEET_IDS = (os.getenv("PROCESS_TWEET_IDS", "") or "").strip()
+PROCESSED_ENV_IDS = set()
 
 # Scheduled weekly player-finder post config (stateless, configurable via env)
 def _parse_days_env(val: str) -> set[int]:
@@ -3156,11 +3161,42 @@ def main_loop():
     except Exception:
         max_seen_id = 0
     
-    print("[+] Reddit Bot başlatılıyor...")
+    print(f"[+] Reddit Bot başlatılıyor...")
     print(f"[+] Subreddit: r/{SUBREDDIT}")
     print(f"[+] Twitter: @{TWITTER_SCREENNAME} (ID: {TWITTER_USER_ID})")
     print("[+] Retweet'ler otomatik olarak atlanacak")
     print(f"[+] Şu ana kadar {len(posted_tweet_ids)} tweet işlenmiş")
+    
+    # .env ile verilen özel tweet ID'lerini (bir kereye mahsus) işle
+    try:
+        env_ids: list[str] = []
+        if PROCESS_TWEET_ID:
+            env_ids.append(PROCESS_TWEET_ID)
+        if PROCESS_TWEET_IDS:
+            env_ids.extend([s.strip() for s in PROCESS_TWEET_IDS.split(',') if s.strip()])
+        # Dedupe while preserving order
+        seen = set()
+        env_ids = [x for x in env_ids if not (x in seen or seen.add(x))]
+        for eid in env_ids:
+            if eid in PROCESSED_ENV_IDS:
+                continue
+            if eid in posted_tweet_ids:
+                print(f"[ENV] Tweet ID zaten işlenmiş görünüyor, atlanıyor: {eid}")
+                PROCESSED_ENV_IDS.add(eid)
+                continue
+            print(f"[ENV] Özel tweet ID işleniyor: {eid}")
+            res = process_specific_tweet(eid)
+            ok = isinstance(res, dict) and res.get("processed") is True
+            reason = None if ok else (res.get("reason") if isinstance(res, dict) else "unknown")
+            if ok:
+                posted_tweet_ids.add(eid)
+                save_posted_tweet_id(eid)
+                print(f"[ENV] Başarılı: {eid}")
+            else:
+                print(f"[ENV] İşlenemedi: {eid} | sebep: {reason}")
+            PROCESSED_ENV_IDS.add(eid)
+    except Exception as _env_proc_err:
+        print(f"[UYARI] .env tweet ID işleme hatası: {_env_proc_err}")
     
     while True:
         try:
