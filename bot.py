@@ -3127,6 +3127,14 @@ def get_latest_tweets_with_retweet_check(count: int = 8):
                 except Exception as e:
                     return []
                 finally:
+                    # 🧹 Async generator düzgün kapat
+                    try:
+                        if 'tweets_generator' in locals() and tweets_generator is not None:
+                            aclose = getattr(tweets_generator, 'aclose', None)
+                            if callable(aclose):
+                                await aclose()
+                    except Exception:
+                        pass
                     # 🧹 Temizlik - kullanılmayan objeleri serbest bırak
                     del api, user, tweets_generator
 
