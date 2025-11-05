@@ -768,6 +768,155 @@ def get_media_urls_from_tweet_data(tweet_data):
 
 # 🧹 Nitter instance yönetim fonksiyonları kaldırıldı - sadece TWSCRAPE kullanılacak
 
+def process_specific_tweet(tweet_id: str) -> dict:
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            async def _run():
+                api = await init_twscrape_api()
+                try:
+                    detail = await asyncio.wait_for(api.tweet_details(int(tweet_id)), timeout=TWSCRAPE_DETAIL_TIMEOUT)
+                except Exception:
+                    detail = None
+                if not detail:
+                    return {"processed": False, "reason": "detail_not_found"}
+                if getattr(detail, 'inReplyToTweetId', None):
+                    return {"processed": False, "reason": "is_reply"}
+                if getattr(detail, 'retweetedTweet', None):
+                    return {"processed": False, "reason": "is_retweet"}
+                if getattr(detail, 'quotedTweet', None) or getattr(detail, 'isQuoted', False) or getattr(detail, 'isQuote', False):
+                    return {"processed": False, "reason": "is_quote"}
+
+                media_urls = []
+                md = getattr(detail, 'media', None)
+                if md:
+                    photos = getattr(md, 'photos', []) or []
+                    for p in photos:
+                        u = getattr(p, 'url', None)
+                        if u:
+                            media_urls.append(u)
+                    videos = getattr(md, 'videos', []) or []
+                    for v in videos:
+                        vars = getattr(v, 'variants', []) or []
+                        if vars:
+                            best = max(vars, key=lambda x: getattr(x, 'bitrate', 0))
+                            u = getattr(best, 'url', None)
+                            if u:
+                                media_urls.append(u)
+                    animated = getattr(md, 'animated', []) or []
+                    for a in animated:
+                        u = getattr(a, 'videoUrl', None)
+                        if u:
+                            media_urls.append(u)
+
+                tweet_data = {
+                    'id': str(getattr(detail, 'id', getattr(detail, 'id_str', ''))),
+                    'text': getattr(detail, 'rawContent', ''),
+                    'created_at': getattr(detail, 'date', None),
+                    'media_urls': media_urls,
+                    'url': getattr(detail, 'url', None),
+                }
+
+                text = tweet_data.get("text", "")
+                cleaned_text = clean_tweet_text(text)
+                try:
+                    cd_days = _extract_countdown_days(text) or _extract_countdown_days(cleaned_text)
+                except Exception:
+                    cd_days = None
+                if cd_days is not None and cd_days > 10:
+                    return {"processed": False, "reason": "countdown_gt_10"}
+
+                media_urls2 = get_media_urls_from_tweet_data(tweet_data)
+                media_files = []
+                image_urls = []
+                video_urls = []
+                for mu in media_urls2:
+                    ul = str(mu).lower()
+                    is_image = (
+                        any(ext in ul for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']) or
+                        'format=jpg' in ul or 'format=jpeg' in ul or 'format=png' in ul or 'format=webp' in ul or
+                        'pbs.twimg.com/media' in ul
+                    )
+                    is_video = ('.mp4' in ul or 'format=mp4' in ul or 'video.twimg.com' in ul)
+                    if is_image:
+                        image_urls.append(mu)
+                    elif is_video:
+                        video_urls.append(mu)
+
+                translated = translate_text(cleaned_text, has_video=bool(video_urls))
+                if not translated:
+                    return {"processed": False, "reason": "translation_failed"}
+
+                if len(image_urls) > 1:
+                    downloaded_images = download_multiple_images(image_urls, tweet_id)
+                    media_files.extend(downloaded_images)
+                elif len(image_urls) == 1:
+                    media_url = image_urls[0]
+                    ext = os.path.splitext(media_url)[1].split("?")[0] or ".jpg"
+                    filename = f"temp_image_{tweet_id}_0{ext}"
+                    path = download_media(media_url, filename)
+                    if path:
+                        media_files.append(path)
+
+                if video_urls:
+                    filename = f"temp_video_{tweet_id}_0.mp4"
+                    path = download_best_video_for_tweet(tweet_id, filename)
+                    if path:
+                        dur = get_video_duration_seconds(path)
+                        if dur is not None and dur > REDDIT_MAX_VIDEO_SECONDS:
+                            try:
+                                if os.path.exists(path):
+                                    os.remove(path)
+                            except Exception:
+                                pass
+                            for fpath in media_files:
+                                try:
+                                    if os.path.exists(fpath):
+                                        os.remove(fpath)
+                                except Exception:
+                                    pass
+                            return {"processed": False, "reason": "video_too_long"}
+                        converted = f"converted_{filename}"
+                        converted_path = convert_video_to_reddit_format(path, converted)
+                        if converted_path:
+                            media_files.append(converted_path)
+                        if os.path.exists(path):
+                            os.remove(path)
+
+                original_text = tweet_data.get("text", "")
+                has_media_in_original = any(ind in original_text for ind in ['pic.twitter.com', 'video.twitter.com', 'pbs.twimg.com'])
+                if has_media_in_original and len(media_files) == 0:
+                    for fpath in media_files:
+                        try:
+                            if os.path.exists(fpath):
+                                os.remove(fpath)
+                        except Exception:
+                            pass
+                    return {"processed": False, "reason": "media_expected_but_missing"}
+
+                candidates = [
+                    (translated or "").strip(),
+                    (cleaned_text or "").strip(),
+                    (text or "").strip(),
+                ]
+                chosen_text = next((c for c in candidates if c), "")
+                if not chosen_text:
+                    chosen_text = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
+                title_to_use, remainder_to_post = smart_split_title(chosen_text, 300)
+                ok = submit_post(title_to_use, media_files, text, remainder_text=remainder_to_post)
+                if ok:
+                    return {"processed": True, "tweet_id": str(tweet_id), "title": title_to_use}
+                return {"processed": False, "reason": "submit_failed"}
+
+            result = loop.run_until_complete(_run())
+            return result
+        finally:
+            loop.close()
+    except Exception as e:
+        return {"processed": False, "reason": f"exception:{e}"}
+
+
 # -------------------- Web Service (FastAPI) --------------------
 # 🧹 Lazy import - FastAPI sadece ihtiyaç duyulduğunda import edilecek
 
@@ -822,6 +971,15 @@ def _init_fastapi():
             if request.method == "HEAD":
                 return PlainTextResponse("", status_code=200)
             return {"status": "alive"}
+
+        @app.api_route("/process/{tweet_id}", methods=["GET", "POST"])
+        async def process_tweet_endpoint(tweet_id: str):
+            try:
+                # Senkron yardımcı fonksiyonu çağır
+                res = process_specific_tweet(tweet_id)
+                return res
+            except Exception as e:
+                return {"processed": False, "reason": f"exception:{e}"}
 
         @app.on_event("startup")
         def start_background_worker():
@@ -2905,6 +3063,9 @@ def get_latest_tweets_with_retweet_check(count: int = 8):
                         if getattr(tw, 'inReplyToTweetId', None):
                             continue
                         if getattr(tw, 'retweetedTweet', None):
+                            continue
+                        # Alıntı (quote) tweet'leri atla
+                        if getattr(tw, 'quotedTweet', None) or getattr(tw, 'isQuoted', False) or getattr(tw, 'isQuote', False):
                             continue
 
                         # Medya URL'lerini çıkar
