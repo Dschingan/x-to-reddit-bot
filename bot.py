@@ -243,6 +243,7 @@ MIN_REQUEST_INTERVAL = 30  # Minimum seconds between any requests
 LAST_REQUEST_TIME = 0  # Son istek zamanı
 TWSCRAPE_DETAIL_TIMEOUT = 8  # seconds to wait for tweet_details before skipping
 REDDIT_MAX_VIDEO_SECONDS = int(os.getenv("REDDIT_MAX_VIDEO_SECONDS", "900"))
+ENABLE_SECONDARY_RETWEETS = os.getenv("ENABLE_SECONDARY_RETWEETS", "false").strip().lower() == "true"
  
 # Optional: process specific tweet id(s) via environment
 PROCESS_TWEET_ID = (os.getenv("PROCESS_TWEET_ID", "") or "").strip()
@@ -772,6 +773,33 @@ def get_media_urls_from_tweet_data(tweet_data):
 # 🧹 Nitter HTML fonksiyonları kaldırıldı - sadece TWSCRAPE kullanılacak
 
 # 🧹 Nitter instance yönetim fonksiyonları kaldırıldı - sadece TWSCRAPE kullanılacak
+
+def _is_retweet_or_quote_by_id(tweet_id: str) -> bool:
+    """Detail sorgusu ile RT/Quote olup olmadığını doğrula (senkron sarmalayıcı)."""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            async def _run():
+                api = await init_twscrape_api()
+                try:
+                    d = await asyncio.wait_for(api.tweet_details(int(tweet_id)), timeout=TWSCRAPE_DETAIL_TIMEOUT)
+                except Exception:
+                    return False
+                if not d:
+                    return False
+                if getattr(d, 'inReplyToTweetId', None):
+                    return True
+                if getattr(d, 'retweetedTweet', None):
+                    return True
+                if getattr(d, 'quotedTweet', None) or getattr(d, 'isQuoted', False) or getattr(d, 'isQuote', False):
+                    return True
+                return False
+            return bool(loop.run_until_complete(_run()))
+        finally:
+            loop.close()
+    except Exception:
+        return False
 
 def process_specific_tweet(tweet_id: str) -> dict:
     try:
@@ -3308,6 +3336,23 @@ def main_loop():
                     print(f"[!] Tweet {tweet_index}/{len(tweets)} zaten işlendi: {tweet_id}")
                     continue
                 
+                # Ek güvenlik: detay sorgusu ile RT/Quote ise atla
+                try:
+                    if _is_retweet_or_quote_by_id(tweet_id):
+                        print(f"[SKIP] Retweet/Quote tespit edildi, atlanıyor: {tweet_id}")
+                        # RT/Quote'lar posted olarak işaretlenmesin
+                        # Yüksek su seviyesi (watermark) için güncelleme yapılabilir
+                        try:
+                            if HIGH_WATERMARK_ENABLED and str(tweet_id).isdigit():
+                                ti = int(tweet_id)
+                                if ti > max_seen_id:
+                                    max_seen_id = ti
+                        except Exception:
+                            pass
+                        continue
+                except Exception:
+                    pass
+
                 print(f"[+] Tweet {tweet_index}/{len(tweets)} işleniyor: {tweet_id}")
                 posted_tweet_ids.add(tweet_id)
                 save_posted_tweet_id(tweet_id)
@@ -3469,7 +3514,7 @@ def main_loop():
                     time.sleep(300)
             # EK: TheBFWire akışındaki @bf6_tr retweet'lerini (8/8 tamamlandıysa) aynı mantıkla işle
             try:
-                if isinstance(tweets, list) and len(tweets) >= 8:
+                if ENABLE_SECONDARY_RETWEETS and isinstance(tweets, list) and len(tweets) >= 8:
                     print("\n" + "-"*50)
                     print("[+] Ek görev: @bf6_tr retweet'leri işleniyor (aynı pipeline)...")
                     rt_list = get_latest_bf6_retweets(3)
