@@ -1040,9 +1040,18 @@ def process_external_due_items(posted_tweet_ids=None):
     manifest = None
     if MANIFEST_URL:
         try:
-            r = requests.get(MANIFEST_URL, timeout=15)
+            _hdr = {"Accept": "application/json", "User-Agent": get_random_user_agent()}
+            r = requests.get(MANIFEST_URL, headers=_hdr, timeout=15)
             if r.status_code == 200:
-                manifest = r.json()
+                try:
+                    manifest = r.json()
+                except Exception as je:
+                    try:
+                        snippet = (r.text or "")[:400].replace("\n", " ")
+                    except Exception:
+                        snippet = "<no text>"
+                    print(f"[UYARI] Manifest JSON parse hatası: {je} | MANIFEST_URL='{MANIFEST_URL}' | ilk_400='{snippet}'")
+                    return
             else:
                 print(f"[UYARI] Manifest URL hata kodu: {r.status_code} | MANIFEST_URL='{MANIFEST_URL}'")
                 return
