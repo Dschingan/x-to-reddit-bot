@@ -1138,10 +1138,24 @@ def process_external_due_items(posted_tweet_ids=None):
             continue
         if title and title in seen_titles:
             continue
+        # Prioritize video: if any video exists, submit only the first video; otherwise submit images
+        videos = [m for m in media if (m.get('type', '').lower() == 'video' and m.get('url'))]
+        images = [m for m in media if (m.get('type', '').lower() == 'image' and m.get('url'))]
+        chosen_media = []
+        if videos:
+            chosen_media = [videos[0]]
+            print(f"[MANIFEST] Video önceliklendirildi (1 video seçildi)")
+        elif images:
+            chosen_media = images
+            print(f"[MANIFEST] Resim galerisi seçildi ({len(images)} resim)")
+        else:
+            print("[MANIFEST] Geçerli medya bulunamadı (ne video ne resim)")
+            continue
+
         media_files: list[str] = []
         try:
             # Download media
-            for idx, m in enumerate(media):
+            for idx, m in enumerate(chosen_media):
                 try:
                     mtype = (m.get('type') or '').lower()
                     url = m.get('url')
@@ -1154,6 +1168,12 @@ def process_external_due_items(posted_tweet_ids=None):
                         media_files.append(p)
                 except Exception:
                     continue
+
+            if media_files:
+                print(f"[MANIFEST] İndirilen medya dosyaları: {', '.join(os.path.basename(x) for x in media_files)}")
+            else:
+                print("[MANIFEST] Medya indirilemedi, item atlandı")
+                continue
 
             # Submit
             if not title:
