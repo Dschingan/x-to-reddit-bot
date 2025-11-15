@@ -1089,11 +1089,15 @@ def process_external_due_items(posted_tweet_ids=None):
         try:
             for it in items:
                 iid = str(it.get('id', '')).strip()
-                if not iid or iid in posted_ids:
+                if not iid:
                     continue
                 media = it.get('media') or []
                 if isinstance(media, list) and len(media) > 0:
                     due.append(it)
+                    try:
+                        print(f"[TEST] MANIFEST_TEST_FIRST_ITEM aktif: ilk medya içeren öğe seçildi -> id={iid}")
+                    except Exception:
+                        pass
                     break
         except Exception:
             pass
