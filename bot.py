@@ -124,6 +124,11 @@ from base64 import b64decode
 import redditwarp.SYNC
 from redditwarp.SYNC import Client as RedditWarpClient
 
+# Local-only mode: skip FastAPI/uvicorn when true
+LOCAL_ONLY = os.getenv("LOCAL_ONLY", "false").strip().lower() == "true"
+USE_EXTERNAL_QUEUE = os.getenv("USE_EXTERNAL_QUEUE", "false").strip().lower() == "true"
+QUEUE_URL = (os.getenv("QUEUE_URL", "") or "").strip()
+
 # --- Localization helpers (Unicode + casing) ---
 def _nfc(s: str) -> str:
     """Return NFC-normalized text to keep Turkish diacritics stable."""
@@ -131,6 +136,17 @@ def _nfc(s: str) -> str:
         return unicodedata.normalize('NFC', s) if isinstance(s, str) else s
     except Exception:
         return s
+
+def _parse_iso8601(ts: str):
+    try:
+        # Accept both "Z" and offsetless
+        from datetime import datetime, timezone
+        t = ts.strip()
+        if t.endswith("Z"):
+            t = t[:-1] + "+00:00"
+        return datetime.fromisoformat(t).astimezone(timezone.utc)
+    except Exception:
+        return None
 
 # --- Reddit text sanitizer ---
 def _sanitize_for_reddit(s: str) -> str:
@@ -263,7 +279,7 @@ EXCLUDED_TWEET_IDS = {
 }
 
 # Nitter konfigürasyonu kaldırıldı - sadece TWSCRAPE kullanılacak
-TWITTER_SCREENNAME = "TheBFWire"
+TWITTER_SCREENNAME = os.getenv("TWITTER_SCREENNAME", "TheBFWire").strip()
 # Twitter User ID (tercih edilen yöntem - daha güvenilir)
 TWITTER_USER_ID = os.getenv("TWITTER_USER_ID", "1939708158051500032").strip()
 MIN_REQUEST_INTERVAL = 30  # Minimum seconds between any requests
@@ -427,8 +443,13 @@ def clean_text(text):
 def clean_tweet_text(text):
     if not text:
         return ""
-    # RT @TheBFWire: ifadesini kaldır
-    text = re.sub(r'^RT @TheBFWire:\s*', '', text)
+    # RT @<screenname>: ifadesini kaldır (env'den alınan TWITTER_SCREENNAME)
+    try:
+        if TWITTER_SCREENNAME:
+            pattern = rf'^RT @{re.escape(TWITTER_SCREENNAME)}:\s*'
+            text = re.sub(pattern, '', text)
+    except Exception:
+        pass
     text = re.sub(r'https?://\S+', '', text)
     text = re.sub(r'www\.\S+', '', text)
     text = re.sub(r't\.co/\S+', '', text)
@@ -1021,6 +1042,9 @@ def _init_fastapi():
     """🧹 FastAPI lazy initialization"""
     global app, _worker_lock
     if app is None:
+        if LOCAL_ONLY:
+            # Lokal modda web servis kurma
+            return None
         # 🧹 Lazy import
         try:
             from fastapi import FastAPI, Request
@@ -1097,8 +1121,7 @@ def _init_fastapi():
     return app
 
 # Expose ASGI app for 'uvicorn bot:app' imports (Render)
-# This keeps local execution via `python bot.py` working as well.
-app = _init_fastapi()
+app = None if LOCAL_ONLY else _init_fastapi()
 
 # 🧹 Route tanımları _init_fastapi() fonksiyonuna taşındı
 
@@ -1372,65 +1395,66 @@ def select_flair_with_ai(title, original_tweet_text="", has_video: bool = False)
         ai_api_key = os.getenv("OPENAI_API_KEY")
         if not ai_api_key:
             print("[!] OPENAI_API_KEY bulunamadı, Gemini ile deneniyor")
-            try:
-                # Gemini istemcisi ve model
-                gclient = genai.Client()
-                g_model_primary = os.getenv("GEMINI_MODEL_PRIMARY", "gemini-2.5-flash-lite").strip()
-                g_model_fallback = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash").strip()
+            # Gemini istemcisi ve model
+            gclient = genai.Client()
+            g_model_primary = os.getenv("GEMINI_MODEL_PRIMARY", "gemini-2.5-flash-lite").strip()
+            g_model_fallback = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash").strip()
 
-                g_prompt = (
-                    "Aşağıdaki içeriği analiz et ve en uygun Reddit flair'ini seç. Sadece aşağıdaki seçeneklerden BİRİNİ aynen döndür (başka hiçbir şey yazma):\n"
-                    "Haberler | Klip | Tartışma | Soru | İnceleme | Kampanya | Arkaplan | Sızıntı\n\n"
-                    "Kural: Eğer video VAR ve metin haber/duyuru gibi değilse 'Klip' seçeneğine öncelik ver. Haber duyurusu ise 'Haberler' uygundur.\n\n"
-                    f"Başlık: {title}\n"
-                    f"Video: {'Evet' if has_video else 'Hayır'}\n"
-                    + (f"Orijinal Tweet: {original_tweet_text}\n" if original_tweet_text else "") +
-                    "Yalnızca seçimi döndür."
+            g_prompt = (
+                "Aşağıdaki içeriği analiz et ve en uygun Reddit flair'ini seç. Sadece aşağıdaki seçeneklerden BİRİNİ aynen döndür (başka hiçbir şey yazma):\n"
+                "Haberler | Klip | Tartışma | Soru | İnceleme | Kampanya | Arkaplan | Sızıntı\n\n"
+                "Kural: Eğer video VAR ve metin haber/duyuru gibi değilse 'Klip' seçeneğine öncelik ver. Haber duyurusu ise 'Haberler' uygundur.\n\n"
+                f"Başlık: {title}\n"
+                f"Video: {'Evet' if has_video else 'Hayır'}\n"
+                + (f"Orijinal Tweet: {original_tweet_text}\n" if original_tweet_text else "") +
+                "Yalnızca seçimi döndür."
+            )
+
+            def _ask_gemini(model_name: str) -> str:
+                resp = gclient.models.generate_content(
+                    model=model_name,
+                    contents=g_prompt,
+                    config=types.GenerateContentConfig(
+                        thinking_config=types.ThinkingConfig(thinking_budget=0)
+                    ),
                 )
+                return (getattr(resp, 'text', '') or '').strip()
 
-                def _ask_gemini(model_name: str) -> str:
-                    resp = gclient.models.generate_content(
-                        model=model_name,
-                        contents=g_prompt,
-                        config=types.GenerateContentConfig(
-                            thinking_config=types.ThinkingConfig(thinking_budget=0)
-                        ),
-                    )
-                    return (getattr(resp, 'text', '') or '').strip()
-
-                ai_suggestion = ""
+            ai_suggestion = ""
+            try:
                 try:
                     ai_suggestion = _ask_gemini(g_model_primary)
                 except Exception as ge1:
-                    print(f"[UYARI] Gemini flair (primary) hata: {ge1}")
-                if not ai_suggestion and g_model_fallback and g_model_fallback != g_model_primary:
                     try:
                         ai_suggestion = _ask_gemini(g_model_fallback)
                     except Exception as ge2:
+                        ai_suggestion = ""
+                        print(f"[UYARI] Gemini flair (primary) hata: {ge1}")
                         print(f"[UYARI] Gemini flair (fallback) hata: {ge2}")
-
-                if ai_suggestion:
-                    ai_clean = ai_suggestion.strip().strip('#').strip('"').strip()
-                    # Tam eşleşme veya içerme ile eşleştir
-                    for flair_name, flair_id in FLAIR_OPTIONS.items():
-                        if ai_clean.lower() == flair_name.lower() or flair_name.lower() in ai_clean.lower() or ai_clean.lower() in flair_name.lower():
-                            print(f"[+] Gemini seçilen flair: {flair_name} (ID: {flair_id})")
-                            return flair_id
-                    print(f"[!] Gemini önerisi eşleşmedi ({ai_clean}), kural tabanlı seçim kullanılıyor: {selected_flair}")
-                    return selected_flair_id
-                else:
-                    print("[!] Gemini sonuç üretmedi, kural tabanlı seçim kullanılıyor")
-                    return selected_flair_id
-            except Exception as ge:
-                print(f"[UYARI] Gemini fallback genel hata: {ge}")
+            except Exception as e:
+                print(f"[UYARI] Gemini hata: {e}")
                 return selected_flair_id
-        
-        # OpenAI API için prompt hazırla
-        content_to_analyze = f"Başlık: {title}\nVideo: {'Evet' if has_video else 'Hayır'}"
-        if original_tweet_text:
-            content_to_analyze += f"\nOrijinal Tweet: {original_tweet_text}"
-        
-        prompt = f"""Aşağıdaki Battlefield 6 ile ilgili içeriği analiz et ve en uygun flair'i seç.
+
+            if ai_suggestion:
+                ai_clean = ai_suggestion.replace(".", "").replace(":", "").strip()
+                # Tam eşleşme veya içerme ile eşleştir
+                for flair_name, flair_id in FLAIR_OPTIONS.items():
+                    if ai_clean.lower() == flair_name.lower() or flair_name.lower() in ai_clean.lower() or ai_clean.lower() in flair_name.lower():
+                        print(f"[+] Gemini seçilen flair: {flair_name} (ID: {flair_id})")
+                        return flair_id
+                print(f"[!] Gemini önerisi eşleşmedi ({ai_clean}), kural tabanlı seçim kullanılıyor: {selected_flair}")
+                return selected_flair_id
+            else:
+                print("[!] Gemini sonuç üretmedi, kural tabanlı seçim kullanılıyor")
+                return selected_flair_id
+            
+        if ai_api_key:
+            # OpenAI API için prompt hazırla
+            content_to_analyze = f"Başlık: {title}\nVideo: {'Evet' if has_video else 'Hayır'}"
+            if original_tweet_text:
+                content_to_analyze += f"\nOrijinal Tweet: {original_tweet_text}"
+            
+            prompt = f"""Aşağıdaki Battlefield 6 ile ilgili içeriği analiz et ve en uygun flair'i seç.
 
 Kurallar:
 - Eğer video VAR ve metin haber/duyuru gibi değilse 'Klip' seçeneğine öncelik ver.
@@ -1441,59 +1465,59 @@ Kurallar:
 
 Sadece şu seçeneklerden birini döndür: Haberler, Klip, Tartışma, Soru, İnceleme, Kampanya, Arkaplan, Sızıntı
 Sadece flair adını yaz (örnek: Haberler). Başka bir şey yazma."""
-        
-        # OpenAI API çağrısı
-        url = "https://api.openai.com/v1/chat/completions"
-        payload = {
-            "model": "gpt-4o-mini",  # Daha ekonomik model
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "max_tokens": 50,
-            "temperature": 0.1
-        }
-        headers = {
-            "Authorization": f"Bearer {ai_api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        print("[+] OpenAI API çağrısı yapılıyor...")
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
-        
-        print(f"[DEBUG] API Response Status: {response.status_code}")
-        
-        if response.status_code != 200:
-            print(f"[!] OpenAI API hatası (Status: {response.status_code}): {response.text}")
-            print(f"[+] Kural tabanlı seçim kullanılıyor: {selected_flair}")
-            return selected_flair_id
-        
-        result = response.json()
-        print(f"[DEBUG] OpenAI Response: {result}")
-        
-        # AI yanıtını al
-        if "choices" in result and len(result["choices"]) > 0:
-            ai_suggestion = result["choices"][0]["message"]["content"].strip()
-            print(f"[+] AI flair önerisi: {ai_suggestion}")
             
-            # Flair adını temizle ve kontrol et
-            ai_suggestion_clean = ai_suggestion.replace(".", "").replace(":", "").strip()
+            # OpenAI API çağrısı
+            url = "https://api.openai.com/v1/chat/completions"
+            payload = {
+                "model": "gpt-4o-mini",  # Daha ekonomik model
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "max_tokens": 50,
+                "temperature": 0.1
+            }
+            headers = {
+                "Authorization": f"Bearer {ai_api_key}",
+                "Content-Type": "application/json"
+            }
             
-            # Flair seçeneklerinde ara
-            for flair_name, flair_id in FLAIR_OPTIONS.items():
-                if flair_name.lower() in ai_suggestion_clean.lower() or ai_suggestion_clean.lower() in flair_name.lower():
-                    print(f"[+] AI seçilen flair: {flair_name} (ID: {flair_id})")
-                    return flair_id
+            print("[+] OpenAI API çağrısı yapılıyor...")
+            response = requests.post(url, json=payload, headers=headers, timeout=15)
             
-            # Tam eşleşme bulunamazsa, kural tabanlı seçimi kullan
-            print(f"[!] AI önerisi eşleşmedi ({ai_suggestion_clean}), kural tabanlı seçim kullanılıyor: {selected_flair}")
-            return selected_flair_id
-        else:
-            print("[!] AI yanıtı alınamadı, kural tabanlı seçim kullanılıyor")
-            return selected_flair_id
+            print(f"[DEBUG] API Response Status: {response.status_code}")
             
+            if response.status_code != 200:
+                print(f"[!] OpenAI API hatası (Status: {response.status_code}): {response.text}")
+                print(f"[+] Kural tabanlı seçim kullanılıyor: {selected_flair}")
+                return selected_flair_id
+            
+            result = response.json()
+            print(f"[DEBUG] OpenAI Response: {result}")
+            
+            # AI yanıtını al
+            if "choices" in result and len(result["choices"]) > 0:
+                ai_suggestion = result["choices"][0]["message"]["content"].strip()
+                print(f"[+] AI flair önerisi: {ai_suggestion}")
+                
+                # Flair adını temizle ve kontrol et
+                ai_suggestion_clean = ai_suggestion.replace(".", "").replace(":", "").strip()
+                
+                # Flair seçeneklerinde ara
+                for flair_name, flair_id in FLAIR_OPTIONS.items():
+                    if flair_name.lower() in ai_suggestion_clean.lower() or ai_suggestion_clean.lower() in flair_name.lower():
+                        print(f"[+] AI seçilen flair: {flair_name} (ID: {flair_id})")
+                        return flair_id
+                
+                # Tam eşleşme bulunamazsa, kural tabanlı seçimi kullan
+                print(f"[!] AI önerisi eşleşmedi ({ai_suggestion_clean}), kural tabanlı seçim kullanılıyor: {selected_flair}")
+                return selected_flair_id
+            else:
+                print("[!] AI yanıtı alınamadı, kural tabanlı seçim kullanılıyor")
+                return selected_flair_id
+                
     except requests.exceptions.Timeout:
         print("[!] AI API timeout, kural tabanlı seçim kullanılıyor")
         return selected_flair_id
@@ -3223,6 +3247,16 @@ def main_loop():
             print(f"[+] Tweet kontrol ediliyor... ({time.strftime('%Y-%m-%d %H:%M:%S')})")
             # Önce planlı haftalık gönderiyi kontrol et/oluştur
             _create_and_pin_weekly_post_if_due()
+
+            # External queue modu: manifest'ten zaman gelenleri post et ve döngüye devam et
+            if USE_EXTERNAL_QUEUE:
+                print("[MODE] USE_EXTERNAL_QUEUE=true -> Manifest işleniyor (twscrape atlanır)")
+                process_external_due_items(posted_tweet_ids)
+                # Döngü beklemesi
+                print(f"\n[+] Sonraki kontrol: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() + 300))}")
+                print("⏳ 5 dakika bekleniyor...")
+                time.sleep(300)
+                continue
             
             # Son 8 tweet'i al ve retweet kontrolü yap (daha fazla tweet kontrol et)
             tweets_data = get_latest_tweets_with_retweet_check(8)
@@ -3698,16 +3732,21 @@ def main_loop():
         time.sleep(300)
 
 if __name__ == "__main__":
-    # 🧹 Lazy import ve initialization
-    try:
-        import uvicorn
-    except ImportError:
-        print("[HATA] uvicorn mevcut değil")
-        sys.exit(1)
-    
-    # FastAPI app'i initialize et
-    app = _init_fastapi()
-    
-    # Lokal geliştirme/test için HTTP sunucusunu ayağa kaldır
-    port = int(os.getenv("PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
+    if os.getenv("LOCAL_ONLY"):
+        # Sadece iş döngüsünü çalıştır
+        try:
+            main_loop()
+        except KeyboardInterrupt:
+            pass
+    else:
+        # 🧹 Lazy import ve initialization
+        try:
+            import uvicorn
+        except ImportError:
+            print("[HATA] uvicorn mevcut değil")
+            sys.exit(1)
+        # FastAPI app'i initialize et
+        app = _init_fastapi()
+        # Lokal geliştirme/test için HTTP sunucusunu ayağa kaldır
+        port = int(os.getenv("PORT", "8000"))
+        uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
