@@ -1038,6 +1038,7 @@ def process_external_due_items(posted_tweet_ids=None):
         return
 
     manifest = None
+    next_ts_val = None
     if MANIFEST_URL:
         try:
             _hdr = {"Accept": "application/json", "User-Agent": get_random_user_agent()}
@@ -1133,10 +1134,12 @@ def process_external_due_items(posted_tweet_ids=None):
         total = len(items)
         due_count = len(due)
         next_info = None
+        next_ts_val = None
         if upcoming:
             upcoming.sort(key=lambda x: x[0])
             from datetime import datetime, timezone
             next_ts = upcoming[0][0]
+            next_ts_val = next_ts
             next_info = datetime.fromtimestamp(next_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
         print(f"[INFO] Manifest: total_items={total}, due_now={due_count}, next_due_at={next_info}")
     except Exception:
@@ -1221,6 +1224,8 @@ def process_external_due_items(posted_tweet_ids=None):
                         os.remove(fp)
                 except Exception:
                     pass
+
+    return next_ts_val
 
 # --- Scheduled weekly "Oyuncu Arama" post helper (stateless) ---
 def _create_and_pin_weekly_post_if_due() -> None:
@@ -3721,11 +3726,23 @@ def main_loop():
             # External queue modu: manifest'ten zaman gelenleri post et ve döngüye devam et
             if USE_EXTERNAL_QUEUE:
                 print("[MODE] USE_EXTERNAL_QUEUE=true -> Manifest işleniyor (twscrape atlanır)")
-                process_external_due_items(posted_tweet_ids)
-                # Döngü beklemesi
-                print(f"\n[+] Sonraki kontrol: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() + 300))}")
-                print("⏳ 5 dakika bekleniyor...")
-                time.sleep(300)
+                next_due_ts = process_external_due_items(posted_tweet_ids)
+                # Dinamik bekleme: bir sonraki manifest zamanına kadar
+                now_ts = time.time()
+                if isinstance(next_due_ts, (int, float)) and next_due_ts > now_ts:
+                    sleep_s = max(5, int(next_due_ts - now_ts))
+                    try:
+                        human_next = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_due_ts))
+                    except Exception:
+                        human_next = str(next_due_ts)
+                    print(f"\n[+] Sonraki kontrol (manifest): {human_next} (≈{sleep_s}s)")
+                    print(f"⏳ {sleep_s} saniye bekleniyor...")
+                    time.sleep(sleep_s)
+                else:
+                    # Yedek bekleme kısa interval
+                    print(f"\n[+] Sonraki kontrol: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now_ts + 120))}")
+                    print("⏳ 120 saniye bekleniyor...")
+                    time.sleep(120)
                 continue
             
             # Son 8 tweet'i al ve retweet kontrolü yap (daha fazla tweet kontrol et)
