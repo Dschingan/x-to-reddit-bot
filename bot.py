@@ -123,6 +123,8 @@ from base64 import b64decode
 # RedditWarp imports
 import redditwarp.SYNC
 from redditwarp.SYNC import Client as RedditWarpClient
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Local-only mode: skip FastAPI/uvicorn when true
 LOCAL_ONLY = os.getenv("LOCAL_ONLY", "false").strip().lower() == "true"
@@ -133,6 +135,9 @@ MANIFEST_PATH = (os.getenv("MANIFEST_PATH", "manifest.json") or "manifest.json")
 MANIFEST_REFRESH_SECONDS = int(os.getenv("MANIFEST_REFRESH_SECONDS", "300") or 300)
 MANIFEST_MAX_POSTS_PER_CYCLE = int(os.getenv("MANIFEST_MAX_POSTS_PER_CYCLE", "1") or 1)
 MANIFEST_TEST_FIRST_ITEM = os.getenv("MANIFEST_TEST_FIRST_ITEM", "false").strip().lower() == "true"
+DOWNLOAD_CONNECT_TIMEOUT = float(os.getenv("DOWNLOAD_CONNECT_TIMEOUT", "5") or 5)
+DOWNLOAD_READ_TIMEOUT = float(os.getenv("DOWNLOAD_READ_TIMEOUT", "60") or 60)
+DOWNLOAD_CHUNK_SLEEP_MS = int(os.getenv("DOWNLOAD_CHUNK_SLEEP_MS", "0") or 0)
 
 # --- Localization helpers (Unicode + casing) ---
 def _nfc(s: str) -> str:
@@ -1914,18 +1919,77 @@ Sadece flair adını yaz (örnek: Haberler). Başka bir şey yazma."""
 
 def download_media(media_url, filename):
     try:
-        with requests.get(media_url, stream=True, timeout=30) as r:
+        headers = {
+            "User-Agent": USER_AGENT or get_random_user_agent(),
+            "Accept": "*/*",
+            "Connection": "keep-alive",
+        }
+        # Session with retries for server errors
+        session = requests.Session()
+        retry_policy = Retry(
+            total=5,
+            connect=3,
+            read=3,
+            backoff_factor=1.0,
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=frozenset(["GET"]),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry_policy)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+
+        # Primary: streamed download
+        for attempt in range(1, 4):
+            try:
+                with session.get(
+                    media_url,
+                    headers=headers,
+                    stream=True,
+                    timeout=(DOWNLOAD_CONNECT_TIMEOUT, DOWNLOAD_READ_TIMEOUT),
+                ) as r:
+                    if r.status_code != 200:
+                        print(f"[HATA] Medya indirilemedi (HTTP {r.status_code}): {media_url}")
+                        raise requests.exceptions.RequestException(f"HTTP {r.status_code}")
+                    with open(filename, "wb") as f:
+                        for chunk in r.iter_content(1024 * 64):
+                            if chunk:
+                                f.write(chunk)
+                                if DOWNLOAD_CHUNK_SLEEP_MS > 0:
+                                    try:
+                                        time.sleep(DOWNLOAD_CHUNK_SLEEP_MS / 1000.0)
+                                    except Exception:
+                                        pass
+                    return filename
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.ChunkedEncodingError,
+                    requests.exceptions.ReadTimeout,
+                    requests.exceptions.ProtocolError) as rexc:
+                print(f"[UYARI] Medya indirme denemesi {attempt}/3 hata: {rexc}")
+            except Exception as e:
+                print(f"[UYARI] Medya indirme beklenmeyen hata {attempt}/3: {e}")
+            # Backoff between attempts
+            try:
+                time.sleep(1.0 * attempt)
+            except Exception:
+                pass
+
+        # Fallback: non-streamed download (for small files or stubborn hosts)
+        try:
+            r = session.get(media_url, headers=headers, timeout=(DOWNLOAD_CONNECT_TIMEOUT, DOWNLOAD_READ_TIMEOUT))
             if r.status_code == 200:
                 with open(filename, "wb") as f:
-                    for chunk in r.iter_content(1024 * 64):
-                        if chunk:
-                            f.write(chunk)
+                    f.write(r.content)
                 return filename
             else:
-                print(f"[HATA] Medya indirilemedi: {media_url} - Status: {r.status_code}")
-                return None
+                print(f"[HATA] Medya indirilemedi (fallback HTTP {r.status_code}): {media_url}")
+        except Exception as fe:
+            print(f"[HATA] Medya indirilemedi (fallback): {fe}")
+
+        print(f"[HATA] Medya indirme başarısız: {media_url}")
+        return None
     except Exception as e:
-        print(f"[HATA] Medya indirirken: {e}")
+        print(f"[HATA] Medya indirirken (genel): {e}")
         return None
 
 def get_image_hash(image_path):
