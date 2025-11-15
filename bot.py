@@ -132,6 +132,7 @@ MANIFEST_URL = (os.getenv("MANIFEST_URL", "") or "").strip()
 MANIFEST_PATH = (os.getenv("MANIFEST_PATH", "manifest.json") or "manifest.json").strip()
 MANIFEST_REFRESH_SECONDS = int(os.getenv("MANIFEST_REFRESH_SECONDS", "300") or 300)
 MANIFEST_MAX_POSTS_PER_CYCLE = int(os.getenv("MANIFEST_MAX_POSTS_PER_CYCLE", "1") or 1)
+MANIFEST_TEST_FIRST_ITEM = os.getenv("MANIFEST_TEST_FIRST_ITEM", "false").strip().lower() == "true"
 
 # --- Localization helpers (Unicode + casing) ---
 def _nfc(s: str) -> str:
@@ -1036,17 +1037,17 @@ def process_external_due_items(posted_tweet_ids=None):
             if r.status_code == 200:
                 manifest = r.json()
             else:
-                print(f"[UYARI] Manifest URL hata kodu: {r.status_code}")
+                print(f"[UYARI] Manifest URL hata kodu: {r.status_code} | MANIFEST_URL='{MANIFEST_URL}'")
                 return
         except Exception as e:
-            print(f"[UYARI] Manifest indirme hatası: {e}")
+            print(f"[UYARI] Manifest indirme hatası: {e} | MANIFEST_URL='{MANIFEST_URL}'")
             return
     else:
         try:
             with open(MANIFEST_PATH, 'r', encoding='utf-8') as f:
                 manifest = json.load(f)
         except Exception as e:
-            print(f"[UYARI] Manifest dosyası okunamadı: {e}")
+            print(f"[UYARI] Manifest dosyası okunamadı: {e} | MANIFEST_PATH='{MANIFEST_PATH}'")
             return
 
     if not isinstance(manifest, dict) or 'items' not in manifest:
@@ -1073,22 +1074,53 @@ def process_external_due_items(posted_tweet_ids=None):
         except Exception:
             return None
 
-    # Select due items (scheduled_at <= now) and not posted yet
+    # Select due items
     due: list[dict] = []
-    for it in items:
+    upcoming: list[tuple[float, dict]] = []
+    if MANIFEST_TEST_FIRST_ITEM:
+        # Testing mode: process the first item with media that hasn't been posted yet
         try:
-            iid = str(it.get('id', '')).strip()
-            if not iid:
-                continue
-            if iid in posted_ids:
-                continue
-            sched = _parse_iso8601_to_epoch(str(it.get('scheduled_at', '')).strip())
-            if sched is None:
-                continue
-            if sched <= now:
-                due.append(it)
+            for it in items:
+                iid = str(it.get('id', '')).strip()
+                if not iid or iid in posted_ids:
+                    continue
+                media = it.get('media') or []
+                if isinstance(media, list) and len(media) > 0:
+                    due.append(it)
+                    break
         except Exception:
-            continue
+            pass
+    else:
+        for it in items:
+            try:
+                iid = str(it.get('id', '')).strip()
+                if not iid:
+                    continue
+                if iid in posted_ids:
+                    continue
+                sched = _parse_iso8601_to_epoch(str(it.get('scheduled_at', '')).strip())
+                if sched is None:
+                    continue
+                if sched <= now:
+                    due.append(it)
+                else:
+                    upcoming.append((sched, it))
+            except Exception:
+                continue
+
+    # Log summary so it's clear why nothing posted
+    try:
+        total = len(items)
+        due_count = len(due)
+        next_info = None
+        if upcoming:
+            upcoming.sort(key=lambda x: x[0])
+            from datetime import datetime, timezone
+            next_ts = upcoming[0][0]
+            next_info = datetime.fromtimestamp(next_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        print(f"[INFO] Manifest: total_items={total}, due_now={due_count}, next_due_at={next_info}")
+    except Exception:
+        pass
 
     seen_ids = set()
     seen_titles = set()
@@ -1304,6 +1336,42 @@ def refresh_manifest():
         except Exception as e:
             print(f"[UYARI] Manifest URL hatası: {e}")
 
+def get_next_due_epoch() -> float | None:
+    manifest = None
+    try:
+        if MANIFEST_URL:
+            r = requests.get(MANIFEST_URL, timeout=10)
+            if r.status_code == 200:
+                manifest = r.json()
+            else:
+                return None
+        else:
+            with open(MANIFEST_PATH, 'r', encoding='utf-8') as f:
+                manifest = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    items = manifest.get('items') or []
+    if not isinstance(items, list) or not items:
+        return None
+    # Find earliest future scheduled_at
+    now = time.time()
+    next_ts = None
+    for it in items:
+        try:
+            s = str(it.get('scheduled_at', '')).strip()
+            if not s:
+                continue
+            t = s.replace('Z', '+00:00')
+            from datetime import datetime, timezone
+            ts = datetime.fromisoformat(t).astimezone(timezone.utc).timestamp()
+            if ts > now and (next_ts is None or ts < next_ts):
+                next_ts = ts
+        except Exception:
+            continue
+    return next_ts
+
 # Main loop
 def main_loop():
     while True:
@@ -1311,7 +1379,20 @@ def main_loop():
             process_external_due_items()
             _create_and_pin_weekly_post_if_due()
             refresh_manifest()
-            time.sleep(MANIFEST_REFRESH_SECONDS)
+            # Dynamic sleep: wait until next scheduled_at if available
+            now = time.time()
+            next_ts = get_next_due_epoch()
+            if next_ts and next_ts > now:
+                sleep_sec = int(min(1800, max(30, next_ts - now)))
+                nxt_str = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(next_ts))
+                print(f"\n[+] Sonraki kontrol: {nxt_str}Z (dinamik {sleep_sec}s)")
+                print("⏳ Bekleniyor...")
+                time.sleep(sleep_sec)
+            else:
+                # Fallback periodic poll
+                print(f"\n[+] Sonraki kontrol (periyodik): {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now + MANIFEST_REFRESH_SECONDS))}Z")
+                print("⏳ Bekleniyor...")
+                time.sleep(MANIFEST_REFRESH_SECONDS)
         except Exception as e:
             print(f"[UYARI] Main loop hatası: {e}")
 
