@@ -460,6 +460,8 @@ def clean_tweet_text(text):
         if TWITTER_SCREENNAME:
             pattern = rf'^RT @{re.escape(TWITTER_SCREENNAME)}:\s*'
             text = re.sub(pattern, '', text)
+        # Genel RT öneki: herhangi bir kullanıcı için 'RT @kullanici:' kaldır
+        text = re.sub(r'^\s*RT\s+@[_A-Za-z0-9]+:\s*', '', text, flags=re.IGNORECASE)
     except Exception:
         pass
     text = re.sub(r'https?://\S+', '', text)
