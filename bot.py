@@ -27,6 +27,7 @@ import shutil
 import m3u8
 import unicodedata
 import logging
+import sqlite3
 # Pnytter kaldırıldı - sadece TWSCRAPE kullanılacak
 # Lazy import için Google AI modüllerini kaldır - ihtiyaç duyulduğunda import edilecek
 
@@ -130,6 +131,32 @@ def _nfc(s: str) -> str:
         return unicodedata.normalize('NFC', s) if isinstance(s, str) else s
     except Exception:
         return s
+
+# --- Reddit text sanitizer ---
+def _sanitize_for_reddit(s: str) -> str:
+    """Sanitize text for Reddit to avoid byte-marker artifacts and stray emojis.
+    - NFC normalize
+    - Remove patterns like '<0xF0><0x9F>...'
+    - Remove control chars except basic whitespace and newlines
+    - Heuristic removal of most emoji codepoints
+    """
+    try:
+        if not isinstance(s, str):
+            return s
+        txt = _nfc(s)
+        # Remove hex byte marker sequences
+        txt = re.sub(r"(?:<0x[0-9A-Fa-f]{2}>)+", "", txt)
+        # Remove zero-width spaces and control chars except tab/newline
+        txt = "".join(ch for ch in txt if (ch == "\n" or ch == "\t" or (ch >= " " and ch not in ("\u200b",))))
+        # Remove common emoji ranges (simple heuristic)
+        txt = "".join(ch for ch in txt if not (0x1F000 <= ord(ch) <= 0x1FAFF or 0x2600 <= ord(ch) <= 0x27BF))
+        # Collapse spaces
+        txt = re.sub(r"\s+", " ", txt).strip()
+        return txt
+    except Exception:
+        return s
+
+# duplicate removed
 
 def _is_all_caps_like(s: str) -> bool:
     """Heuristic: treat as ALL CAPS if >=80% of letters are uppercase and there is at least one letter."""
@@ -469,6 +496,30 @@ async def init_twscrape_api():
             pass
         twscrape_api = API(ACCOUNTS_DB_PATH)
         print("[+] twscrape API başlatıldı")
+        # Diagnostics: inspect DB content and pool availability
+        try:
+            conn = sqlite3.connect(ACCOUNTS_DB_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='accounts'")
+            has_tbl = (cur.fetchone() or [0])[0] > 0
+            if has_tbl:
+                cur.execute("SELECT username, active FROM accounts")
+                rows = cur.fetchall() or []
+                actives = [r[0] for r in rows if (r[1] in (1, True, '1'))]
+                print(f"[DIAG] accounts toplam={len(rows)} aktif={len(actives)} -> {actives}")
+            else:
+                print("[DIAG] accounts tablosu bulunamadı (DB boş olabilir)")
+            conn.close()
+        except Exception as de:
+            print(f"[DIAG] accounts DB inceleme hatası: {de}")
+        try:
+            nat = await twscrape_api.pool.next_available_at("timeline")
+            if not nat:
+                print("[DIAG] twscrape pool: aktif hesap yok (next_available_at=None)")
+            else:
+                print(f"[DIAG] twscrape pool: sonraki uygun hesap {nat}")
+        except Exception as de:
+            print(f"[DIAG] pool inceleme hatası: {de}")
     return twscrape_api
 
 async def _get_best_media_urls(tweet_id: int | str) -> tuple[str | None, str | None]:
@@ -1190,76 +1241,7 @@ def translate_text(text, has_video: bool = False):
         print(f"[UYARI] Gemini çeviri hatası: {e}")
         return None
 
-# --- Joke note detection & auto-comment ---
-def _extract_joke_note(text: str) -> str | None:
-    """Heuristically detect a short 'joke' note from the original tweet text.
-    Returns a concise line to translate and post, or None.
-    """
-    try:
-        if not text:
-            return None
-        t = (text or "").strip()
-        low = t.lower()
-        # Markers in TR/EN commonly used by authors
-        markers = [
-            "şaka", "saka", "espri", "mizah", "şakaydı", "şaka yapıyorum",
-            "joke", "jk", "kidding", "just kidding", "this is a joke", "parody", "satire"
-        ]
-        if not any(m in low for m in markers):
-            return None
-        # Try to extract the sentence containing the marker
-        # Simple split by punctuation and line breaks
-        import re as _re
-        parts = _re.split(r"(?<=[.!?\n])\s+", t)
-        for p in parts:
-            pl = p.lower()
-            if any(m in pl for m in markers):
-                # Keep a concise snippet
-                return p.strip()[:300]
-        # Fallback to entire text if markers exist but sentence split missed
-        return t[:300]
-    except Exception:
-        return None
-
-def _maybe_post_joke_comment(praw_submission_or_id, title: str, subreddit_name: str, original_tweet_text: str):
-    """If the original tweet contains a joke note, translate and post as a comment.
-    Accepts either a PRAW Submission, an ID string, or attempts title-based lookup.
-    """
-    try:
-        note = _extract_joke_note(original_tweet_text)
-        if not note:
-            return
-        # Translate to Turkish if it's not already
-        translated = translate_text(note) or note
-        comment_text = f"Not: Tweet sahibi şaka yaptığını belirtiyor — {translated}"
-        # Resolve submission
-        subm = None
-        if hasattr(praw_submission_or_id, "reply"):
-            subm = praw_submission_or_id
-        elif isinstance(praw_submission_or_id, str) and praw_submission_or_id:
-            try:
-                subm = reddit.submission(id=praw_submission_or_id)
-            except Exception:
-                subm = None
-        # As a last resort, try find by recent posts with same title
-        if not subm and title:
-            try:
-                sr_obj = reddit.subreddit(subreddit_name)
-                for s in sr_obj.new(limit=10):
-                    author_name = getattr(s.author, 'name', '') or ''
-                    if author_name.lower() == (REDDIT_USERNAME or '').lower() and s.title == title:
-                        subm = s
-                        break
-            except Exception:
-                pass
-        if subm:
-            try:
-                subm.reply(comment_text)
-                print("[+] Şaka notu yorum olarak eklendi")
-            except Exception as ce:
-                print(f"[UYARI] Şaka notu yorum eklenemedi: {ce}")
-    except Exception as e:
-        print(f"[UYARI] Şaka notu işlenemedi: {e}")
+# (Şaka/"joke" notu ile ilgili tüm kodlar kaldırıldı)
 
 # AI-powered flair selection system
 FLAIR_OPTIONS = {
@@ -2540,6 +2522,9 @@ def smart_split_title(text: str, max_len: int = 300):
 def submit_post(title, media_files, original_tweet_text="", remainder_text: str = ""):
     """Geliştirilmiş post gönderme fonksiyonu - AI flair seçimi ile"""
     subreddit = reddit.subreddit(SUBREDDIT)
+    # Sanitize inputs for Reddit to avoid encoding artifacts
+    title = _sanitize_for_reddit(title or "")
+    remainder_text = _sanitize_for_reddit(remainder_text or "")
     
     # Medya dosyalarını türlerine göre ayır
     image_files = []
@@ -2576,8 +2561,6 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
                         print(f"[+] Geçici resim silindi: {img_path}")
                 except Exception as cleanup_e:
                     print(f"[UYARI] Resim silinirken hata: {cleanup_e}")
-            # Gallery için başlığa göre şaka yorumunu dene
-            _maybe_post_joke_comment(None, title, SUBREDDIT, original_tweet_text)
             return True
         else:
             # Fallback öncesi, Reddit'te gönderi oluşmuş mı kontrol et
@@ -2590,7 +2573,10 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
                         return True
             except Exception as ve:
                 print(f"[UYARI] Fallback öncesi doğrulama hatası: {ve}")
-            print("[!] Gallery yüklenemedi, tekil resim yükleme deneniyor...")
+            # Gallery başarısız görünüyor; tekil resim fallback DUPLICATE riski yaratıyor.
+            # Bu nedenle burada dur ve False döndür; ana döngü yeniden deneyebilir.
+            print("[!] Gallery yüklenemedi; tekil resim fallback devre dışı bırakıldı (duplicate önleme)")
+            return False
     
     # Tekil resim veya video yükleme (mevcut kod)
     
@@ -2615,8 +2601,6 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
             else:
                 submission = subreddit.submit(title=title, selftext=(remainder_text or ""))
             print(f"[+] Text post gönderildi: {submission.url}")
-            # Tweet sahibinin şaka notunu yorum olarak ekle
-            _maybe_post_joke_comment(submission, title, SUBREDDIT, original_tweet_text)
             return True
         except Exception as e:
             print(f"[HATA] Text post hatası: {e}")
@@ -2650,12 +2634,10 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
             # Uzun metnin kalanı yorum olarak ekle
             try:
                 if remainder_text:
-                    submission.reply(remainder_text)
+                    submission.reply(_sanitize_for_reddit(remainder_text))
                     print("[+] Başlığın kalan kısmı yorum olarak eklendi")
             except Exception as ce:
                 print(f"[UYARI] Kalan metin yorum olarak eklenemedi: {ce}")
-            # Şaka notunu ekle
-            _maybe_post_joke_comment(submission, title, SUBREDDIT, original_tweet_text)
             return True
             
         elif ext in [".mp4", ".mov", ".webm"]:
@@ -2677,13 +2659,13 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
                 # Eğer Submission nesnesi geldiyse kalan metni yorum olarak ekle
                 try:
                     if hasattr(result, "reply") and remainder_text:
-                        result.reply(remainder_text)
+                        result.reply(_sanitize_for_reddit(remainder_text))
                         print("[+] Başlığın kalan kısmı video gönderisine yorum olarak eklendi")
                     elif isinstance(result, str) and remainder_text:
                         # Deterministik: RedditWarp ID döndü
                         try:
                             praw_sub = reddit.submission(id=result)
-                            praw_sub.reply(remainder_text)
+                            praw_sub.reply(_sanitize_for_reddit(remainder_text))
                             print("[+] Başlığın kalan kısmı (ID ile) video gönderisine yorum olarak eklendi")
                         except Exception as idc_e:
                             print(f"[UYARI] ID ile yorum ekleme başarısız: {idc_e}")
@@ -2693,31 +2675,19 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
                             for s in subreddit.new(limit=10):
                                 author_name = getattr(s.author, 'name', '') or ''
                                 if author_name.lower() == (REDDIT_USERNAME or '').lower() and s.title == title:
-                                    s.reply(remainder_text)
+                                    s.reply(_sanitize_for_reddit(remainder_text))
                                     print("[+] Başlığın kalan kısmı (RedditWarp) video gönderisine yorum olarak eklendi")
                                     break
                         except Exception as se:
                             print(f"[UYARI] RedditWarp sonrası yorum ekleme başarısız: {se}")
                 except Exception as ve:
                     print(f"[UYARI] Video yorum ekleme başarısız: {ve}")
-                # Şaka notunu ekle
-                try:
-                    if hasattr(result, "reply"):
-                        _maybe_post_joke_comment(result, title, SUBREDDIT, original_tweet_text)
-                    elif isinstance(result, str):
-                        _maybe_post_joke_comment(result, title, SUBREDDIT, original_tweet_text)
-                    else:
-                        _maybe_post_joke_comment(None, title, SUBREDDIT, original_tweet_text)
-                except Exception as _je:
-                    print(f"[UYARI] Şaka notu eklenemedi (video): {_je}")
                 return True
             else:
                 print("[!] Video yüklenemedi, alternatif yöntemler deneniyor...")
                 # Alternatif yöntem dene
                 alt_success = try_alternative_upload(title, media_path, subreddit)
                 if alt_success:
-                    # Alternatif yol ile gönderildiyse başlık bazlı şaka yorumunu dene
-                    _maybe_post_joke_comment(None, title, SUBREDDIT, original_tweet_text)
                     return True
                 else:
                     # Son çare text post kaldırıldı
@@ -2730,7 +2700,6 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
             else:
                 submission = subreddit.submit(title=title, selftext=(remainder_text or ""))
             print(f"[+] Text post gönderildi: {submission.url}")
-            _maybe_post_joke_comment(submission, title, SUBREDDIT, original_tweet_text)
             return True
             
     except Exception as e:
@@ -3082,9 +3051,23 @@ def get_latest_tweets_with_retweet_check(count: int = 8):
                 try:
                     api = await init_twscrape_api()
                     # Kullanıcıyı ID ile getir (daha güvenilir)
-                    user = await api.user_by_id(int(TWITTER_USER_ID))
+                    try:
+                        user = await api.user_by_id(int(TWITTER_USER_ID))
+                    except Exception as ue:
+                        print(f"[HATA] user_by_id hatası: {ue} | ID={TWITTER_USER_ID}")
+                        try:
+                            nat = await api.pool.next_available_at("timeline")
+                            print(f"[DIAG] next_available_at: {nat}")
+                        except Exception as de:
+                            print(f"[DIAG] next_available_at hatası: {de}")
+                        return []
                     if not user:
-                        print(f"[HATA] Twitter kullanıcısı bulunamadı: ID {TWITTER_USER_ID}")
+                        print(f"[HATA] Twitter kullanıcısı bulunamadı: ID {TWITTER_USER_ID} | muhtemel neden: pasif hesap/oturum yok/yanlış ID")
+                        try:
+                            nat = await api.pool.next_available_at("timeline")
+                            print(f"[DIAG] next_available_at: {nat}")
+                        except Exception as de:
+                            print(f"[DIAG] next_available_at hatası: {de}")
                         return []
                     
                     # 🧹 Generator kullan - büyük listeleri RAM'e yükleme
