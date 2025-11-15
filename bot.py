@@ -128,6 +128,9 @@ from redditwarp.SYNC import Client as RedditWarpClient
 LOCAL_ONLY = os.getenv("LOCAL_ONLY", "false").strip().lower() == "true"
 USE_EXTERNAL_QUEUE = os.getenv("USE_EXTERNAL_QUEUE", "false").strip().lower() == "true"
 QUEUE_URL = (os.getenv("QUEUE_URL", "") or "").strip()
+MANIFEST_URL = (os.getenv("MANIFEST_URL", "") or "").strip()
+MANIFEST_PATH = (os.getenv("MANIFEST_PATH", "manifest.json") or "manifest.json").strip()
+MANIFEST_REFRESH_SECONDS = int(os.getenv("MANIFEST_REFRESH_SECONDS", "300") or 300)
 
 # --- Localization helpers (Unicode + casing) ---
 def _nfc(s: str) -> str:
@@ -383,12 +386,12 @@ def test_proxy(proxy):
     return False
 
 def get_or_create_session(instance_url):
-    """🧹 Instance için session al veya yeni oluştur (memory optimized)"""
+    """ Instance için session al veya yeni oluştur (memory optimized)"""
     global SESSION_POOL, SESSION_LAST_USED
     
     current_time = time.time()
     
-    # 🧹 Eski session'ları temizle - memory management
+    # Eski session'ları temizle - memory management
     expired_keys = []
     for key, last_used in SESSION_LAST_USED.items():
         if current_time - last_used > MAX_SESSION_AGE:
@@ -403,7 +406,7 @@ def get_or_create_session(instance_url):
             del SESSION_POOL[key]
         del SESSION_LAST_USED[key]
     
-    # 🧹 Temizlik
+    # Temizlik
     del expired_keys
     
     # Mevcut session'ı kullan veya yeni oluştur
@@ -424,7 +427,7 @@ def get_or_create_session(instance_url):
         if proxy:
             if test_proxy(proxy):
                 session.proxies.update(proxy)
-            # 🧹 Logging azaltıldı - sadece hata durumunda log
+            # Logging azaltıldı - sadece hata durumunda log
         
         SESSION_POOL[instance_url] = session
     
@@ -825,13 +828,12 @@ def get_latest_bf6_retweets(count: int = 3):
         print(f"[UYARI] @bf6_tr retweet'leri alınamadı: {e}")
         return []
 
-
 # Pnytter fallback fonksiyonu kaldırıldı - sadece TWSCRAPE kullanılacak
 
 # RSS fallback fonksiyonu kaldırıldı - sadece TWSCRAPE kullanılacak
 
 def get_media_urls_from_tweet_data(tweet_data):
-    """🧹 TWSCRAPE'den alınan tweet verisinden medya URL'lerini çıkar"""
+    """ TWSCRAPE'den alınan tweet verisinden medya URL'lerini çıkar"""
     if not tweet_data or "media_urls" not in tweet_data:
         return []
     
@@ -842,9 +844,9 @@ def get_media_urls_from_tweet_data(tweet_data):
     except Exception:
         return []
 
-# 🧹 Nitter HTML fonksiyonları kaldırıldı - sadece TWSCRAPE kullanılacak
+# Nitter HTML fonksiyonları kaldırıldı - sadece TWSCRAPE kullanılacak
 
-# 🧹 Nitter instance yönetim fonksiyonları kaldırıldı - sadece TWSCRAPE kullanılacak
+# Nitter instance yönetim fonksiyonları kaldırıldı - sadece TWSCRAPE kullanılacak
 
 def _is_retweet_or_quote_by_id(tweet_id: str) -> bool:
     """Detail sorgusu ile RT/Quote olup olmadığını doğrula (senkron sarmalayıcı)."""
@@ -1021,11 +1023,287 @@ def process_specific_tweet(tweet_id: str) -> dict:
     except Exception as e:
         return {"processed": False, "reason": f"exception:{e}"}
 
+# Manifest consumption support (USE_EXTERNAL_QUEUE=true)
+def process_external_due_items(posted_tweet_ids=None):
+    if not USE_EXTERNAL_QUEUE:
+        return
 
-# -------------------- Web Service (FastAPI) --------------------
-# 🧹 Lazy import - FastAPI sadece ihtiyaç duyulduğunda import edilecek
+    manifest = None
+    if MANIFEST_URL:
+        try:
+            r = requests.get(MANIFEST_URL, timeout=15)
+            if r.status_code == 200:
+                manifest = r.json()
+            else:
+                print(f"[UYARI] Manifest URL hata kodu: {r.status_code}")
+                return
+        except Exception as e:
+            print(f"[UYARI] Manifest indirme hatası: {e}")
+            return
+    else:
+        try:
+            with open(MANIFEST_PATH, 'r', encoding='utf-8') as f:
+                manifest = json.load(f)
+        except Exception as e:
+            print(f"[UYARI] Manifest dosyası okunamadı: {e}")
+            return
 
-# 🧹 Global değişkenler
+    if not isinstance(manifest, dict) or 'items' not in manifest:
+        print("[UYARI] Manifest biçimi geçersiz (dict 'items' beklenirdi)")
+        return
+
+    now = time.time()
+    items = manifest.get('items') or []
+    if not isinstance(items, list):
+        print("[UYARI] Manifest 'items' listesi geçersiz")
+        return
+
+    # Load posted IDs to avoid duplicates
+    posted_ids = set(posted_tweet_ids) if posted_tweet_ids is not None else set(load_posted_tweet_ids())
+
+    def _parse_iso8601_to_epoch(s: str) -> float | None:
+        try:
+            if not s:
+                return None
+            t = s.strip().replace('Z', '+00:00')
+            from datetime import datetime, timezone
+            dt = datetime.fromisoformat(t).astimezone(timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            return None
+
+    # Select due items (scheduled_at <= now) and not posted yet
+    due: list[dict] = []
+    for it in items:
+        try:
+            iid = str(it.get('id', '')).strip()
+            if not iid:
+                continue
+            if iid in posted_ids:
+                continue
+            sched = _parse_iso8601_to_epoch(str(it.get('scheduled_at', '')).strip())
+            if sched is None:
+                continue
+            if sched <= now:
+                due.append(it)
+        except Exception:
+            continue
+
+    # Process each due item
+    for it in due:
+        iid = str(it.get('id', '')).strip()
+        title = (it.get('title') or '').strip()
+        body = (it.get('body') or '').strip()
+        media = it.get('media') or []
+        media_files: list[str] = []
+        try:
+            # Download media
+            for idx, m in enumerate(media):
+                try:
+                    mtype = (m.get('type') or '').lower()
+                    url = m.get('url')
+                    if not url:
+                        continue
+                    ext = os.path.splitext(url)[1].split('?')[0] or ('.mp4' if mtype == 'video' else '.jpg')
+                    fname = f"manifest_{iid}_{idx}{ext}"
+                    p = download_media(url, fname)
+                    if p:
+                        media_files.append(p)
+                except Exception:
+                    continue
+
+            # Submit
+            if not title:
+                title = f"Manifest Item {iid}"
+            ok = submit_post(title, media_files, original_tweet_text=body, remainder_text="")
+            if ok:
+                print(f"[+] Manifest öğesi gönderildi: {iid}")
+                try:
+                    save_posted_tweet_id(iid)
+                except Exception:
+                    pass
+            else:
+                print(f"[UYARI] Manifest öğesi gönderilemedi: {iid}")
+        except Exception as e:
+            print(f"[UYARI] Manifest öğesi işlenirken hata ({iid}): {e}")
+        finally:
+            # Clean up downloaded files
+            for fp in media_files:
+                try:
+                    if os.path.exists(fp):
+                        os.remove(fp)
+                except Exception:
+                    pass
+
+# --- Scheduled weekly "Oyuncu Arama" post helper (stateless) ---
+def _create_and_pin_weekly_post_if_due() -> None:
+    """Scheduled weekly megathread creator.
+    Primary schedule: every Friday (weekday=4) at/after configured hour.
+    Fallback schedule: specified days-of-month in `SCHEDULED_PIN_DAYS` if WEEKDAY invalid.
+    Uses PRAW and requires moderator permissions on the subreddit.
+    """
+    try:
+        # Global toggle
+        if not SCHEDULED_PIN_ENABLED:
+            return
+        lt = time.localtime()
+        day = lt.tm_mday
+        wday = lt.tm_wday  # 0=Mon .. 6=Sun
+        hour = lt.tm_hour
+
+        run_today = False
+        # Prefer weekday schedule if valid
+        if 0 <= SCHEDULED_PIN_WEEKDAY <= 6:
+            run_today = (wday == SCHEDULED_PIN_WEEKDAY) and (hour >= SCHEDULED_PIN_HOUR)
+        else:
+            # Fallback to day-of-month list if provided
+            if SCHEDULED_PIN_DAYS:
+                run_today = (day in SCHEDULED_PIN_DAYS) and (hour >= SCHEDULED_PIN_HOUR)
+
+        if not run_today:
+            return
+        today_key = time.strftime("%Y-%m-%d", lt)
+
+        # Build title and body
+        tarih = time.strftime("%d.%m.%Y", lt)
+        title = f"{SCHEDULED_PIN_TITLE_PREFIX}{tarih})"
+        body = (
+            "**Hoş geldiniz!**\n\n"
+            "Bu başlık, takım/oyuncu bulmanızı kolaylaştırmak amacıyla oluşturulmuştur. Eğer birlikte oyun oynayabileceğiniz yeni kişiler arıyorsanız doğru yerdesiniz! Aşağıda belirtildiği şekilde yorum yaparak takım arkadaşı arayabilirsiniz. Böylece benzer oyunlara ve tercihlere sahip oyuncular kolayca bir araya gelebilir.\n\n"
+            "**Lütfen yorumlarınızda şunları belirtmeyi unutmayın:**\n\n"
+            "* Oyun platformunuz (PC, PlayStation, Xbox vb.)\n"
+            "* Oyun içi kullanıcı adınız\n"
+            "* Mikrofonlu/suz bilgisi\n"
+            "* Genellikle oynadığınız veya oynayacağınız görev birimi (assault, medic, recon vb.)\n\n"
+            "Bu bilgiler sayesinde, benzer oyun ve oyun tarzlarına sahip kişilerle daha kolay iletişim kurabilirsiniz.\n\n"
+            "**Yorumların sıralanması:**\n\n"
+            "Yorumlar sistem tarafından otomatik olarak en yeni yorumdan en eski yoruma doğru sıralanmaktadır. Böylece en güncel oyunculara ve taleplere kolayca ulaşabilirsiniz.\n\n"
+            "Her seviyeden oyuncuya açıktır, saygılı ve destekleyici bir ortam yaratmayı amaçlıyoruz. Keyifli oyunlar!"
+        )
+
+        # Stateless dedupe: scan recent posts for today's weekly thread
+        sr = reddit.subreddit(SUBREDDIT)
+        try:
+            for s in sr.new(limit=30):
+                try:
+                    author_name = getattr(s.author, 'name', '') or ''
+                except Exception:
+                    author_name = ''
+                s_title = getattr(s, 'title', '') or ''
+                try:
+                    created_utc = int(getattr(s, 'created_utc', 0) or 0)
+                except Exception:
+                    created_utc = 0
+                s_local = time.localtime(created_utc) if created_utc else None
+                s_key = time.strftime("%Y-%m-%d", s_local) if s_local else ''
+                if (
+                    author_name.lower() == (REDDIT_USERNAME or '').lower()
+                    and s_title.startswith(SCHEDULED_PIN_TITLE_PREFIX)
+                    and s_key == today_key
+                ):
+                    print(f"[INFO] Bugünün haftalık başlığı zaten mevcut: https://reddit.com{s.permalink}")
+                    return
+        except Exception as scan_e:
+            print(f"[UYARI] Mevcut haftalık gönderiler taranamadı: {scan_e}")
+
+        print("[+] Haftalık oyuncu arama gönderisi oluşturuluyor ve sabitleniyor...")
+        submission = sr.submit(title=title, selftext=body, send_replies=False, resubmit=False)
+        if submission:
+            try:
+                # Pin to top (slot 1) and set suggested sort to 'new'
+                submission.mod.sticky(state=True, bottom=False)
+                try:
+                    submission.mod.suggested_sort("new")
+                except Exception as se:
+                    print(f"[UYARI] suggested_sort ayarlanamadı: {se}")
+                print(f"[+] Haftalık gönderi oluşturuldu ve sabitlendi: https://reddit.com{submission.permalink}")
+
+                # Unsticky older megathreads so only the newest stays pinned
+                try:
+                    for slot in (1, 2):
+                        try:
+                            stickied = sr.sticky(number=slot)
+                        except Exception:
+                            stickied = None
+                        if not stickied:
+                            continue
+                        try:
+                            st_author = getattr(stickied.author, 'name', '') or ''
+                        except Exception:
+                            st_author = ''
+                        st_title = getattr(stickied, 'title', '') or ''
+                        if (
+                            stickied.id != submission.id and
+                            st_author.lower() == (REDDIT_USERNAME or '').lower() and
+                            st_title.startswith(SCHEDULED_PIN_TITLE_PREFIX)
+                        ):
+                            try:
+                                stickied.mod.sticky(state=False)
+                                print(f"[+] Eski haftalık başlık unsticky yapıldı: https://reddit.com{stickied.permalink}")
+                            except Exception as ue:
+                                print(f"[UYARI] Unsticky başarısız: {ue}")
+                except Exception as sweep_e:
+                    print(f"[UYARI] Sticky temizleme sırasında hata: {sweep_e}")
+                # Extra sweep: scan recent posts and unsticky any lingering older stickied megathreads
+                try:
+                    for s in sr.new(limit=100):
+                        try:
+                            if getattr(s, 'id', None) == submission.id:
+                                continue
+                            if not getattr(s, 'stickied', False):
+                                continue
+                            author_name = getattr(s.author, 'name', '') or ''
+                            s_title = getattr(s, 'title', '') or ''
+                            if (
+                                author_name.lower() == (REDDIT_USERNAME or '').lower() and
+                                s_title.startswith(SCHEDULED_PIN_TITLE_PREFIX)
+                            ):
+                                try:
+                                    s.mod.sticky(state=False)
+                                    print(f"[+] Eski stickied gönderi unsticky yapıldı: https://reddit.com{s.permalink}")
+                                except Exception as ue2:
+                                    print(f"[UYARI] Unsticky (scan) başarısız: {ue2}")
+                        except Exception:
+                            # Ignore per-item errors during sweep
+                            continue
+                except Exception as scan_uns_e:
+                    print(f"[UYARI] Ek sticky tarama/temizleme hatası: {scan_uns_e}")
+            except Exception as me:
+                print(f"[UYARI] Gönderi sabitleme/moderasyon işlemi başarısız: {me}")
+        else:
+            print("[UYARI] Haftalık gönderi oluşturulamadı (PRAW submit falsy)")
+    except Exception as e:
+        print(f"[UYARI] Haftalık gönderi oluşturma hatası: {e}")
+
+# Manifest refresh
+def refresh_manifest():
+    if MANIFEST_URL:
+        try:
+            response = requests.get(MANIFEST_URL, timeout=10)
+            if response.status_code == 200:
+                with open(MANIFEST_PATH, 'w') as f:
+                    json.dump(response.json(), f)
+                print(f"[+] Manifest güncellendi: {MANIFEST_PATH}")
+            else:
+                print(f"[UYARI] Manifest URL'den alınamadı: {response.status_code}")
+        except Exception as e:
+            print(f"[UYARI] Manifest URL hatası: {e}")
+
+# Main loop
+def main_loop():
+    while True:
+        try:
+            process_external_due_items()
+            _create_and_pin_weekly_post_if_due()
+            refresh_manifest()
+            time.sleep(MANIFEST_REFRESH_SECONDS)
+        except Exception as e:
+            print(f"[UYARI] Main loop hatası: {e}")
+
+# --- Web Service (FastAPI) ---
+# Lazy import - FastAPI sadece ihtiyaç duyulduğunda import edilecek
+
+# Global değişkenler
 _worker_started = False
 _worker_lock = None
 app = None
@@ -1039,13 +1317,13 @@ def get_instance_health_status() -> bool:
         return True
 
 def _init_fastapi():
-    """🧹 FastAPI lazy initialization"""
+    """ FastAPI lazy initialization"""
     global app, _worker_lock
     if app is None:
         if LOCAL_ONLY:
             # Lokal modda web servis kurma
             return None
-        # 🧹 Lazy import
+        # Lazy import
         try:
             from fastapi import FastAPI, Request
             from fastapi.responses import PlainTextResponse
@@ -1113,7 +1391,7 @@ def _init_fastapi():
                     try:
                         main_loop()
                     except Exception:
-                        pass  # 🧹 Logging azaltıldı
+                        pass  # Logging azaltıldı
                 t = threading.Thread(target=_run, name="bot-worker", daemon=True)
                 t.start()
                 _worker_started = True
@@ -1123,14 +1401,14 @@ def _init_fastapi():
 # Expose ASGI app for 'uvicorn bot:app' imports (Render)
 app = None if LOCAL_ONLY else _init_fastapi()
 
-# 🧹 Route tanımları _init_fastapi() fonksiyonuna taşındı
+# Route tanımları _init_fastapi() fonksiyonuna taşındı
 
-# 🧹 Nitter multi-instance fonksiyonu kaldırıldı - sadece TWSCRAPE kullanılacak
+# Nitter multi-instance fonksiyonu kaldırıldı - sadece TWSCRAPE kullanılacak
 
-# 🧹 Gallery-dl fonksiyonu kaldırıldı - sadece TWSCRAPE kullanılacak
+# Gallery-dl fonksiyonu kaldırıldı - sadece TWSCRAPE kullanılacak
 
 def translate_text(text, has_video: bool = False):
-    """🧹 Gemini 2.5 Flash ile İngilizce -> Türkçe çeviri (memory optimized)
+    """ Gemini 2.5 Flash ile İngilizce -> Türkçe çeviri (memory optimized)
     Çıkış: Sadece ham çeviri (ek açıklama, tırnak, etiket vs. yok).
     Özel terimleri ÇEVİRME: battlefield, free pass, battle pass.
     has_video: Kaynak tweet'te video varsa True (ör: 'reload' -> 'Şarjör').
@@ -1139,7 +1417,7 @@ def translate_text(text, has_video: bool = False):
         if not text or not text.strip():
             return None
         
-        # 🧹 Lazy import - sadece ihtiyaç duyulduğunda import et
+        # Lazy import - sadece ihtiyaç duyulduğunda import et
         try:
             from google import genai
             from google.genai import types
@@ -1163,7 +1441,7 @@ def translate_text(text, has_video: bool = False):
                     pass
                 return cached
 
-        # 🧹 Gemini client - lazy initialization
+        # Gemini client - lazy initialization
         client = None
         try:
             client = genai.Client()
@@ -1184,20 +1462,6 @@ def translate_text(text, has_video: bool = False):
             "Translate ALL parts of the text into Turkish EXCEPT the protected terms listed above. Do NOT leave any sentence or common word in English.\n"
             "If the input includes any mentions like @nickname or patterns like 'via @nickname', exclude them from the output entirely.\n"
             "If the content appears to be a short gameplay/clip highlight rather than a news/article, compress it into ONE coherent Turkish sentence (no bullet points, no multiple sentences).\n"
-            "Special rule: If the text is exactly 'W', translate it as 'İyi'; if exactly 'L', translate it as 'Kötü'; if the text is 'W or L?' or 'W/L?', translate it as 'İyi mi, Kötü mü?'.\n"
-            "Fidelity rules: Do NOT invent or change weapon types or roles. Translate phrases like 'snipes' as a neutral 'vuruyor/öldürüyor' unless a SNIPER RIFLE is explicitly mentioned.\n"
-            "Translate 'using a [WEAPON]' exactly as 'bir [WEAPON] kullanarak' and keep the weapon type accurate (e.g., 'using a missile launcher' => 'bir roketatar/füzeatar kullanarak').\n"
-            "Maintain the subject/object roles from the source (e.g., '[Game] player snipes a parachuting player' => '[Game] oyuncusu, paraşütle inen bir oyuncuyu ...'). Do NOT swap actor and target.\n"
-            "Absolutely do NOT add emojis, usernames, sources, credits, or extra markers (e.g., '🎥', 'u/username', 'via ...'). Output only the translated sentence.\n"
-            "Special phrases like 'Day 1' should be translated contextually: use 'Çıkış günü' or other natural Turkish phrase when referring to game launch. "
-            "Other idiomatic phrases like 'now that X is purchasable' should be rendered smoothly in Turkish, e.g., 'artık X mevcut olduğundan' or 'X satın alınabildiği için'.\n"
-            "Additionally, if the source text contains these tags/keywords, translate them EXACTLY as follows (preserve casing where appropriate):\n"
-            "BREAKING => SON DAKİKA; LEAK (as a standalone tag/label) => SIZINTI; HUMOUR => SÖYLENTI; NEW => YENİ.\n"
-            "When these tags appear at the beginning of text (e.g., 'BREAKING:', 'NEW:', 'LEAK:'), keep them in ALL UPPERCASE in Turkish (e.g., 'SON DAKİKA:', 'YENİ:', 'SIZINTI:').\n"
-            "CRITICAL: For the verb forms 'leak/leaked/has leaked/has been leaked', render them naturally in Turkish as a verb: prefer 'sızdı'.\n"
-            "Use 'sızdırıldı' ONLY if the English clearly states an explicit agent causing the leak (e.g., 'was leaked by X').\n"
-            "NEVER output the awkward phrase 'sızıntı oldu'.\n"
-            "For gaming phrasing, translate 'Intro Gameplay' as 'giriş oynanışı' (or 'açılış oynanışı' if it reads more naturally in context).\n"
             "Remove any first-person opinions or subjective phrases (e.g., 'I think', 'IMO', 'bence', 'bana göre'); keep only neutral, factual content.\n"
             "Before finalizing, re-read your Turkish output and ensure it is coherent and faithful: do NOT invent numbers, durations (e.g., '3-5 gün'), hedging words (e.g., 'sanki', 'gibi', 'muhtemelen') unless they EXIST in the English. Remove any such additions. Do NOT add or change meaning.\n"
             "Do not translate 'Campaign' in a video game context as 'Kampanya'; prefer 'Hikaye' (or 'Hikaye modu' if fits better). Translate 'Campaign Early Access' as 'Hikaye Erken Erişimi'.\n"
@@ -1892,6 +2156,7 @@ def _create_and_pin_weekly_post_if_due() -> None:
                                 except Exception as ue2:
                                     print(f"[UYARI] Unsticky (scan) başarısız: {ue2}")
                         except Exception:
+                            # Ignore errors for individual items in the sweep
                             continue
                 except Exception as scan_uns_e:
                     print(f"[UYARI] Ek sticky tarama/temizleme hatası: {scan_uns_e}")
@@ -1901,6 +2166,7 @@ def _create_and_pin_weekly_post_if_due() -> None:
             print("[UYARI] Haftalık gönderi oluşturulamadı (PRAW submit falsy)")
     except Exception as e:
         print(f"[UYARI] Haftalık gönderi oluşturma hatası: {e}")
+
 def upload_gallery_via_redditwarp(title, image_paths, subreddit_name, flair_id=None):
     """RedditWarp ile birden fazla resmi gallery olarak yükle"""
     if not redditwarp_client:
