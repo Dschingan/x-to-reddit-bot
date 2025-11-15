@@ -38,6 +38,8 @@ import sqlite3
 # import psycopg2 - lazy import
 # from psycopg2.extras import RealDictCursor - lazy import
 
+load_dotenv()
+
 # Resolve script directory and accounts DB absolute path early
 SCRIPT_DIR = Path(__file__).resolve().parent
 _env_db = os.environ.get("ACCOUNTS_DB_PATH", "accounts.db")
@@ -1920,7 +1922,7 @@ Sadece flair adını yaz (örnek: Haberler). Başka bir şey yazma."""
 def download_media(media_url, filename):
     try:
         headers = {
-            "User-Agent": USER_AGENT or get_random_user_agent(),
+            "User-Agent": get_random_user_agent(),
             "Accept": "*/*",
             "Connection": "keep-alive",
         }
@@ -3655,6 +3657,15 @@ def main_loop():
     print(f"[+] Twitter: @{TWITTER_SCREENNAME} (ID: {TWITTER_USER_ID})")
     print("[+] Retweet'ler otomatik olarak atlanacak")
     print(f"[+] Şu ana kadar {len(posted_tweet_ids)} tweet işlenmiş")
+    # Diagnostics for queue/manifest mode
+    try:
+        print(f"[DIAG] USE_EXTERNAL_QUEUE={USE_EXTERNAL_QUEUE} | MANIFEST_TEST_FIRST_ITEM={MANIFEST_TEST_FIRST_ITEM}")
+        if MANIFEST_URL:
+            print(f"[DIAG] MANIFEST_URL={MANIFEST_URL}")
+        else:
+            print(f"[DIAG] MANIFEST_PATH={MANIFEST_PATH}")
+    except Exception:
+        pass
     
     # .env ile verilen özel tweet ID'lerini (bir kereye mahsus) işle
     try:
