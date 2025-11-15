@@ -131,6 +131,7 @@ QUEUE_URL = (os.getenv("QUEUE_URL", "") or "").strip()
 MANIFEST_URL = (os.getenv("MANIFEST_URL", "") or "").strip()
 MANIFEST_PATH = (os.getenv("MANIFEST_PATH", "manifest.json") or "manifest.json").strip()
 MANIFEST_REFRESH_SECONDS = int(os.getenv("MANIFEST_REFRESH_SECONDS", "300") or 300)
+MANIFEST_MAX_POSTS_PER_CYCLE = int(os.getenv("MANIFEST_MAX_POSTS_PER_CYCLE", "1") or 1)
 
 # --- Localization helpers (Unicode + casing) ---
 def _nfc(s: str) -> str:
@@ -1089,12 +1090,22 @@ def process_external_due_items(posted_tweet_ids=None):
         except Exception:
             continue
 
-    # Process each due item
+    seen_ids = set()
+    seen_titles = set()
+    posted_in_cycle = 0
     for it in due:
+        if posted_in_cycle >= MANIFEST_MAX_POSTS_PER_CYCLE:
+            break
         iid = str(it.get('id', '')).strip()
         title = (it.get('title') or '').strip()
         body = (it.get('body') or '').strip()
         media = it.get('media') or []
+        if not isinstance(media, list) or len(media) == 0:
+            continue
+        if iid in seen_ids:
+            continue
+        if title and title in seen_titles:
+            continue
         media_files: list[str] = []
         try:
             # Download media
@@ -1122,6 +1133,10 @@ def process_external_due_items(posted_tweet_ids=None):
                     save_posted_tweet_id(iid)
                 except Exception:
                     pass
+                seen_ids.add(iid)
+                if title:
+                    seen_titles.add(title)
+                posted_in_cycle += 1
             else:
                 print(f"[UYARI] Manifest öğesi gönderilemedi: {iid}")
         except Exception as e:
