@@ -267,6 +267,8 @@ FAIL_IF_DB_UNAVAILABLE = os.getenv("FAIL_IF_DB_UNAVAILABLE", "true").lower() == 
 POSTED_IDS_RETENTION = int(os.getenv("POSTED_IDS_RETENTION", "200"))
 # If enabled, skip any tweet with id <= last seen numeric id at startup/runtime
 HIGH_WATERMARK_ENABLED = os.getenv("HIGH_WATERMARK_ENABLED", "true").lower() == "true"
+# Runtime-level dedupe: keep a memory set of IDs posted during this process lifetime
+RUNTIME_POSTED_IDS: set[str] = set()
 
 # Translate cache (avoid repeated Gemini calls for identical input)
 TRANSLATE_CACHE_MAX = int(os.getenv("TRANSLATE_CACHE_MAX", "500"))
@@ -1083,6 +1085,12 @@ def process_external_due_items(posted_tweet_ids=None):
 
     # Load posted IDs to avoid duplicates
     posted_ids = set(posted_tweet_ids) if posted_tweet_ids is not None else set(load_posted_tweet_ids())
+    # Merge with runtime memory set to prevent re-posts within same process
+    try:
+        if RUNTIME_POSTED_IDS:
+            posted_ids |= set(RUNTIME_POSTED_IDS)
+    except Exception:
+        pass
 
     # Manifest summary info (total / posted / unposted)
     try:
@@ -1125,7 +1133,7 @@ def process_external_due_items(posted_tweet_ids=None):
                 iid = str(it.get('id', '')).strip()
                 if not iid:
                     continue
-                if iid in posted_ids:
+                if iid in posted_ids or iid in RUNTIME_POSTED_IDS:
                     continue
                 media = it.get('media') or []
                 if isinstance(media, list) and len(media) > 0:
@@ -1156,7 +1164,7 @@ def process_external_due_items(posted_tweet_ids=None):
                     iid = str(it.get('id', '')).strip()
                     if not iid:
                         continue
-                    if iid in posted_ids:
+                    if iid in posted_ids or iid in RUNTIME_POSTED_IDS:
                         continue
                     media = it.get('media') or []
                     if not isinstance(media, list) or len(media) == 0:
@@ -1172,7 +1180,7 @@ def process_external_due_items(posted_tweet_ids=None):
             total = len(unposted)
             for idx, it in enumerate(unposted):
                 iid = str(it.get('id', '')).strip()
-                if not iid or iid in seen_ids:
+                if not iid or iid in seen_ids or iid in RUNTIME_POSTED_IDS:
                     continue
                 title = (it.get('title') or '').strip()
                 body = (it.get('body') or '').strip()
@@ -1211,11 +1219,21 @@ def process_external_due_items(posted_tweet_ids=None):
 
                     if not title:
                         title = f"Manifest Item {iid}"
+                    # Final guard just before submit
+                    if iid in posted_ids or iid in RUNTIME_POSTED_IDS:
+                        print(f"[MANIFEST] Son anda tekrar tespit edildi, atlandı: {iid}")
+                        continue
                     ok = submit_post(title, media_files, original_tweet_text=body, remainder_text="")
                     if ok:
                         print(f"[+] Manifest öğesi gönderildi: {iid} ({idx+1}/{total})")
                         try:
                             save_posted_tweet_id(iid)
+                        except Exception:
+                            pass
+                        # Update runtime memory to immediately block any future attempt
+                        try:
+                            RUNTIME_POSTED_IDS.add(iid)
+                            posted_ids.add(iid)
                         except Exception:
                             pass
                         seen_ids.add(iid)
@@ -3366,8 +3384,8 @@ def load_posted_tweet_ids():
         try:
             _ensure_posted_ids_table()
             ids = _db_load_posted_ids()
-            # 🧹 Logging azaltıldı
-            result = set(ids)
+            # Normalize all IDs to strings to match manifest 'id' comparisons
+            result = set(str(x) for x in ids)
             # 🧹 Temizlik
             del ids
             return result
@@ -3396,11 +3414,11 @@ def load_posted_tweet_ids():
     try:
         # Ana dosyayı oku
         for tweet_id in _read_file_lines(posted_ids_file):
-            posted_ids.add(tweet_id)
+            posted_ids.add(str(tweet_id))
         
         # Legacy dosyayı oku
         for tweet_id in _read_file_lines(alt_posted_ids_file):
-            posted_ids.add(tweet_id)
+            posted_ids.add(str(tweet_id))
             
     except Exception:
         pass  # 🧹 Logging azaltıldı
