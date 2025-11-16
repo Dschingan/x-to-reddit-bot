@@ -1084,6 +1084,26 @@ def process_external_due_items(posted_tweet_ids=None):
     # Load posted IDs to avoid duplicates
     posted_ids = set(posted_tweet_ids) if posted_tweet_ids is not None else set(load_posted_tweet_ids())
 
+    # Manifest summary info (total / posted / unposted)
+    try:
+        total_items = len(items)
+        posted_in_manifest = 0
+        unposted_preview = []
+        for it in items:
+            iid = str(it.get('id', '')).strip()
+            if not iid:
+                continue
+            if iid in posted_ids:
+                posted_in_manifest += 1
+            elif len(unposted_preview) < 5:
+                unposted_preview.append(iid)
+        unposted_count = max(0, total_items - posted_in_manifest)
+        print(f"[MANIFEST] Özet: toplam={total_items}, gönderilen={posted_in_manifest}, gönderilmeyen={unposted_count}")
+        if unposted_preview:
+            print(f"[MANIFEST] Gönderilmeyen örnek ID'ler (ilk {len(unposted_preview)}): {', '.join(unposted_preview)}")
+    except Exception:
+        pass
+
     def _parse_iso8601_to_epoch(s: str) -> float | None:
         try:
             if not s:
@@ -1099,17 +1119,19 @@ def process_external_due_items(posted_tweet_ids=None):
     due: list[dict] = []
     upcoming: list[tuple[float, dict]] = []
     if MANIFEST_TEST_FIRST_ITEM:
-        # Testing mode: process the first item with media that hasn't been posted yet
+        # Testing mode: select the first media-containing item that has NOT been posted yet
         try:
             for it in items:
                 iid = str(it.get('id', '')).strip()
                 if not iid:
                     continue
+                if iid in posted_ids:
+                    continue
                 media = it.get('media') or []
                 if isinstance(media, list) and len(media) > 0:
                     due.append(it)
                     try:
-                        print(f"[TEST] MANIFEST_TEST_FIRST_ITEM aktif: ilk medya içeren öğe seçildi -> id={iid}")
+                        print(f"[TEST] MANIFEST_TEST_FIRST_ITEM aktif: (henüz gönderilmemiş) ilk medya içeren öğe seçildi -> id={iid}")
                     except Exception:
                         pass
                     break
