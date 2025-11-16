@@ -140,6 +140,8 @@ MANIFEST_TEST_FIRST_ITEM = os.getenv("MANIFEST_TEST_FIRST_ITEM", "false").strip(
 DOWNLOAD_CONNECT_TIMEOUT = float(os.getenv("DOWNLOAD_CONNECT_TIMEOUT", "5") or 5)
 DOWNLOAD_READ_TIMEOUT = float(os.getenv("DOWNLOAD_READ_TIMEOUT", "60") or 60)
 DOWNLOAD_CHUNK_SLEEP_MS = int(os.getenv("DOWNLOAD_CHUNK_SLEEP_MS", "0") or 0)
+MANIFEST_IGNORE_SCHEDULE = os.getenv("MANIFEST_IGNORE_SCHEDULE", "false").strip().lower() == "true"
+MANIFEST_POST_INTERVAL_SECONDS = int(os.getenv("MANIFEST_POST_INTERVAL_SECONDS", "600") or 600)
 
 # --- Localization helpers (Unicode + casing) ---
 def _nfc(s: str) -> str:
@@ -1093,7 +1095,7 @@ def process_external_due_items(posted_tweet_ids=None):
         except Exception:
             return None
 
-    # Select due items
+    # Select items
     due: list[dict] = []
     upcoming: list[tuple[float, dict]] = []
     if MANIFEST_TEST_FIRST_ITEM:
@@ -1114,22 +1116,126 @@ def process_external_due_items(posted_tweet_ids=None):
         except Exception:
             pass
     else:
-        for it in items:
-            try:
+        if MANIFEST_IGNORE_SCHEDULE:
+            print(f"[INFO] MANIFEST_IGNORE_SCHEDULE aktif. Tüm gönderiler sırasıyla (eski->yeni) ve {MANIFEST_POST_INTERVAL_SECONDS}s arayla gönderilecek.")
+            # Build unposted list and sort oldest-to-newest by created_at, fallback scheduled_at
+            def _created_or_sched_epoch(itm) -> float:
+                ca = (itm.get('created_at') or '').strip()
+                sa = (itm.get('scheduled_at') or '').strip()
+                ts_ca = _parse_iso8601_to_epoch(ca) if isinstance(ca, str) else None
+                if ts_ca is not None:
+                    return ts_ca
+                ts_sa = _parse_iso8601_to_epoch(sa) if isinstance(sa, str) else None
+                return ts_sa if ts_sa is not None else 0.0
+
+            unposted = []
+            for it in items:
+                try:
+                    iid = str(it.get('id', '')).strip()
+                    if not iid:
+                        continue
+                    if iid in posted_ids:
+                        continue
+                    media = it.get('media') or []
+                    if not isinstance(media, list) or len(media) == 0:
+                        continue
+                    unposted.append(it)
+                except Exception:
+                    continue
+
+            unposted.sort(key=_created_or_sched_epoch)
+
+            seen_ids = set()
+            seen_titles = set()
+            total = len(unposted)
+            for idx, it in enumerate(unposted):
                 iid = str(it.get('id', '')).strip()
-                if not iid:
+                if not iid or iid in seen_ids:
                     continue
-                if iid in posted_ids:
+                title = (it.get('title') or '').strip()
+                body = (it.get('body') or '').strip()
+                media = it.get('media') or []
+                if title and title in seen_titles:
                     continue
-                sched = _parse_iso8601_to_epoch(str(it.get('scheduled_at', '')).strip())
-                if sched is None:
+
+                # Prioritize video first as before
+                videos = [m for m in media if (m.get('type', '').lower() == 'video' and m.get('url'))]
+                images = [m for m in media if (m.get('type', '').lower() == 'image' and m.get('url'))]
+                chosen_media = [videos[0]] if videos else images
+                if not chosen_media:
+                    print("[MANIFEST] Geçerli medya bulunamadı (ne video ne resim)")
                     continue
-                if sched <= now:
-                    due.append(it)
-                else:
-                    upcoming.append((sched, it))
-            except Exception:
-                continue
+
+                media_files: list[str] = []
+                try:
+                    # Download media
+                    for m_idx, m in enumerate(chosen_media):
+                        try:
+                            mtype = (m.get('type') or '').lower()
+                            url = m.get('url')
+                            if not url:
+                                continue
+                            ext = os.path.splitext(url)[1].split('?')[0] or ('.mp4' if mtype == 'video' else '.jpg')
+                            fname = f"manifest_{iid}_{m_idx}{ext}"
+                            p = download_media(url, fname)
+                            if p:
+                                media_files.append(p)
+                        except Exception:
+                            continue
+
+                    if not media_files:
+                        print("[MANIFEST] Medya indirilemedi, item atlandı")
+                        continue
+
+                    if not title:
+                        title = f"Manifest Item {iid}"
+                    ok = submit_post(title, media_files, original_tweet_text=body, remainder_text="")
+                    if ok:
+                        print(f"[+] Manifest öğesi gönderildi: {iid} ({idx+1}/{total})")
+                        try:
+                            save_posted_tweet_id(iid)
+                        except Exception:
+                            pass
+                        seen_ids.add(iid)
+                        if title:
+                            seen_titles.add(title)
+                        # Sleep between posts to avoid rate/ban
+                        if idx + 1 < total and MANIFEST_POST_INTERVAL_SECONDS > 0:
+                            try:
+                                print(f"[INFO] Sonraki gönderi için bekleniyor: {MANIFEST_POST_INTERVAL_SECONDS} saniye")
+                            except Exception:
+                                pass
+                            time.sleep(MANIFEST_POST_INTERVAL_SECONDS)
+                    else:
+                        print(f"[UYARI] Manifest öğesi gönderilemedi: {iid}")
+                except Exception as e:
+                    print(f"[UYARI] Manifest öğesi işlenirken hata ({iid}): {e}")
+                finally:
+                    for fp in media_files:
+                        try:
+                            if os.path.exists(fp):
+                                os.remove(fp)
+                        except Exception:
+                            pass
+
+            return None
+        else:
+            for it in items:
+                try:
+                    iid = str(it.get('id', '')).strip()
+                    if not iid:
+                        continue
+                    if iid in posted_ids:
+                        continue
+                    sched = _parse_iso8601_to_epoch(str(it.get('scheduled_at', '')).strip())
+                    if sched is None:
+                        continue
+                    if sched <= now:
+                        due.append(it)
+                    else:
+                        upcoming.append((sched, it))
+                except Exception:
+                    continue
 
     # Log summary so it's clear why nothing posted
     try:
