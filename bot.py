@@ -1406,7 +1406,7 @@ def _create_and_pin_weekly_post_if_due() -> None:
 
         # Build title and body
         tarih = time.strftime("%d.%m.%Y", lt)
-        title = f"{SCHEDULED_PIN_TITLE_PREFIX}{tarih})"
+        title = f"{SCHEDULED_PIN_TITLE_PREFIX}{tarih}"
         body = (
             "**Hoş geldiniz!**\n\n"
             "Bu başlık, takım/oyuncu bulmanızı kolaylaştırmak amacıyla oluşturulmuştur. Eğer birlikte oyun oynayabileceğiniz yeni kişiler arıyorsanız doğru yerdesiniz! Aşağıda belirtildiği şekilde yorum yaparak takım arkadaşı arayabilirsiniz. Böylece benzer oyunlara ve tercihlere sahip oyuncular kolayca bir araya gelebilir.\n\n"
