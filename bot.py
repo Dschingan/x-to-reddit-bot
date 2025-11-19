@@ -261,19 +261,67 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 USE_DB_FOR_POSTED_IDS = bool(DATABASE_URL)
 # If true, bot MUST have DB; otherwise exit instead of using file fallback
 FAIL_IF_DB_UNAVAILABLE = os.getenv("FAIL_IF_DB_UNAVAILABLE", "true").lower() == "true"
-
-# Retention and dedupe configuration
 # How many posted tweet IDs to retain in storage (DB/file)
 POSTED_IDS_RETENTION = int(os.getenv("POSTED_IDS_RETENTION", "200"))
+# Age-based pruning to keep DB tiny on free tiers
+POSTED_IDS_MAX_AGE_DAYS = int(os.getenv("POSTED_IDS_MAX_AGE_DAYS", "7") or 7)
 # If enabled, skip any tweet with id <= last seen numeric id at startup/runtime
 HIGH_WATERMARK_ENABLED = os.getenv("HIGH_WATERMARK_ENABLED", "true").lower() == "true"
 # Runtime-level dedupe: keep a memory set of IDs posted during this process lifetime
 RUNTIME_POSTED_IDS: set[str] = set()
 
+# --- Per-ID lock helpers (cross-run/process guard) ---
+_ID_LOCK_DIR = os.path.join(os.getcwd(), ".locks")
+_ID_LOCK_TTL_SECONDS = int(os.getenv("ID_LOCK_TTL_SECONDS", "7200") or 7200)  # 2 hours default
+
+def _ensure_lock_dir():
+    try:
+        if not os.path.exists(_ID_LOCK_DIR):
+            os.makedirs(_ID_LOCK_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+def _lock_path_for(iid: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(iid))
+    return os.path.join(_ID_LOCK_DIR, f"{safe}.lock")
+
+def _acquire_id_lock(iid: str) -> bool:
+    """Atomically create a lock file to prevent duplicate work. Honors TTL for stale locks."""
+    try:
+        _ensure_lock_dir()
+        lp = _lock_path_for(iid)
+        now = int(time.time())
+        if os.path.exists(lp):
+            try:
+                st = os.stat(lp)
+                if (now - int(st.st_mtime)) < _ID_LOCK_TTL_SECONDS:
+                    return False
+                # Stale lock: remove
+                os.remove(lp)
+            except Exception:
+                return False
+        fd = os.open(lp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, f"pid={os.getpid()} time={now}\n".encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+    except Exception:
+        return False
+
+def _release_id_lock(iid: str) -> None:
+    try:
+        lp = _lock_path_for(iid)
+        if os.path.exists(lp):
+            os.remove(lp)
+    except Exception:
+        pass
+
 # Translate cache (avoid repeated Gemini calls for identical input)
 TRANSLATE_CACHE_MAX = int(os.getenv("TRANSLATE_CACHE_MAX", "500"))
 try:
     from collections import OrderedDict
+    OrderedDict = dict  # very rare fallback; order eviction won't be perfect
 except Exception:
     OrderedDict = dict  # very rare fallback; order eviction won't be perfect
 TRANSLATE_CACHE = OrderedDict()
@@ -549,6 +597,7 @@ async def init_twscrape_api():
             else:
                 print("[DIAG] accounts tablosu bulunamadı (DB boş olabilir)")
             conn.close()
+
         except Exception as de:
             print(f"[DIAG] accounts DB inceleme hatası: {de}")
         try:
@@ -1196,8 +1245,30 @@ def process_external_due_items(posted_tweet_ids=None):
                     print("[MANIFEST] Geçerli medya bulunamadı (ne video ne resim)")
                     continue
 
+                # Cross-process lock to avoid concurrent reposts
+                lock_ok = _acquire_id_lock(iid)
+                if not lock_ok:
+                    try:
+                        print(f"[MANIFEST] Kilit alınamadı, atlanıyor: {iid}")
+                    except Exception:
+                        pass
+                    continue
+
                 media_files: list[str] = []
                 try:
+                    # DB-backed idempotent claim (prevents cross-instance duplicates)
+                    try:
+                        if not claim_posted_tweet_id_if_new(iid):
+                            print(f"[CLAIM] Zaten rezerve, atlanıyor: {iid}")
+                            continue
+                        # Also mark runtime
+                        try:
+                            RUNTIME_POSTED_IDS.add(iid)
+                            posted_ids.add(iid)
+                        except Exception:
+                            pass
+                    except Exception as _cl_e:
+                        print(f"[UYARI] Claim başarısız (devam ediliyor): {_cl_e}")
                     # Download media
                     for m_idx, m in enumerate(chosen_media):
                         try:
@@ -1251,6 +1322,10 @@ def process_external_due_items(posted_tweet_ids=None):
                 except Exception as e:
                     print(f"[UYARI] Manifest öğesi işlenirken hata ({iid}): {e}")
                 finally:
+                    try:
+                        _release_id_lock(iid)
+                    except Exception:
+                        pass
                     for fp in media_files:
                         try:
                             if os.path.exists(fp):
@@ -1323,8 +1398,30 @@ def process_external_due_items(posted_tweet_ids=None):
             print("[MANIFEST] Geçerli medya bulunamadı (ne video ne resim)")
             continue
 
+        # Cross-process lock to avoid concurrent reposts
+        lock_ok = _acquire_id_lock(iid)
+        if not lock_ok:
+            try:
+                print(f"[MANIFEST] Kilit alınamadı, atlanıyor: {iid}")
+            except Exception:
+                pass
+            continue
+
         media_files: list[str] = []
         try:
+            # DB-backed idempotent claim (prevents cross-instance duplicates)
+            try:
+                if not claim_posted_tweet_id_if_new(iid):
+                    print(f"[CLAIM] Zaten rezerve, atlanıyor: {iid}")
+                    continue
+                # Also mark runtime immediately
+                try:
+                    RUNTIME_POSTED_IDS.add(iid)
+                    posted_ids.add(iid)
+                except Exception:
+                    pass
+            except Exception as _cl_e:
+                print(f"[UYARI] Claim başarısız (devam ediliyor): {_cl_e}")
             # Download media
             for idx, m in enumerate(chosen_media):
                 try:
@@ -1349,11 +1446,24 @@ def process_external_due_items(posted_tweet_ids=None):
             # Submit
             if not title:
                 title = f"Manifest Item {iid}"
+            # Final guard just before submit
+            try:
+                if iid in posted_ids or iid in RUNTIME_POSTED_IDS:
+                    print(f"[MANIFEST] Son anda tekrar tespit edildi, atlandı: {iid}")
+                    continue
+            except Exception:
+                pass
             ok = submit_post(title, media_files, original_tweet_text=body, remainder_text="")
             if ok:
                 print(f"[+] Manifest öğesi gönderildi: {iid}")
                 try:
                     save_posted_tweet_id(iid)
+                except Exception:
+                    pass
+                # Update runtime memory to immediately block any future attempt
+                try:
+                    RUNTIME_POSTED_IDS.add(iid)
+                    posted_ids.add(iid)
                 except Exception:
                     pass
                 seen_ids.add(iid)
@@ -1365,6 +1475,10 @@ def process_external_due_items(posted_tweet_ids=None):
         except Exception as e:
             print(f"[UYARI] Manifest öğesi işlenirken hata ({iid}): {e}")
         finally:
+            try:
+                _release_id_lock(iid)
+            except Exception:
+                pass
             # Clean up downloaded files
             for fp in media_files:
                 try:
@@ -1910,7 +2024,7 @@ def _resolve_flair_id_for_subreddit(subreddit_name: str, flair_id: str | None, f
         return None
 
 def select_flair_with_ai(title, original_tweet_text="", has_video: bool = False):
-    """AI ile otomatik flair seçimi"""
+    """AI ile otomatik flair seçimi (retry + circuit breaker, asla bloklamaz)"""
     print("[+] AI ile flair seçimi başlatılıyor...")
     print(f"[DEBUG] Başlık: {title}")
     print(f"[DEBUG] Orijinal tweet: {original_tweet_text[:100]}..." if original_tweet_text else "[DEBUG] Orijinal tweet yok")
@@ -1944,8 +2058,34 @@ def select_flair_with_ai(title, original_tweet_text="", has_video: bool = False)
     selected_flair_id = FLAIR_OPTIONS[selected_flair]
     print(f"[+] Kural tabanlı flair seçimi: {selected_flair} (ID: {selected_flair_id})")
     
-    # OpenAI API'yi dene (opsiyonel)
+    # OpenAI/Gemini AI'yi dene (opsiyonel)
     try:
+        # Global toggles and CB state
+        AI_FLAIR_ENABLED = os.getenv("AI_FLAIR_ENABLED", "true").strip().lower() == "true"
+        AI_FLAIR_TIMEOUT_SECONDS = int(os.getenv("AI_FLAIR_TIMEOUT_SECONDS", "10") or 10)
+        AI_FLAIR_MAX_RETRIES = int(os.getenv("AI_FLAIR_MAX_RETRIES", "3") or 3)
+        AI_FLAIR_CIRCUIT_BREAKER_FAILS = int(os.getenv("AI_FLAIR_CIRCUIT_BREAKER_FAILS", "3") or 3)
+        AI_FLAIR_CIRCUIT_BREAKER_COOLDOWN = int(os.getenv("AI_FLAIR_CIRCUIT_BREAKER_COOLDOWN", "600") or 600)
+
+        # Circuit breaker globals
+        global _AI_CB_FAILS, _AI_CB_UNTIL
+        try:
+            _AI_CB_FAILS
+        except NameError:
+            _AI_CB_FAILS = 0
+        try:
+            _AI_CB_UNTIL
+        except NameError:
+            _AI_CB_UNTIL = 0
+
+        now_ts = int(time.time())
+        if not AI_FLAIR_ENABLED:
+            print("[INFO] AI_FLAIR_ENABLED=false, kural tabanlı seçim kullanılacak")
+            return selected_flair_id
+        if now_ts < _AI_CB_UNTIL:
+            print(f"[INFO] AI circuit breaker aktif ({_AI_CB_UNTIL - now_ts}s), kural tabanlı seçim kullanılacak")
+            return selected_flair_id
+
         # API key kontrolü
         ai_api_key = os.getenv("OPENAI_API_KEY")
         if not ai_api_key:
@@ -2039,39 +2179,46 @@ Sadece flair adını yaz (örnek: Haberler). Başka bir şey yazma."""
                 "Content-Type": "application/json"
             }
             
-            print("[+] OpenAI API çağrısı yapılıyor...")
-            response = requests.post(url, json=payload, headers=headers, timeout=15)
-            
-            print(f"[DEBUG] API Response Status: {response.status_code}")
-            
-            if response.status_code != 200:
-                print(f"[!] OpenAI API hatası (Status: {response.status_code}): {response.text}")
-                print(f"[+] Kural tabanlı seçim kullanılıyor: {selected_flair}")
-                return selected_flair_id
-            
-            result = response.json()
-            print(f"[DEBUG] OpenAI Response: {result}")
-            
-            # AI yanıtını al
-            if "choices" in result and len(result["choices"]) > 0:
-                ai_suggestion = result["choices"][0]["message"]["content"].strip()
-                print(f"[+] AI flair önerisi: {ai_suggestion}")
-                
-                # Flair adını temizle ve kontrol et
-                ai_suggestion_clean = ai_suggestion.replace(".", "").replace(":", "").strip()
-                
-                # Flair seçeneklerinde ara
-                for flair_name, flair_id in FLAIR_OPTIONS.items():
-                    if flair_name.lower() in ai_suggestion_clean.lower() or ai_suggestion_clean.lower() in flair_name.lower():
-                        print(f"[+] AI seçilen flair: {flair_name} (ID: {flair_id})")
-                        return flair_id
-                
-                # Tam eşleşme bulunamazsa, kural tabanlı seçimi kullan
-                print(f"[!] AI önerisi eşleşmedi ({ai_suggestion_clean}), kural tabanlı seçim kullanılıyor: {selected_flair}")
-                return selected_flair_id
-            else:
-                print("[!] AI yanıtı alınamadı, kural tabanlı seçim kullanılıyor")
-                return selected_flair_id
+            # Simple retry with backoff
+            last_err = None
+            for attempt in range(1, AI_FLAIR_MAX_RETRIES + 1):
+                try:
+                    print(f"[+] OpenAI API çağrısı yapılıyor... (deneme {attempt}/{AI_FLAIR_MAX_RETRIES})")
+                    response = requests.post(url, json=payload, headers=headers, timeout=AI_FLAIR_TIMEOUT_SECONDS)
+                    print(f"[DEBUG] API Response Status: {response.status_code}")
+                    if response.status_code != 200:
+                        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
+                    result = response.json()
+                    print(f"[DEBUG] OpenAI Response: {result}")
+                    if "choices" in result and len(result["choices"]) > 0:
+                        ai_suggestion = result["choices"][0]["message"]["content"].strip()
+                        print(f"[+] AI flair önerisi: {ai_suggestion}")
+                        ai_suggestion_clean = ai_suggestion.replace(".", "").replace(":", "").strip()
+                        for flair_name, flair_id in FLAIR_OPTIONS.items():
+                            if flair_name.lower() in ai_suggestion_clean.lower() or ai_suggestion_clean.lower() in flair_name.lower():
+                                print(f"[+] AI seçilen flair: {flair_name} (ID: {flair_id})")
+                                _AI_CB_FAILS = 0
+                                _AI_CB_UNTIL = 0
+                                return flair_id
+                        print(f"[!] AI önerisi eşleşmedi ({ai_suggestion_clean}), kural tabanlı seçim kullanılıyor: {selected_flair}")
+                        _AI_CB_FAILS = 0
+                        _AI_CB_UNTIL = 0
+                        return selected_flair_id
+                    else:
+                        raise RuntimeError("Boş AI yanıtı")
+                except Exception as e_try:
+                    last_err = e_try
+                    print(f"[UYARI] OpenAI denemesi başarısız: {e_try}")
+                    if attempt < AI_FLAIR_MAX_RETRIES:
+                        sleep_s = min(5, 0.5 * (2 ** (attempt - 1)))
+                        time.sleep(sleep_s)
+            # All retries failed -> trip circuit breaker
+            _AI_CB_FAILS = (_AI_CB_FAILS + 1) if isinstance(_AI_CB_FAILS, int) else 1
+            if _AI_CB_FAILS >= AI_FLAIR_CIRCUIT_BREAKER_FAILS:
+                _AI_CB_UNTIL = int(time.time()) + AI_FLAIR_CIRCUIT_BREAKER_COOLDOWN
+                print(f"[UYARI] AI circuit breaker tetiklendi, {AI_FLAIR_CIRCUIT_BREAKER_COOLDOWN}s devre dışı (son hata: {last_err})")
+            print(f"[+] Kural tabanlı seçim kullanılıyor: {selected_flair}")
+            return selected_flair_id
                 
     except requests.exceptions.Timeout:
         print("[!] AI API timeout, kural tabanlı seçim kullanılıyor")
@@ -3166,6 +3313,22 @@ def submit_post(title, media_files, original_tweet_text="", remainder_text: str 
     title = _sanitize_for_reddit(title or "")
     remainder_text = _sanitize_for_reddit(remainder_text or "")
     
+    # Stateless duplicate guard: if an identical title by this bot was posted recently, skip
+    try:
+        sr_obj = subreddit
+        for s in sr_obj.new(limit=20):
+            try:
+                author_name = getattr(s.author, 'name', '') or ''
+            except Exception:
+                author_name = ''
+            s_title = getattr(s, 'title', '') or ''
+            if author_name.lower() == (REDDIT_USERNAME or '').lower() and s_title == title:
+                print(f"[DEDUP] Aynı başlık yakın zamanda mevcut, gönderim atlandı: {title}")
+                return True
+    except Exception as scan_e:
+        # Non-fatal: continue with submission if scanning fails
+        print(f"[UYARI] Dedupe taraması yapılamadı: {scan_e}")
+    
     # Medya dosyalarını türlerine göre ayır
     image_files = []
     video_files = []
@@ -3425,6 +3588,74 @@ def load_posted_tweet_ids():
     
     return posted_ids
 
+def claim_posted_tweet_id_if_new(tweet_id: str) -> bool:
+    """Idempotent, cross-instance 'claim'.
+    DB mode: INSERT ... ON CONFLICT DO NOTHING; True if inserted, False if already present.
+    File fallback: best-effort check+append (not atomic), returns True if newly added.
+    We intentionally DO NOT release on failures to avoid duplicates.
+    """
+    tid = str(tweet_id).strip()
+    if not tid:
+        return False
+    if USE_DB_FOR_POSTED_IDS:
+        try:
+            _ensure_posted_ids_table()
+            # Try to insert; if conflict -> already claimed
+            conn = _db_connect()
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO posted_tweet_ids (id) VALUES (%s) ON CONFLICT (id) DO NOTHING RETURNING id",
+                            (int(tid),)
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            print(f"[CLAIM] (DB) ID rezerve edildi: {tid}")
+                            # Opportunistic prune to keep DB tiny
+                            try:
+                                _db_prune_posted_ids_keep_latest(POSTED_IDS_RETENTION)
+                            except Exception:
+                                pass
+                            try:
+                                _db_prune_posted_ids_by_age(POSTED_IDS_MAX_AGE_DAYS)
+                            except Exception:
+                                pass
+                            return True
+                        else:
+                            print(f"[CLAIM] (DB) ID zaten mevcut, atlanacak: {tid}")
+                            return False
+            finally:
+                conn.close()
+        except Exception as e:
+            if FAIL_IF_DB_UNAVAILABLE:
+                raise RuntimeError(f"DB gerekli ancak erişilemedi (claim): {e}")
+            print(f"[UYARI] (DB) claim başarısız, dosya moduna düşülecek: {e}")
+    # File fallback (best-effort)
+    try:
+        path = "posted_tweet_ids.txt"
+        existing = set()
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                for ln in f:
+                    ln = (ln or '').strip()
+                    if ln:
+                        existing.add(ln)
+        if tid in existing:
+            print(f"[CLAIM] (File) ID zaten mevcut, atlanacak: {tid}")
+            return False
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(f"{tid}\n")
+        print(f"[CLAIM] (File) ID rezerve edildi: {tid}")
+        try:
+            _file_prune_posted_ids_keep_latest(path, POSTED_IDS_RETENTION)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        print(f"[UYARI] (File) claim hatası: {e}")
+        return False
+
 def save_posted_tweet_id(tweet_id):
     """Yeni gönderilmiş tweet ID'sini veritabanına veya dosyaya kaydet"""
     # 1) Veritabanı kullanılabiliyorsa önce DB'ye yaz
@@ -3437,6 +3668,10 @@ def save_posted_tweet_id(tweet_id):
                 _db_prune_posted_ids_keep_latest(POSTED_IDS_RETENTION)
             except Exception as _prune_e:
                 print(f"[UYARI] (DB) Prune başarısız: {_prune_e}")
+            try:
+                _db_prune_posted_ids_by_age(POSTED_IDS_MAX_AGE_DAYS)
+            except Exception as _age_e:
+                print(f"[UYARI] (DB) Age prune başarısız: {_age_e}")
             print(f"[+] (DB) Tweet ID kaydedildi: {tweet_id}")
             return
         except Exception as e:
@@ -3483,6 +3718,27 @@ def _db_prune_posted_ids_keep_latest(limit: int = 8):
                     )
                     """,
                     (limit,),
+                )
+    finally:
+        conn.close()
+
+def _db_prune_posted_ids_by_age(max_age_days: int = 7):
+    """posted_tweet_ids: 'max_age_days' gün ve daha eski kayıtları sil."""
+    try:
+        if max_age_days <= 0:
+            return
+    except Exception:
+        return
+    conn = _db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM posted_tweet_ids
+                    WHERE created_at < NOW() - INTERVAL '%s days'
+                    """,
+                    (max_age_days,)
                 )
     finally:
         conn.close()
@@ -3556,6 +3812,27 @@ def _db_prune_posted_retweets_keep_latest(limit: int = 3):
     finally:
         conn.close()
 
+def _db_prune_posted_retweets_by_age(max_age_days: int = 7):
+    """posted_retweet_ids: yaşa göre temizlik."""
+    try:
+        if max_age_days <= 0:
+            return
+    except Exception:
+        return
+    conn = _db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM posted_retweet_ids
+                    WHERE created_at < NOW() - INTERVAL '%s days'
+                    """,
+                    (max_age_days,)
+                )
+    finally:
+        conn.close()
+
 def _file_prune_posted_retweets_keep_latest(file_path: str = "posted_retweet_ids.txt", limit: int = 3):
     try:
         if not os.path.exists(file_path):
@@ -3582,6 +3859,10 @@ def save_posted_retweet_id(tweet_id):
                 _db_prune_posted_retweets_keep_latest(3)
             except Exception as _rt_prune_e:
                 print(f"[UYARI] (DB) RT prune başarısız: {_rt_prune_e}")
+            try:
+                _db_prune_posted_retweets_by_age(POSTED_IDS_MAX_AGE_DAYS)
+            except Exception as _rt_age_e:
+                print(f"[UYARI] (DB) RT age prune başarısız: {_rt_age_e}")
             print(f"[+] (DB) RT ID kaydedildi: {tweet_id}")
             return
         except Exception as e:
