@@ -1261,12 +1261,6 @@ def process_external_due_items(posted_tweet_ids=None):
                         if not claim_posted_tweet_id_if_new(iid):
                             print(f"[CLAIM] Zaten rezerve, atlanıyor: {iid}")
                             continue
-                        # Also mark runtime
-                        try:
-                            RUNTIME_POSTED_IDS.add(iid)
-                            posted_ids.add(iid)
-                        except Exception:
-                            pass
                     except Exception as _cl_e:
                         print(f"[UYARI] Claim başarısız (devam ediliyor): {_cl_e}")
                     # Download media
@@ -1414,12 +1408,6 @@ def process_external_due_items(posted_tweet_ids=None):
                 if not claim_posted_tweet_id_if_new(iid):
                     print(f"[CLAIM] Zaten rezerve, atlanıyor: {iid}")
                     continue
-                # Also mark runtime immediately
-                try:
-                    RUNTIME_POSTED_IDS.add(iid)
-                    posted_ids.add(iid)
-                except Exception:
-                    pass
             except Exception as _cl_e:
                 print(f"[UYARI] Claim başarısız (devam ediliyor): {_cl_e}")
             # Download media
