@@ -3,7 +3,7 @@ Kapsamlı Admin Paneli - .env Parametrelerini Yönetme
 Profesyonel, kolay anlaşılır ve tam özellikli admin arayüzü
 """
 
-from fastapi import Request, UploadFile, File
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 import os
 import json
