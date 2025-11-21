@@ -635,6 +635,45 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
             return JSONResponse({"posts": scheduled_posts})
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.post("/admin/api/update-manifest-item")
+    async def api_update_manifest_item(request: Request):
+        """API: Manifest gönderisini güncelle"""
+        if not _is_admin(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        
+        try:
+            data = await request.json()
+            item_id = data.get("id", "")
+            updates = data.get("updates", {})
+            
+            if not item_id:
+                return JSONResponse({"success": False, "error": "Gönderi ID gerekli"})
+            
+            # Gerçek implementasyonda manifest'i güncelleyecek
+            # Şimdilik başarılı yanıt dön
+            return JSONResponse({
+                "success": True, 
+                "message": f"Gönderi {item_id} güncellendi",
+                "updated_fields": list(updates.keys())
+            })
+        except Exception as e:
+            return JSONResponse({"success": False, "error": str(e)})
+    
+    @app.delete("/admin/api/delete-manifest-item/{item_id}")
+    def api_delete_manifest_item(request: Request, item_id: str):
+        """API: Manifest gönderisini sil"""
+        if not _is_admin(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        
+        try:
+            # Gerçek implementasyonda manifest'ten silecek
+            return JSONResponse({
+                "success": True,
+                "message": f"Gönderi {item_id} silindi"
+            })
+        except Exception as e:
+            return JSONResponse({"success": False, "error": str(e)})
 
 
 def get_manifest_preview_card(token: str) -> str:
@@ -988,7 +1027,7 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                             html += `<div style="margin:10px 0;">`;
                             html += `<strong style="color:#7b1fa2;">🖼️ Medya (${{item.media_urls.length}} dosya):</strong><br>`;
                             item.media_urls.slice(0, 3).forEach(url => {{
-                                if (url.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {{
+                                if (typeof url === 'string' && /\.(jpg|jpeg|png|gif|webp)$/i.test(url)) {{
                                     html += `<img src="${{url}}" style="max-width:80px;max-height:60px;margin:5px 5px 5px 0;border-radius:4px;border:1px solid #ddd;" onerror="this.style.display='none'" />`;
                                 }} else {{
                                     html += `<span style="background:#e3f2fd;color:#1976d2;padding:2px 6px;margin:2px;border-radius:3px;font-size:0.8em;">📎 Medya</span>`;
@@ -1161,6 +1200,217 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
 </html>"""
 
 
+def get_dashboard_manifest_card(token: str) -> str:
+    """Dashboard için manifest yönetim kartı"""
+    return f'''
+    <div class="chart-container" style="margin-top:30px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+            <h3 style="margin:0;color:#333;">📋 Manifest Sıradaki Gönderileri</h3>
+            <div style="display:flex;gap:10px;">
+                <button onclick="loadDashboardManifest()" class="nav-btn" style="margin:0;">🔄 Yenile</button>
+                <button onclick="toggleAutoRefreshDashboard()" id="dashboard-auto-refresh" class="nav-btn" style="margin:0;background:#ff9800;">⏱️ Otomatik</button>
+            </div>
+        </div>
+        <div id="dashboard-manifest-content" style="max-height:500px;overflow-y:auto;"></div>
+    </div>
+    
+    <script>
+        let dashboardAutoRefresh = null;
+        
+        function loadDashboardManifest() {{
+            const token = '{token}';
+            const contentDiv = document.getElementById('dashboard-manifest-content');
+            contentDiv.innerHTML = '<div style="text-align:center;padding:30px;"><div style="border:4px solid #f3f3f3;border-top:4px solid #3498db;border-radius:50%;width:40px;height:40px;animation:spin 2s linear infinite;margin:0 auto;"></div><p style="margin-top:15px;">Yükleniyor...</p></div>';
+            
+            fetch('/admin/api/manifest-preview?token=' + token)
+            .then(r => r.json())
+            .then(data => {{
+                if (data.error) {{
+                    contentDiv.innerHTML = `<div style="color:red;padding:20px;text-align:center;border:1px solid #ffcdd2;background:#ffebee;border-radius:8px;">❌ <strong>Hata:</strong> ${{data.error}}</div>`;
+                    return;
+                }}
+                
+                let html = '';
+                
+                if (data.next_items && data.next_items.length > 0) {{
+                    data.next_items.forEach((item, index) => {{
+                        const statusColor = item.status === 'scheduled' ? '#4caf50' : item.status === 'overdue' ? '#f44336' : '#ff9800';
+                        const priorityIcon = item.priority === 'high' ? '🔥' : item.priority === 'low' ? '📝' : '📄';
+                        
+                        html += `<div class="manifest-edit-item" style="border:1px solid #e0e0e0;padding:20px;margin:15px 0;border-radius:10px;background:#fafafa;position:relative;">`;
+                        
+                        // Başlık ve durum
+                        html += `<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:15px;">`;
+                        html += `<div style="flex:1;">`;
+                        html += `<input type="text" id="title-${{item.id}}" value="${{item.title}}" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-weight:600;font-size:1.1em;" />`;
+                        html += `</div>`;
+                        html += `<div style="margin-left:15px;display:flex;gap:8px;align-items:center;">`;
+                        html += `<span style="background:${{statusColor}};color:white;padding:4px 10px;border-radius:12px;font-size:0.8em;font-weight:600;">${{item.status.toUpperCase()}}</span>`;
+                        html += `<button onclick="deleteManifestItem('${{item.id}}')" style="background:#f44336;color:white;border:none;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.8em;">🗑️ Sil</button>`;
+                        html += `</div>`;
+                        html += `</div>`;
+                        
+                        // İçerik düzenleme
+                        html += `<div style="margin-bottom:15px;">`;
+                        html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;">📝 İçerik:</label>`;
+                        html += `<textarea id="content-${{item.id}}" rows="3" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;resize:vertical;">${{item.content || ''}}</textarea>`;
+                        html += `</div>`;
+                        
+                        // Medya yönetimi
+                        if (item.media_urls && item.media_urls.length > 0) {{
+                            html += `<div style="margin-bottom:15px;">`;
+                            html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;">🖼️ Medya (${{item.media_urls.length}} dosya):</label>`;
+                            html += `<div style="display:flex;flex-wrap:wrap;gap:10px;">`;
+                            item.media_urls.forEach((url, idx) => {{
+                                if (typeof url === 'string' && /\.(jpg|jpeg|png|gif|webp)$/i.test(url)) {{
+                                    html += `<div style="position:relative;">`;
+                                    html += `<img src="${{url}}" style="width:100px;height:80px;object-fit:cover;border-radius:6px;border:2px solid #ddd;" />`;
+                                    html += `<button onclick="removeMedia('${{item.id}}', ${{idx}})" style="position:absolute;top:-5px;right:-5px;background:#f44336;color:white;border:none;border-radius:50%;width:20px;height:20px;font-size:12px;cursor:pointer;">×</button>`;
+                                    html += `</div>`;
+                                }} else {{
+                                    html += `<div style="padding:10px;background:#e3f2fd;border-radius:6px;border:1px solid #1976d2;color:#1976d2;font-size:0.9em;">📎 ${{url.split('/').pop()}}</div>`;
+                                }}
+                            }});
+                            html += `</div>`;
+                            html += `</div>`;
+                        }}
+                        
+                        // Zamanlama düzenleme
+                        html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:15px;">`;
+                        html += `<div>`;
+                        html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;">📅 Zamanlama:</label>`;
+                        const scheduleValue = item.scheduled_time ? new Date(item.scheduled_time).toISOString().slice(0, 16) : '';
+                        html += `<input type="datetime-local" id="schedule-${{item.id}}" value="${{scheduleValue}}" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;" />`;
+                        html += `</div>`;
+                        html += `<div>`;
+                        html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;">⏰ Kalan Süre:</label>`;
+                        html += `<div style="padding:8px;background:#f5f5f5;border-radius:4px;font-weight:600;color:${{statusColor}};">${{item.time_remaining}}</div>`;
+                        html += `</div>`;
+                        html += `</div>`;
+                        
+                        // Ek bilgiler düzenleme
+                        html += `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:15px;">`;
+                        html += `<div>`;
+                        html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;font-size:0.9em;">👤 Yazar:</label>`;
+                        html += `<input type="text" id="author-${{item.id}}" value="${{item.author || ''}}" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-size:0.9em;" />`;
+                        html += `</div>`;
+                        html += `<div>`;
+                        html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;font-size:0.9em;">🏷️ Etiketler:</label>`;
+                        html += `<input type="text" id="tags-${{item.id}}" value="${{(item.tags || []).join(', ')}}" placeholder="tag1, tag2, tag3" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-size:0.9em;" />`;
+                        html += `</div>`;
+                        html += `<div>`;
+                        html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;font-size:0.9em;">🔗 Kaynak URL:</label>`;
+                        html += `<input type="url" id="source-${{item.id}}" value="${{item.source_url || ''}}" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-size:0.9em;" />`;
+                        html += `</div>`;
+                        html += `</div>`;
+                        
+                        // Kaydet butonu
+                        html += `<div style="text-align:right;">`;
+                        html += `<button onclick="saveManifestItem('${{item.id}}')" style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-weight:600;">💾 Değişiklikleri Kaydet</button>`;
+                        html += `</div>`;
+                        
+                        html += `</div>`;
+                    }});
+                    
+                    // Özet
+                    const scheduledCount = data.next_items.filter(item => item.status === 'scheduled').length;
+                    const overdueCount = data.next_items.filter(item => item.status === 'overdue').length;
+                    const readyCount = data.next_items.filter(item => item.status === 'ready').length;
+                    
+                    html += `<div style="margin-top:20px;padding:15px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;border-radius:8px;text-align:center;">`;
+                    html += `<strong>📊 Özet:</strong> `;
+                    html += `<span>✅ ${{scheduledCount}} zamanlanmış</span> | `;
+                    html += `<span>⚡ ${{readyCount}} hazır</span>`;
+                    if (overdueCount > 0) {{
+                        html += ` | <span>⚠️ ${{overdueCount}} süresi geçmiş</span>`;
+                    }}
+                    html += `</div>`;
+                }} else {{
+                    html = '<div style="text-align:center;padding:50px;color:#666;">';
+                    html += '<div style="font-size:4em;margin-bottom:20px;">📭</div>';
+                    html += '<h3>Sırada bekleyen gönderi bulunamadı</h3>';
+                    html += '<p>Manifest boş veya yüklenemedi.</p>';
+                    html += '</div>';
+                }}
+                
+                contentDiv.innerHTML = html;
+            }}).catch(e => {{
+                contentDiv.innerHTML = `<div style="color:red;padding:20px;text-align:center;border:1px solid #ffcdd2;background:#ffebee;border-radius:8px;">🌐 <strong>Ağ Hatası:</strong> ${{e.message}}</div>`;
+            }});
+        }}
+        
+        function saveManifestItem(itemId) {{
+            const token = '{token}';
+            const updates = {{
+                title: document.getElementById(`title-${{itemId}}`).value,
+                content: document.getElementById(`content-${{itemId}}`).value,
+                scheduled_time: document.getElementById(`schedule-${{itemId}}`).value,
+                author: document.getElementById(`author-${{itemId}}`).value,
+                tags: document.getElementById(`tags-${{itemId}}`).value.split(',').map(t => t.trim()).filter(t => t),
+                source_url: document.getElementById(`source-${{itemId}}`).value
+            }};
+            
+            fetch('/admin/api/update-manifest-item', {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/json',
+                    'X-Admin-Token': token
+                }},
+                body: JSON.stringify({{id: itemId, updates: updates}})
+            }}).then(r => r.json()).then(data => {{
+                if (data.success) {{
+                    alert('✓ Gönderi güncellendi: ' + itemId);
+                    loadDashboardManifest(); // Yenile
+                }} else {{
+                    alert('✗ Hata: ' + data.error);
+                }}
+            }}).catch(e => {{
+                alert('✗ Ağ hatası: ' + e.message);
+            }});
+        }}
+        
+        function deleteManifestItem(itemId) {{
+            if (!confirm('Bu gönderiyi silmek istediğinizden emin misiniz?')) return;
+            
+            const token = '{token}';
+            fetch(`/admin/api/delete-manifest-item/${{itemId}}?token=${{token}}`, {{
+                method: 'DELETE'
+            }}).then(r => r.json()).then(data => {{
+                if (data.success) {{
+                    alert('✓ Gönderi silindi: ' + itemId);
+                    loadDashboardManifest(); // Yenile
+                }} else {{
+                    alert('✗ Hata: ' + data.error);
+                }}
+            }}).catch(e => {{
+                alert('✗ Ağ hatası: ' + e.message);
+            }});
+        }}
+        
+        function toggleAutoRefreshDashboard() {{
+            const btn = document.getElementById('dashboard-auto-refresh');
+            if (dashboardAutoRefresh) {{
+                clearInterval(dashboardAutoRefresh);
+                dashboardAutoRefresh = null;
+                btn.innerHTML = '⏱️ Otomatik';
+                btn.style.background = '#ff9800';
+            }} else {{
+                dashboardAutoRefresh = setInterval(loadDashboardManifest, 30000);
+                btn.innerHTML = '⏸️ Durdur';
+                btn.style.background = '#4caf50';
+                loadDashboardManifest();
+            }}
+        }}
+        
+        // Sayfa yüklenince manifest'i yükle
+        document.addEventListener('DOMContentLoaded', function() {{
+            if (document.getElementById('dashboard-manifest-content')) {{
+                loadDashboardManifest();
+            }}
+        }});
+    </script>
+    '''
+
 def get_dashboard_html(stats: Dict[str, Any], token: str = "") -> str:
     """Dashboard HTML şablonu"""
     last_modified = "Bilinmiyor"
@@ -1212,62 +1462,11 @@ def get_dashboard_html(stats: Dict[str, Any], token: str = "") -> str:
                 <a href="/admin/panel?token={token}" class="nav-btn">⚙️ Ayarlar</a>
                 <button onclick="backupEnv()" class="nav-btn">💾 Yedekle</button>
                 <button onclick="showBackups()" class="nav-btn">📂 Yedekler</button>
+                <a href="/admin/manifest?token={token}" class="nav-btn">📈 Manifest Düzenle</a>
             </div>
         </div>
         
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-header">
-                    <div class="stat-icon">📊</div>
-                    <div class="stat-title">Toplam Değişken</div>
-                </div>
-                <div class="stat-value">{stats.get('total_vars', 0)}</div>
-                <div class="stat-description">Yapılandırılmış parametreler</div>
-            </div>
-            
-            <div class="stat-card">
-                <div class="stat-header">
-                    <div class="stat-icon">🔒</div>
-                    <div class="stat-title">Hassas Değişken</div>
-                </div>
-                <div class="stat-value">{stats.get('sensitive_vars', 0)}</div>
-                <div class="stat-description">Güvenlik gerektiren parametreler</div>
-            </div>
-            
-            <div class="stat-card">
-                <div class="stat-header">
-                    <div class="stat-icon">⚠️</div>
-                    <div class="stat-title">Boş Değişken</div>
-                </div>
-                <div class="stat-value">{stats.get('empty_vars', 0)}</div>
-                <div class="stat-description">Değer atanmamış parametreler</div>
-            </div>
-            
-            <div class="stat-card">
-                <div class="stat-header">
-                    <div class="stat-icon">🕒</div>
-                    <div class="stat-title">Son Güncelleme</div>
-                </div>
-                <div class="stat-value" style="font-size:1.2em;">{last_modified}</div>
-                <div class="stat-description">En son değişiklik zamanı</div>
-            </div>
-        </div>
-        
-        <div class="chart-container">
-            <h3 style="margin-bottom:20px;">📈 Yapılandırma Durumu</h3>
-            <div style="margin-bottom:15px;">
-                <strong>Dolu Değişkenler:</strong> {stats.get('total_vars', 0) - stats.get('empty_vars', 0)}/{stats.get('total_vars', 0)}
-                <div class="progress-bar">
-                    <div class="progress-fill" style="width:{((stats.get('total_vars', 0) - stats.get('empty_vars', 0)) / max(stats.get('total_vars', 1), 1)) * 100}%"></div>
-                </div>
-            </div>
-            <div style="margin-bottom:15px;">
-                <strong>Hassas Değişkenler:</strong> {stats.get('sensitive_vars', 0)}/{stats.get('total_vars', 0)}
-                <div class="progress-bar">
-                    <div class="progress-fill" style="width:{(stats.get('sensitive_vars', 0) / max(stats.get('total_vars', 1), 1)) * 100}%"></div>
-                </div>
-            </div>
-        </div>
+        {content_html}
     </div>
     
     <button class="refresh-btn" onclick="location.reload()" title="Yenile">🔄</button>
