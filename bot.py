@@ -1854,60 +1854,61 @@ def _init_fastapi():
             useq = str(USE_EXTERNAL_QUEUE).lower()
             nxt = next_human_utc
             tok = request.query_params.get('token','')
-            body = """
+            tpl = """
 <!doctype html>
 <html><head><meta charset='utf-8'><title>Bot Admin</title>
-<style>body{font-family:sans-serif;max-width:840px;margin:20px auto;padding:0 16px}button{padding:8px 12px;margin:4px}code{background:#f5f5f5;padding:2px 6px;border-radius:4px}</style>
+<style>body{{font-family:sans-serif;max-width:840px;margin:20px auto;padding:0 16px}}button{{padding:8px 12px;margin:4px}}code{{background:#f5f5f5;padding:2px 6px;border-radius:4px}}</style>
 </head><body>
 <h2>Bot Yönetim Paneli</h2>
 <p>Bu sayfa, botu Render üzerinden uzaktan kontrol etmenizi sağlar. Token olmadan erişilemez.</p>
-<p>Subreddit: <code>%s</code> | USE_EXTERNAL_QUEUE: <code>%s</code></p>
-<p>Bir sonraki planlı manifest gönderimi (UTC): <code>%s</code></p>
+<p>Subreddit: <code>{sub}</code> | USE_EXTERNAL_QUEUE: <code>{useq}</code></p>
+<p>Bir sonraki planlı manifest gönderimi (UTC): <code>{nxt}</code></p>
 <div>
-  <form method='post' action='/admin/refresh?token='><input type='hidden' name='token' value='%s'/><button>Manifest'i Yenile</button></form>
-  <form method='post' action='/admin/process_due?token='><input type='hidden' name='token' value='%s'/><button>Manifest'i Şimdi İşle (due varsa gönder)</button></form>
-  <form method='post' action='/admin/post_weekly?token='><input type='hidden' name='token' value='%s'/><button>Haftalık Sabit Gönderi (due ise oluştur)</button></form>
-  <form method='post' action='/admin/toggle_queue?token='><input type='hidden' name='token' value='%s'/><button>USE_EXTERNAL_QUEUE Aç/Kapat</button></form>
-  <form method='post' action='/admin/toggle_ignore_sched?token='><input type='hidden' name='token' value='%s'/><button>MANIFEST_IGNORE_SCHEDULE Aç/Kapat</button></form>
+  <form method='post' action='/admin/refresh?token='><input type='hidden' name='token' value='{tok}'/><button>Manifest'i Yenile</button></form>
+  <form method='post' action='/admin/process_due?token='><input type='hidden' name='token' value='{tok}'/><button>Manifest'i Şimdi İşle (due varsa gönder)</button></form>
+  <form method='post' action='/admin/post_weekly?token='><input type='hidden' name='token' value='{tok}'/><button>Haftalık Sabit Gönderi (due ise oluştur)</button></form>
+  <form method='post' action='/admin/toggle_queue?token='><input type='hidden' name='token' value='{tok}'/><button>USE_EXTERNAL_QUEUE Aç/Kapat</button></form>
+  <form method='post' action='/admin/toggle_ignore_sched?token='><input type='hidden' name='token' value='{tok}'/><button>MANIFEST_IGNORE_SCHEDULE Aç/Kapat</button></form>
 </div>
 <hr/>
 <h3>İleri Kontroller</h3>
 <div>
-  <form method='post' action='/admin/toggle_pin?token='><input type='hidden' name='token' value='%s'/><button>Haftalık Pin Aç/Kapat</button></form>
+  <form method='post' action='/admin/toggle_pin?token='><input type='hidden' name='token' value='{tok}'/><button>Haftalık Pin Aç/Kapat</button></form>
   <form method='post' action='/admin/set_pin_schedule?token=' style='margin-top:8px'>
-    <input type='hidden' name='token' value='%s'/>
+    <input type='hidden' name='token' value='{tok}'/>
     <label>Haftanın Günü (0=Pzt..6=Paz): <input name='weekday' type='number' min='-1' max='6' placeholder='4'/></label>
     <label style='margin-left:8px'>Saat (0-23): <input name='hour' type='number' min='0' max='23' placeholder='9'/></label>
     <button>Kaydet</button>
   </form>
   <form method='get' action='/admin/manifest_peek' style='margin-top:8px'>
-    <input type='hidden' name='token' value='%s'/>
+    <input type='hidden' name='token' value='{tok}'/>
     <label>Önizleme adet: <input name='limit' type='number' min='1' max='20' value='10'/></label>
     <button>Manifest Önizleme (JSON)</button>
   </form>
   <form method='post' action='/admin/post_by_id' style='margin-top:8px'>
-    <input type='hidden' name='token' value='%s'/>
+    <input type='hidden' name='token' value='{tok}'/>
     <label>Manifest ID: <input name='iid' placeholder='1991...'/></label>
     <button>Bu ID'yi Şimdi Gönder</button>
   </form>
   <form method='post' action='/admin/set_manifest_params?token=' style='margin-top:8px'>
-    <input type='hidden' name='token' value='%s'/>
+    <input type='hidden' name='token' value='{tok}'/>
     <label>Post Aralığı (saniye): <input name='post_interval' type='number' min='0' max='3600' placeholder='600'/></label>
     <label style='margin-left:8px'>Döngüde Maks Gönderi: <input name='max_per_cycle' type='number' min='1' max='10' placeholder='1'/></label>
     <button>Kaydet</button>
   </form>
   <form method='post' action='/admin/toggle_high_watermark?token=' style='margin-top:8px'>
-    <input type='hidden' name='token' value='%s'/>
+    <input type='hidden' name='token' value='{tok}'/>
     <button>High Watermark Aç/Kapat</button>
   </form>
   <div style='margin-top:8px'>
-    <a href='/admin/recent_reddit_posts?token=%s'>Son Reddit Gönderileri (JSON)</a> |
-    <a href='/admin/manifest_status?token=%s'>Manifest Durumu (JSON)</a>
+    <a href='/admin/recent_reddit_posts?token={tok}'>Son Reddit Gönderileri (JSON)</a> |
+    <a href='/admin/manifest_status?token={tok}'>Manifest Durumu (JSON)</a>
   </div>
 </div>
 <p>Token kullanımı: URL'de <code>?token=YOUR_ADMIN_TOKEN</code> veya header <code>X-Admin-Token</code>.</p>
 </body></html>
-""" % (sub, useq, nxt, tok, tok, tok, tok, tok, tok, tok, tok)
+"""
+            body = tpl.format(sub=sub, useq=useq, nxt=nxt, tok=tok)
             return HTMLResponse(body)
 
         @app.get("/admin/status")
