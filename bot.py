@@ -1213,8 +1213,15 @@ def process_external_due_items(posted_tweet_ids=None):
                     iid = str(it.get('id', '')).strip()
                     if not iid:
                         continue
+                    title_chk = (it.get('title') or '').strip()
                     if iid in posted_ids or iid in RUNTIME_POSTED_IDS:
-                        continue
+                        try:
+                            if title_chk and not _is_title_already_posted_by_bot(title_chk):
+                                pass
+                            else:
+                                continue
+                        except Exception:
+                            continue
                     media = it.get('media') or []
                     if not isinstance(media, list) or len(media) == 0:
                         continue
@@ -1285,8 +1292,15 @@ def process_external_due_items(posted_tweet_ids=None):
                     if not title:
                         title = f"Manifest Item {iid}"
                     # Final guard just before submit
-                    if iid in posted_ids or iid in RUNTIME_POSTED_IDS:
-                        print(f"[MANIFEST] Son anda tekrar tespit edildi, atlandı: {iid}")
+                    try:
+                        if iid in posted_ids or iid in RUNTIME_POSTED_IDS:
+                            if title and not _is_title_already_posted_by_bot(title):
+                                pass
+                            else:
+                                print(f"[MANIFEST] Son anda tekrar tespit edildi, atlandı: {iid}")
+                                continue
+                    except Exception:
+                        print(f"[MANIFEST] Son anda tespit hatası, atlanıyor: {iid}")
                         continue
                     ok = submit_post(title, media_files, original_tweet_text=body, remainder_text="")
                     if ok:
@@ -1334,8 +1348,15 @@ def process_external_due_items(posted_tweet_ids=None):
                     iid = str(it.get('id', '')).strip()
                     if not iid:
                         continue
+                    title_chk = (it.get('title') or '').strip()
                     if iid in posted_ids:
-                        continue
+                        try:
+                            if title_chk and not _is_title_already_posted_by_bot(title_chk):
+                                pass
+                            else:
+                                continue
+                        except Exception:
+                            continue
                     sched = _parse_iso8601_to_epoch(str(it.get('scheduled_at', '')).strip())
                     if sched is None:
                         continue
@@ -1437,10 +1458,14 @@ def process_external_due_items(posted_tweet_ids=None):
             # Final guard just before submit
             try:
                 if iid in posted_ids or iid in RUNTIME_POSTED_IDS:
-                    print(f"[MANIFEST] Son anda tekrar tespit edildi, atlandı: {iid}")
-                    continue
+                    if title and not _is_title_already_posted_by_bot(title):
+                        pass
+                    else:
+                        print(f"[MANIFEST] Son anda tekrar tespit edildi, atlandı: {iid}")
+                        continue
             except Exception:
-                pass
+                print(f"[MANIFEST] Son anda tespit hatası, atlanıyor: {iid}")
+                continue
             ok = submit_post(title, media_files, original_tweet_text=body, remainder_text="")
             if ok:
                 print(f"[+] Manifest öğesi gönderildi: {iid}")
@@ -1667,6 +1692,24 @@ def get_next_due_epoch() -> float | None:
             continue
     return next_ts
 
+# Helper: verify on Reddit if a post with the given title already exists by this bot
+def _is_title_already_posted_by_bot(title: str, limit: int = 50) -> bool:
+    try:
+        if not title:
+            return False
+        sr = reddit.subreddit(SUBREDDIT)
+        for s in sr.new(limit=limit):
+            try:
+                author_name = getattr(s.author, 'name', '') or ''
+            except Exception:
+                author_name = ''
+            s_title = getattr(s, 'title', '') or ''
+            if author_name.lower() == (REDDIT_USERNAME or '').lower() and s_title == title:
+                return True
+    except Exception:
+        pass
+    return False
+
 # Main loop
 def main_loop():
     while True:
@@ -1748,6 +1791,106 @@ def _init_fastapi():
             if request.method == "HEAD":
                 return PlainTextResponse("", status_code=200)
             return {"status": "alive"}
+
+        # --- Minimal Admin Interface ---
+        from fastapi.responses import HTMLResponse, JSONResponse
+        import os as _os
+
+        def _is_admin(request: Request) -> bool:
+            try:
+                token = request.headers.get("X-Admin-Token") or request.query_params.get("token")
+                required = _os.getenv("ADMIN_TOKEN", "")
+                return bool(required) and token == required
+            except Exception:
+                return False
+
+        @app.get("/admin", response_class=HTMLResponse)
+        def admin_dashboard(request: Request):
+            if not _is_admin(request):
+                return HTMLResponse("Unauthorized", status_code=401)
+            try:
+                from datetime import datetime
+                now_ts = time.time()
+                next_ts = get_next_due_epoch()
+                next_human_utc = datetime.utcfromtimestamp(next_ts).strftime("%Y-%m-%d %H:%M:%S") + "Z" if next_ts else "-"
+            except Exception:
+                next_human_utc = "-"
+            body = f"""
+<!doctype html>
+<html><head><meta charset='utf-8'><title>Bot Admin</title>
+<style>body{{font-family:sans-serif;max-width:840px;margin:20px auto;padding:0 16px}}button{padding:8px 12px;margin:4px}code{background:#f5f5f5;padding:2px 6px;border-radius:4px}</style>
+</head><body>
+<h2>Bot Admin</h2>
+<p>Subreddit: <code>{SUBREDDIT}</code> | USE_EXTERNAL_QUEUE: <code>{str(USE_EXTERNAL_QUEUE).lower()}</code></p>
+<p>NEXT DUE (UTC): <code>{next_human_utc}</code></p>
+<div>
+  <form method='post' action='/admin/refresh?token='><input type='hidden' name='token' value='{request.query_params.get('token','')}'/><button>Manifest Refresh</button></form>
+  <form method='post' action='/admin/process_due?token='><input type='hidden' name='token' value='{request.query_params.get('token','')}'/><button>Process Manifest Now</button></form>
+  <form method='post' action='/admin/post_weekly?token='><input type='hidden' name='token' value='{request.query_params.get('token','')}'/><button>Create Weekly Pin (if due)</button></form>
+  <form method='post' action='/admin/toggle_queue?token='><input type='hidden' name='token' value='{request.query_params.get('token','')}'/><button>Toggle USE_EXTERNAL_QUEUE</button></form>
+  <form method='post' action='/admin/toggle_ignore_sched?token='><input type='hidden' name='token' value='{request.query_params.get('token','')}'/><button>Toggle MANIFEST_IGNORE_SCHEDULE</button></form>
+</div>
+<p>Supply token via query: <code>?token=YOUR_ADMIN_TOKEN</code> or header <code>X-Admin-Token</code>.</p>
+</body></html>
+"""
+            return HTMLResponse(body)
+
+        @app.get("/admin/status")
+        def admin_status(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            try:
+                next_ts = get_next_due_epoch()
+            except Exception:
+                next_ts = None
+            return {
+                "subreddit": SUBREDDIT,
+                "use_external_queue": USE_EXTERNAL_QUEUE,
+                "manifest_ignore_schedule": MANIFEST_IGNORE_SCHEDULE,
+                "manifest_url": MANIFEST_URL,
+                "next_due_epoch": next_ts,
+            }
+
+        @app.post("/admin/refresh")
+        def admin_refresh(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            refresh_manifest()
+            return {"ok": True}
+
+        @app.post("/admin/process_due")
+        def admin_process_due(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            try:
+                posted_ids = load_posted_tweet_ids()
+            except Exception:
+                posted_ids = set()
+            res = process_external_due_items(posted_ids)
+            return {"ok": True, "next_due_ts": res}
+
+        @app.post("/admin/post_weekly")
+        def admin_post_weekly(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            _create_and_pin_weekly_post_if_due()
+            return {"ok": True}
+
+        @app.post("/admin/toggle_queue")
+        def admin_toggle_queue(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            global USE_EXTERNAL_QUEUE
+            USE_EXTERNAL_QUEUE = not USE_EXTERNAL_QUEUE
+            return {"ok": True, "use_external_queue": USE_EXTERNAL_QUEUE}
+
+        @app.post("/admin/toggle_ignore_sched")
+        def admin_toggle_ignore_sched(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            global MANIFEST_IGNORE_SCHEDULE
+            MANIFEST_IGNORE_SCHEDULE = not MANIFEST_IGNORE_SCHEDULE
+            return {"ok": True, "manifest_ignore_schedule": MANIFEST_IGNORE_SCHEDULE}
 
         @app.api_route("/process/{tweet_id}", methods=["GET", "POST"])
         async def process_tweet_endpoint(tweet_id: str):
@@ -4149,11 +4292,22 @@ def main_loop():
                 # Dinamik bekleme: bir sonraki manifest zamanına kadar
                 now_ts = time.time()
                 if isinstance(next_due_ts, (int, float)) and next_due_ts > now_ts:
-                    sleep_s = max(5, int(next_due_ts - now_ts))
+                    # Uzun uykulara güvenmeyelim: 30s-1800s aralığında periyodik uyan
+                    try:
+                        delta = int(next_due_ts - now_ts)
+                    except Exception:
+                        delta = 60
+                    sleep_s = int(min(1800, max(30, delta)))
                     try:
                         human_next = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_due_ts))
                     except Exception:
                         human_next = str(next_due_ts)
+                    try:
+                        now_human_utc = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now_ts))
+                        next_human_utc = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(next_due_ts))
+                        print(f"[DIAG] now_utc={now_human_utc}Z | next_due_utc={next_human_utc}Z | sleep={sleep_s}s")
+                    except Exception:
+                        pass
                     print(f"\n[+] Sonraki kontrol (manifest): {human_next} (≈{sleep_s}s)")
                     print(f"⏳ {sleep_s} saniye bekleniyor...")
                     time.sleep(sleep_s)
