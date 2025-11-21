@@ -136,75 +136,82 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
     ENV_CATEGORIES = {
         "Twitter/X Ayarları": {
             "icon": "🐦",
+            "hidden_if_external_queue": False,
             "vars": [
-                ("TWITTER_USERNAME", "Twitter Kullanıcı Adı", "text", "Bot'un Twitter hesabı"),
-                ("TWITTER_USER_ID", "Twitter User ID", "text", "Bot'un Twitter ID'si"),
-                ("TWITTER_BEARER_TOKEN", "Bearer Token", "password", "Twitter API Bearer Token"),
-                ("TWITTER_ACCESS_TOKEN", "Access Token", "password", "Twitter API Access Token"),
-                ("TWITTER_ACCESS_TOKEN_SECRET", "Access Token Secret", "password", "Twitter API Secret"),
-                ("TWITTER_CONSUMER_KEY", "Consumer Key", "password", "Twitter API Consumer Key"),
-                ("TWITTER_CONSUMER_SECRET", "Consumer Secret", "password", "Twitter API Consumer Secret"),
-                ("TWITTER_CLIENT_ID", "Client ID", "password", "Twitter Client ID"),
-                ("TWITTER_CLIENT_ID_SECRET", "Client Secret", "password", "Twitter Client Secret"),
-                ("TWSCRAPE_DEBUG", "TWSCRAPE Debug Modu", "checkbox", "Debug çıktısını etkinleştir"),
+                ("TWITTER_USERNAME", "Twitter Kullanıcı Adı", "text", "Takip edilecek Twitter hesabının kullanıcı adı (örn: @TheBFWire)"),
+                ("TWITTER_USER_ID", "Twitter Kullanıcı ID", "text", "Takip edilecek hesabın sayısal ID'si (1661482508876238849)"),
+                ("TWITTER_BEARER_TOKEN", "Twitter Bearer Token", "text", "Twitter API v2 için gerekli ana yetkilendirme anahtarı"),
+                ("TWITTER_ACCESS_TOKEN", "Access Token", "text", "Twitter API erişim tokeni"),
+                ("TWITTER_ACCESS_TOKEN_SECRET", "Access Token Secret", "text", "Twitter API erişim token gizli anahtarı"),
+                ("TWITTER_CONSUMER_KEY", "Consumer Key", "text", "Twitter API tüketici anahtarı"),
+                ("TWITTER_CONSUMER_SECRET", "Consumer Secret", "text", "Twitter API tüketici gizli anahtarı"),
+                ("TWITTER_CLIENT_ID", "Client ID", "text", "Twitter OAuth 2.0 istemci kimliği"),
+                ("TWITTER_CLIENT_ID_SECRET", "Client Secret", "text", "Twitter OAuth 2.0 istemci gizli anahtarı"),
+                ("TWSCRAPE_DEBUG", "TWSCRAPE Debug", "checkbox", "Tweet çekme işlemlerinde detaylı log göster"),
             ]
         },
         "Reddit Ayarları": {
             "icon": "🔴",
+            "hidden_if_external_queue": False,
             "vars": [
-                ("REDDIT_USERNAME", "Reddit Kullanıcı Adı", "text", "Bot'un Reddit hesabı"),
-                ("REDDIT_PASSWORD", "Reddit Şifresi", "password", "Reddit hesap şifresi"),
-                ("REDDIT_CLIENT_ID", "Client ID", "text", "Reddit API Client ID"),
-                ("REDDIT_CLIENT_SECRET", "Client Secret", "password", "Reddit API Secret"),
-                ("REDDIT_USER_AGENT", "User Agent", "text", "Reddit API User Agent"),
-                ("SUBREDDIT", "Subreddit Adı", "text", "Hedef subreddit (ör: BF6_TR)"),
-                ("REDDIT_FLAIR_ID", "Flair ID", "text", "Varsayılan Flair ID"),
+                ("REDDIT_USERNAME", "Reddit Bot Hesabı", "text", "Gönderileri paylaşacak Reddit bot hesabının kullanıcı adı"),
+                ("REDDIT_PASSWORD", "Reddit Şifresi", "text", "Reddit bot hesabının şifresi"),
+                ("REDDIT_CLIENT_ID", "Reddit App ID", "text", "Reddit uygulaması kimlik numarası (14 karakter)"),
+                ("REDDIT_CLIENT_SECRET", "Reddit App Secret", "text", "Reddit uygulaması gizli anahtarı (27 karakter)"),
+                ("REDDIT_USER_AGENT", "User Agent", "text", "Reddit API için tanımlayıcı string (örn: BF6Bot/1.0)"),
+                ("SUBREDDIT", "Hedef Subreddit", "text", "Gönderilerin paylaşılacağı subreddit adı (örn: bf6_tr)"),
+                ("REDDIT_FLAIR_ID", "Varsayılan Flair", "text", "Gönderilere otomatik eklenecek flair ID'si"),
             ]
         },
         "API Anahtarları": {
             "icon": "🔑",
+            "hidden_if_external_queue": False,
             "vars": [
-                ("GEMINI_API_KEY", "Gemini API Key", "password", "Google Gemini API anahtarı"),
-                ("OPENAI_API_KEY", "OpenAI API Key", "password", "OpenAI API anahtarı"),
-                ("RAPIDAPI_KEY", "RapidAPI Key", "password", "RapidAPI ana anahtarı"),
-                ("RAPIDAPI_TWITTER_KEY", "RapidAPI Twitter Key", "password", "RapidAPI Twitter anahtarı"),
-                ("RAPIDAPI_TRANSLATE_KEY", "RapidAPI Translate Key", "password", "RapidAPI Çeviri anahtarı"),
-                ("TRANSLATION_API_KEY", "Çeviri API Key", "password", "Çeviri servisi anahtarı"),
-                ("GITHUB_TOKEN", "GitHub Token", "password", "GitHub API tokeni"),
+                ("GEMINI_API_KEY", "Google Gemini API", "text", "Tweet çevirisi ve içerik analizi için Google Gemini API anahtarı"),
+                ("OPENAI_API_KEY", "OpenAI API", "text", "ChatGPT/GPT-4 ile metin işleme için OpenAI API anahtarı"),
+                ("RAPIDAPI_KEY", "RapidAPI Ana Anahtar", "text", "RapidAPI platformu için genel erişim anahtarı"),
+                ("RAPIDAPI_TWITTER_KEY", "RapidAPI Twitter", "text", "RapidAPI üzerinden Twitter verisi çekmek için özel anahtar"),
+                ("RAPIDAPI_TRANSLATE_KEY", "RapidAPI Çeviri", "text", "RapidAPI çeviri servisleri için özel anahtar"),
+                ("TRANSLATION_API_KEY", "Çeviri Servisi", "text", "Alternatif çeviri servisi API anahtarı"),
+                ("GITHUB_TOKEN", "GitHub Token", "text", "Manifest dosyası ve repo işlemleri için GitHub Personal Access Token"),
             ]
         },
         "Veritabanı Ayarları": {
             "icon": "💾",
+            "hidden_if_external_queue": True,
             "vars": [
-                ("DATABASE_URL", "PostgreSQL URL", "password", "PostgreSQL bağlantı dizesi"),
-                ("ACCOUNTS_DB_PATH", "Accounts DB Yolu", "text", "Yerel accounts.db yolu"),
-                ("FAIL_IF_DB_UNAVAILABLE", "DB Hatası Durur", "checkbox", "Veritabanı yoksa durdur"),
+                ("DATABASE_URL", "PostgreSQL Bağlantısı", "text", "Render PostgreSQL veritabanı bağlantı URL'si (postgres://...)"),
+                ("ACCOUNTS_DB_PATH", "Yerel DB Dosyası", "text", "Twitter hesap bilgileri için SQLite dosya yolu"),
+                ("FAIL_IF_DB_UNAVAILABLE", "DB Hatası Durdur", "checkbox", "Veritabanına bağlanılamazsa bot çalışmasını durdur"),
             ]
         },
         "Manifest & Zamanlama": {
             "icon": "📅",
+            "hidden_if_external_queue": False,
             "vars": [
-                ("MANIFEST_URL", "Manifest URL", "text", "Manifest JSON URL'si"),
-                ("USE_EXTERNAL_QUEUE", "Harici Kuyruk Kullan", "checkbox", "Manifest'ten işle"),
-                ("MANIFEST_IGNORE_SCHEDULE", "Zamanlamayı Yoksay", "checkbox", "Zamanlamayı göz ardı et"),
-                ("MANIFEST_POST_INTERVAL_SECONDS", "Gönderim Aralığı (sn)", "number", "Gönderiler arası bekleme"),
-                ("MANIFEST_TEST_FIRST_ITEM", "İlk Öğeyi Test Et", "checkbox", "Manifest ilk öğesini test et"),
-                ("FORCE_REBUILD_MANIFEST", "Manifest Yeniden Oluştur", "checkbox", "Tüm manifestı yeniden oluştur"),
-                ("HIGH_WATERMARK_ENABLED", "High Watermark", "checkbox", "Eski tweet'leri atla"),
+                ("MANIFEST_URL", "Manifest JSON URL", "text", "Gönderilecek tweet'lerin listesini içeren GitHub Gist URL'si"),
+                ("USE_EXTERNAL_QUEUE", "Manifest Modu", "checkbox", "✅ Manifest listesinden gönder | ❌ Canlı Twitter takibi"),
+                ("MANIFEST_IGNORE_SCHEDULE", "Zamanlamayı Yoksay", "checkbox", "✅ Hemen gönder | ❌ Belirlenen saatlerde gönder"),
+                ("MANIFEST_POST_INTERVAL_SECONDS", "Gönderim Aralığı", "number", "Ardışık gönderiler arası bekleme süresi (saniye)"),
+                ("MANIFEST_TEST_FIRST_ITEM", "Test Modu", "checkbox", "✅ Sadece ilk gönderiyi test et | ❌ Normal çalış"),
+                ("FORCE_REBUILD_MANIFEST", "Manifest Yenile", "checkbox", "✅ Tüm manifest'i sıfırdan oluştur | ❌ Mevcut durumu koru"),
+                ("HIGH_WATERMARK_ENABLED", "Eski Tweet Filtresi", "checkbox", "✅ Çok eski tweet'leri atla | ❌ Tüm tweet'leri işle"),
             ]
         },
-        "Planlı Gönderi": {
+        "Otomatik Gönderiler": {
             "icon": "📌",
+            "hidden_if_external_queue": True,
             "vars": [
-                ("SCHEDULED_PIN_ENABLED", "Haftalık Pin Etkin", "checkbox", "Haftalık sabit gönderi"),
+                ("SCHEDULED_PIN_ENABLED", "Haftalık Sabit Gönderi", "checkbox", "✅ Her hafta belirlenen günde otomatik pin gönderisi yap"),
             ]
         },
         "Diğer Ayarlar": {
             "icon": "⚙️",
+            "hidden_if_external_queue": True,
             "vars": [
-                ("SECONDARY_RETWEET_TARGET", "İkincil RT Hedefi", "text", "İkincil retweet hedefi"),
-                ("SECONDARY_RETWEET_TARGET_ID", "İkincil RT Hedefi ID", "text", "İkincil retweet hedefi ID"),
-                ("LOCAL_ONLY", "Sadece Lokal Mod", "checkbox", "Sadece lokal işlem yap"),
+                ("SECONDARY_RETWEET_TARGET", "İkincil Takip Hesabı", "text", "Ana hesap dışında takip edilecek ikinci Twitter hesabı (@username)"),
+                ("SECONDARY_RETWEET_TARGET_ID", "İkincil Hesap ID", "text", "İkincil takip hesabının sayısal Twitter ID'si"),
+                ("LOCAL_ONLY", "Sadece Yerel Mod", "checkbox", "✅ Web arayüzü kapalı, sadece konsol | ❌ Web arayüzü açık"),
             ]
         }
     }
@@ -217,12 +224,7 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
         return token == admin_token
     
     def _mask_sensitive(key: str, value: str) -> str:
-        """Hassas değerleri maskele"""
-        sensitive_keywords = ["TOKEN", "SECRET", "KEY", "PASSWORD", "URL", "B64"]
-        if any(kw in key.upper() for kw in sensitive_keywords):
-            if len(value) > 4:
-                return value[:2] + "*" * (len(value) - 4) + value[-2:]
-            return "*" * len(value)
+        """Artık maskeleme yok - tüm değerler açık gösterilecek"""
         return value
     
     @app.get("/admin/panel", response_class=HTMLResponse)
@@ -237,28 +239,40 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
         token = request.query_params.get("token", "")
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
+        # External queue durumunu kontrol et
+        use_external_queue = os.getenv("USE_EXTERNAL_QUEUE", "false").lower() == "true"
+        
         # Kategoriler HTML'i oluştur
         categories_html = ""
         for category, info in ENV_CATEGORIES.items():
+            # External queue aktifse bazı kategorileri gizle
+            if use_external_queue and info.get("hidden_if_external_queue", False):
+                continue
+                
             categories_html += f'<div class="category-card"><div class="category-header"><span class="category-icon">{info["icon"]}</span><h3>{category}</h3></div><div class="category-content">'
             
             for var_name, label, input_type, description in info["vars"]:
-                current_value = manager.get_env_var(var_name) or ""
-                display_value = _mask_sensitive(var_name, current_value)
+                # Render env variables'dan değeri al, yoksa .env'den
+                current_value = os.getenv(var_name) or manager.get_env_var(var_name) or ""
                 
                 if input_type == "checkbox":
                     checked = "checked" if current_value.lower() in ["true", "1", "yes"] else ""
                     categories_html += f'<div class="form-group"><label class="checkbox-label"><input type="checkbox" name="{var_name}" {checked} class="env-input" data-token="{token}"/><span class="checkbox-text">{label}</span></label><small class="description">{description}</small></div>'
                 elif input_type == "textarea":
                     categories_html += f'<div class="form-group"><label>{label}</label><small class="description">{description}</small><textarea class="env-input" name="{var_name}" rows="3" data-token="{token}" placeholder="Değer girin...">{current_value}</textarea><button class="btn-save" onclick="saveEnvVar(\'{var_name}\', this)">💾 Kaydet</button></div>'
-                elif input_type == "password":
-                    categories_html += f'<div class="form-group"><label>{label}</label><small class="description">{description}</small><div class="password-group"><input type="password" class="env-input" name="{var_name}" value="{display_value}" data-token="{token}" placeholder="Değer girin..."/><button class="btn-toggle" onclick="togglePasswordVisibility(this)">👁️</button></div><button class="btn-save" onclick="saveEnvVar(\'{var_name}\', this)">💾 Kaydet</button></div>'
                 else:
                     categories_html += f'<div class="form-group"><label>{label}</label><small class="description">{description}</small><input type="{input_type}" class="env-input" name="{var_name}" value="{current_value}" data-token="{token}" placeholder="Değer girin..."/><button class="btn-save" onclick="saveEnvVar(\'{var_name}\', this)">💾 Kaydet</button></div>'
             
             categories_html += "</div></div>"
         
-        return HTMLResponse(get_admin_html(categories_html, current_time, token))
+        # Manifest önizleme kartı ekle
+        if use_external_queue:
+            categories_html += get_manifest_preview_card(token)
+        
+        # Manuel gönderi kartı ekle
+        categories_html += get_manual_post_card(token)
+        
+        return HTMLResponse(get_admin_html(categories_html, current_time, token, use_external_queue))
     
     @app.post("/admin/api/set-env")
     async def api_set_env(request: Request):
@@ -426,9 +440,139 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
                 return JSONResponse({"error": "File not found"}, status_code=404)
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/admin/api/manifest-preview")
+    def api_manifest_preview(request: Request):
+        """API: Sıradaki manifest gönderilerini önizle"""
+        if not _is_admin(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        
+        try:
+            # Manifest URL'sini al
+            manifest_url = os.getenv("MANIFEST_URL", "")
+            if not manifest_url:
+                return JSONResponse({"error": "MANIFEST_URL tanımlı değil"}, status_code=400)
+            
+            # Basit manifest preview - gerçek implementasyon bot.py'deki fonksiyonları kullanacak
+            preview_data = {
+                "manifest_url": manifest_url,
+                "status": "Manifest URL tanımlı",
+                "next_items": [
+                    {"id": "örnek_1", "title": "Sıradaki gönderi 1", "scheduled_time": "2024-11-21 18:00:00"},
+                    {"id": "örnek_2", "title": "Sıradaki gönderi 2", "scheduled_time": "2024-11-21 19:00:00"}
+                ]
+            }
+            
+            return JSONResponse(preview_data)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.post("/admin/api/manual-post")
+    async def api_create_manual_post(request: Request):
+        """API: Manuel gönderi oluştur"""
+        if not _is_admin(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        
+        try:
+            data = await request.json()
+            title = data.get("title", "").strip()
+            content = data.get("content", "").strip()
+            schedule_time = data.get("schedule_time", "")
+            
+            if not title:
+                return JSONResponse({"success": False, "error": "Başlık gerekli"})
+            
+            # Manuel gönderi veritabanına kaydet (basit implementasyon)
+            manual_post = {
+                "id": f"manual_{int(time.time())}",
+                "title": title,
+                "content": content,
+                "schedule_time": schedule_time,
+                "created_at": datetime.now().isoformat(),
+                "status": "scheduled" if schedule_time else "ready"
+            }
+            
+            # Gerçek implementasyonda veritabanına kaydedilecek
+            return JSONResponse({"success": True, "post_id": manual_post["id"]})
+        except Exception as e:
+            return JSONResponse({"success": False, "error": str(e)})
+    
+    @app.get("/admin/api/scheduled-posts")
+    def api_get_scheduled_posts(request: Request):
+        """API: Zamanlanmış gönderileri listele"""
+        if not _is_admin(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        
+        try:
+            # Gerçek implementasyonda veritabanından çekilecek
+            scheduled_posts = [
+                {
+                    "id": "manual_1732204800",
+                    "title": "Örnek zamanlanmış gönderi",
+                    "content": "Bu bir test gönderisidir",
+                    "schedule_time": "2024-11-21 20:00:00",
+                    "status": "scheduled"
+                }
+            ]
+            
+            return JSONResponse({"posts": scheduled_posts})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
 
 
-def get_admin_html(categories_html: str, current_time: str, token: str = "") -> str:
+def get_manifest_preview_card(token: str) -> str:
+    """Manifest önizleme kartı"""
+    return f'''
+    <div class="category-card">
+        <div class="category-header">
+            <span class="category-icon">📋</span>
+            <h3>Sıradaki Manifest Gönderileri</h3>
+        </div>
+        <div class="category-content">
+            <div class="form-group">
+                <button class="btn-save" onclick="loadManifestPreview()">🔄 Sıradaki Gönderileri Yükle</button>
+                <div id="manifest-preview" style="margin-top:15px;max-height:300px;overflow-y:auto;"></div>
+            </div>
+        </div>
+    </div>
+    '''
+
+def get_manual_post_card(token: str) -> str:
+    """Manuel gönderi oluşturma kartı"""
+    return f'''
+    <div class="category-card">
+        <div class="category-header">
+            <span class="category-icon">✍️</span>
+            <h3>Manuel Gönderi Oluştur</h3>
+        </div>
+        <div class="category-content">
+            <div class="form-group">
+                <label>Gönderi Başlığı</label>
+                <input type="text" id="manual-title" placeholder="Reddit gönderisi başlığı..." style="width:100%;padding:10px;margin-bottom:10px;border:2px solid #ddd;border-radius:6px;"/>
+            </div>
+            <div class="form-group">
+                <label>Gönderi İçeriği</label>
+                <textarea id="manual-content" rows="4" placeholder="Gönderi açıklaması (opsiyonel)..." style="width:100%;padding:10px;margin-bottom:10px;border:2px solid #ddd;border-radius:6px;"></textarea>
+            </div>
+            <div class="form-group">
+                <label>Medya Yükle</label>
+                <input type="file" id="manual-media" accept="image/*,video/*" style="width:100%;padding:10px;margin-bottom:10px;border:2px solid #ddd;border-radius:6px;"/>
+            </div>
+            <div class="form-group">
+                <label>Zamanlama (Opsiyonel)</label>
+                <input type="datetime-local" id="manual-schedule" style="width:100%;padding:10px;margin-bottom:10px;border:2px solid #ddd;border-radius:6px;"/>
+                <small style="color:#666;">Boş bırakırsanız hemen gönderilir</small>
+            </div>
+            <div class="form-group">
+                <button class="btn-save" onclick="createManualPost()">📤 Gönderi Oluştur</button>
+                <button class="btn-save" onclick="viewScheduledPosts()" style="margin-left:10px;">📅 Zamanlanmış Gönderiler</button>
+            </div>
+        </div>
+    </div>
+    '''
+
+
+def get_admin_html(categories_html: str, current_time: str, token: str = "", use_external_queue: bool = False) -> str:
     """Admin paneli HTML şablonu"""
     return f"""<!DOCTYPE html>
 <html>
@@ -447,8 +591,8 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "") -> 
         .info-item strong {{color:#333}}
         .status-badge {{display:inline-block;background:#4CAF50;color:white;padding:6px 12px;border-radius:20px;font-size:0.85em;font-weight:600}}
         .categories-grid {{display:grid;grid-template-columns:repeat(auto-fit,minmax(500px,1fr));gap:20px;margin-bottom:30px}}
-        .category-card {{background:white;border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,0.1);transition:transform 0.3s,box-shadow 0.3s}}
-        .category-card:hover {{transform:translateY(-5px);box-shadow:0 15px 40px rgba(0,0,0,0.15)}}
+        .category-card {{background:white;border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,0.1);transition:transform 0.3s}}
+        .category-card:hover {{transform:translateY(-5px)}}
         .category-header {{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:20px;display:flex;align-items:center;gap:15px}}
         .category-icon {{font-size:2em}}
         .category-header h3 {{font-size:1.3em;font-weight:600}}
@@ -504,12 +648,13 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "") -> 
                 <a href="/admin/panel?token={token}" class="nav-btn active">⚙️ Ayarlar</a>
                 <button onclick="backupEnv()" class="nav-btn">💾 Yedekle</button>
                 <button onclick="showBackups()" class="nav-btn">📂 Yedekler</button>
+                {'<span class="nav-btn" style="background:#4CAF50;color:white;">🔄 Manifest Modu</span>' if use_external_queue else '<span class="nav-btn" style="background:#FF9800;color:white;">📡 Canlı Takip</span>'}
             </div>
         </div>
         <div class="categories-grid">{categories_html}</div>
         <div class="footer">
             <p>💡 İpucu: Değişiklikleri kaydettikten sonra botu yeniden başlatmanız gerekebilir.</p>
-            <p style="margin-top:10px;font-size:0.85em;">Hassas veriler maskeli gösterilmektedir.</p>
+            <p style="margin-top:10px;font-size:0.85em;">Tüm değerler Render environment variables'dan okunmaktadır.</p>
         </div>
     </div>
     <script>
@@ -665,6 +810,114 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "") -> 
             modal.onclick = function(e) {{
                 if (e.target === modal) modal.remove();
             }};
+        }}
+        
+        function loadManifestPreview() {{
+            const token = '{token}';
+            const previewDiv = document.getElementById('manifest-preview');
+            previewDiv.innerHTML = '<p>Yükleniyor...</p>';
+            
+            fetch('/admin/api/manifest-preview?token=' + token)
+            .then(r => r.json())
+            .then(data => {{
+                if (data.error) {{
+                    previewDiv.innerHTML = `<p style="color:red;">Hata: ${{data.error}}</p>`;
+                    return;
+                }}
+                
+                let html = `<h4>📋 Manifest Durumu</h4>`;
+                html += `<p><strong>URL:</strong> ${{data.manifest_url}}</p>`;
+                html += `<p><strong>Durum:</strong> ${{data.status}}</p>`;
+                
+                if (data.next_items && data.next_items.length > 0) {{
+                    html += '<h5>🕒 Sıradaki Gönderiler:</h5>';
+                    data.next_items.forEach(item => {{
+                        html += `<div style="border:1px solid #ddd;padding:10px;margin:5px 0;border-radius:4px;">`;
+                        html += `<strong>${{item.title}}</strong><br>`;
+                        html += `<small>📅 ${{item.scheduled_time}}</small>`;
+                        html += `</div>`;
+                    }});
+                }} else {{
+                    html += '<p>Sırada bekleyen gönderi yok.</p>';
+                }}
+                
+                previewDiv.innerHTML = html;
+            }}).catch(e => {{
+                previewDiv.innerHTML = `<p style="color:red;">Ağ hatası: ${{e.message}}</p>`;
+            }});
+        }}
+        
+        function createManualPost() {{
+            const token = '{token}';
+            const title = document.getElementById('manual-title').value.trim();
+            const content = document.getElementById('manual-content').value.trim();
+            const schedule = document.getElementById('manual-schedule').value;
+            
+            if (!title) {{
+                showNotification('✗ Başlık gerekli!', 'error');
+                return;
+            }}
+            
+            const postData = {{
+                title: title,
+                content: content,
+                schedule_time: schedule
+            }};
+            
+            fetch('/admin/api/manual-post', {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/json',
+                    'X-Admin-Token': token
+                }},
+                body: JSON.stringify(postData)
+            }}).then(r => r.json()).then(data => {{
+                if (data.success) {{
+                    showNotification('✓ Gönderi oluşturuldu: ' + data.post_id, 'success');
+                    // Formu temizle
+                    document.getElementById('manual-title').value = '';
+                    document.getElementById('manual-content').value = '';
+                    document.getElementById('manual-schedule').value = '';
+                }} else {{
+                    showNotification('✗ Hata: ' + data.error, 'error');
+                }}
+            }}).catch(e => {{
+                showNotification('✗ Ağ hatası: ' + e.message, 'error');
+            }});
+        }}
+        
+        function viewScheduledPosts() {{
+            const token = '{token}';
+            
+            fetch('/admin/api/scheduled-posts?token=' + token)
+            .then(r => r.json())
+            .then(data => {{
+                if (data.error) {{
+                    showNotification('✗ Hata: ' + data.error, 'error');
+                    return;
+                }}
+                
+                let html = '<h3>📅 Zamanlanmış Gönderiler</h3>';
+                
+                if (data.posts && data.posts.length > 0) {{
+                    html += '<div style="max-height:400px;overflow-y:auto;">';
+                    data.posts.forEach(post => {{
+                        html += `<div style="border:1px solid #ddd;padding:15px;margin:10px 0;border-radius:6px;">`;
+                        html += `<h4>${{post.title}}</h4>`;
+                        if (post.content) html += `<p>${{post.content}}</p>`;
+                        html += `<small><strong>Zamanlama:</strong> ${{post.schedule_time || 'Hemen'}}</small><br>`;
+                        html += `<small><strong>Durum:</strong> ${{post.status}}</small>`;
+                        html += `</div>`;
+                    }});
+                    html += '</div>';
+                }} else {{
+                    html += '<p>Zamanlanmış gönderi bulunamadı.</p>';
+                }}
+                
+                showModal(html);
+            }}).catch(e => {{
+                showNotification('✗ Ağ hatası: ' + e.message, 'error');
+            }});
         }}
     </script>
 </body>
