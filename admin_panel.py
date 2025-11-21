@@ -1466,7 +1466,61 @@ def get_dashboard_html(stats: Dict[str, Any], token: str = "") -> str:
             </div>
         </div>
         
-        {content_html}
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-header">
+                    <div class="stat-icon">📊</div>
+                    <div class="stat-title">Toplam Değişken</div>
+                </div>
+                <div class="stat-value">{stats.get('total_vars', 0)}</div>
+                <div class="stat-description">Yapılandırılmış parametreler</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-header">
+                    <div class="stat-icon">🔒</div>
+                    <div class="stat-title">Hassas Değişken</div>
+                </div>
+                <div class="stat-value">{stats.get('sensitive_vars', 0)}</div>
+                <div class="stat-description">Güvenlik gerektiren parametreler</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-header">
+                    <div class="stat-icon">⚠️</div>
+                    <div class="stat-title">Boş Değişken</div>
+                </div>
+                <div class="stat-value">{stats.get('empty_vars', 0)}</div>
+                <div class="stat-description">Değer atanmamış parametreler</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-header">
+                    <div class="stat-icon">🕒</div>
+                    <div class="stat-title">Son Güncelleme</div>
+                </div>
+                <div class="stat-value" style="font-size:1.2em;">{last_modified}</div>
+                <div class="stat-description">En son değişiklik zamanı</div>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <h3 style="margin-bottom:20px;">📈 Yapılandırma Durumu</h3>
+            <div style="margin-bottom:15px;">
+                <strong>Dolu Değişkenler:</strong> {stats.get('total_vars', 0) - stats.get('empty_vars', 0)}/{stats.get('total_vars', 0)}
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width:{((stats.get('total_vars', 0) - stats.get('empty_vars', 0)) / max(stats.get('total_vars', 1), 1)) * 100}%"></div>
+                </div>
+            </div>
+            <div style="margin-bottom:15px;">
+                <strong>Hassas Değişkenler:</strong> {stats.get('sensitive_vars', 0)}/{stats.get('total_vars', 0)}
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width:{(stats.get('sensitive_vars', 0) / max(stats.get('total_vars', 1), 1)) * 100}%"></div>
+                </div>
+            </div>
+        </div>
+        
+        {get_dashboard_manifest_card(token) if os.getenv('USE_EXTERNAL_QUEUE', 'false').lower() == 'true' else ''}
     </div>
     
     <button class="refresh-btn" onclick="location.reload()" title="Yenile">🔄</button>
