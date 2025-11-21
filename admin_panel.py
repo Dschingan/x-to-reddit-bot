@@ -448,20 +448,137 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         
         try:
+            import requests
+            from datetime import datetime, timezone
+            import json
+            
             # Manifest URL'sini al
             manifest_url = os.getenv("MANIFEST_URL", "")
             if not manifest_url:
                 return JSONResponse({"error": "MANIFEST_URL tanımlı değil"}, status_code=400)
             
-            # Basit manifest preview - gerçek implementasyon bot.py'deki fonksiyonları kullanacak
-            preview_data = {
-                "manifest_url": manifest_url,
-                "status": "Manifest URL tanımlı",
-                "next_items": [
-                    {"id": "örnek_1", "title": "Sıradaki gönderi 1", "scheduled_time": "2024-11-21 18:00:00"},
-                    {"id": "örnek_2", "title": "Sıradaki gönderi 2", "scheduled_time": "2024-11-21 19:00:00"}
-                ]
-            }
+            # Gerçek manifest verisini çekmeye çalış
+            try:
+                response = requests.get(manifest_url, timeout=10)
+                if response.status_code == 200:
+                    manifest_data = response.json()
+                    
+                    # Manifest'ten sıradaki gönderileri al
+                    current_time = datetime.now(timezone.utc)
+                    next_items = []
+                    
+                    # Manifest formatına göre parse et
+                    if isinstance(manifest_data, list):
+                        items = manifest_data[:10]  # İlk 10 öğe
+                    elif isinstance(manifest_data, dict) and 'items' in manifest_data:
+                        items = manifest_data['items'][:10]
+                    else:
+                        items = []
+                    
+                    for item in items:
+                        # Her manifest item'ını parse et
+                        parsed_item = {
+                            "id": item.get("id", f"item_{len(next_items)}"),
+                            "title": item.get("title", item.get("text", "Başlık bulunamadı")),
+                            "content": item.get("content", item.get("description", "")),
+                            "media_urls": item.get("media", item.get("images", [])),
+                            "media_type": "image" if item.get("media") or item.get("images") else "text",
+                            "source_url": item.get("url", item.get("source", "")),
+                            "scheduled_time": item.get("scheduled_at", item.get("publish_time", "")),
+                            "tags": item.get("tags", []),
+                            "priority": item.get("priority", "normal"),
+                            "author": item.get("author", "Bot")
+                        }
+                        
+                        # Zamanlama bilgisini parse et ve kalan süreyi hesapla
+                        if parsed_item["scheduled_time"]:
+                            try:
+                                # Farklı tarih formatlarını dene
+                                scheduled_dt = None
+                                for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"]:
+                                    try:
+                                        scheduled_dt = datetime.strptime(parsed_item["scheduled_time"], fmt)
+                                        if scheduled_dt.tzinfo is None:
+                                            scheduled_dt = scheduled_dt.replace(tzinfo=timezone.utc)
+                                        break
+                                    except ValueError:
+                                        continue
+                                
+                                if scheduled_dt:
+                                    time_diff = scheduled_dt - current_time
+                                    if time_diff.total_seconds() > 0:
+                                        hours = int(time_diff.total_seconds() // 3600)
+                                        minutes = int((time_diff.total_seconds() % 3600) // 60)
+                                        parsed_item["time_remaining"] = f"{hours}s {minutes}d"
+                                        parsed_item["status"] = "scheduled"
+                                    else:
+                                        parsed_item["time_remaining"] = "Süresi geçmiş"
+                                        parsed_item["status"] = "overdue"
+                                else:
+                                    parsed_item["time_remaining"] = "Tarih parse edilemedi"
+                                    parsed_item["status"] = "unknown"
+                            except Exception:
+                                parsed_item["time_remaining"] = "Hesaplanamadı"
+                                parsed_item["status"] = "unknown"
+                        else:
+                            parsed_item["time_remaining"] = "Zamanlama yok"
+                            parsed_item["status"] = "ready"
+                        
+                        next_items.append(parsed_item)
+                    
+                    preview_data = {
+                        "manifest_url": manifest_url,
+                        "status": f"✅ Manifest başarıyla yüklendi ({len(next_items)} gönderi)",
+                        "last_updated": current_time.isoformat(),
+                        "total_items": len(items),
+                        "next_items": next_items
+                    }
+                else:
+                    # Manifest yüklenemedi, örnek veri göster
+                    preview_data = {
+                        "manifest_url": manifest_url,
+                        "status": f"⚠️ Manifest yüklenemedi (HTTP {response.status_code})",
+                        "error": "Manifest URL'sine erişilemiyor",
+                        "next_items": []
+                    }
+            except requests.RequestException as e:
+                # Ağ hatası, örnek veri göster
+                current_time = datetime.now(timezone.utc)
+                preview_data = {
+                    "manifest_url": manifest_url,
+                    "status": "⚠️ Ağ hatası - Örnek veri gösteriliyor",
+                    "error": str(e),
+                    "next_items": [
+                        {
+                            "id": "example_1",
+                            "title": "Breaking: Major Tech Announcement Expected",
+                            "content": "Industry sources suggest a significant announcement coming from major tech companies this week...",
+                            "media_urls": ["https://example.com/image1.jpg"],
+                            "media_type": "image",
+                            "source_url": "https://twitter.com/example/status/123",
+                            "scheduled_time": (current_time.replace(hour=current_time.hour+2)).strftime("%Y-%m-%d %H:%M:%S"),
+                            "time_remaining": "2s 0d",
+                            "status": "scheduled",
+                            "tags": ["tech", "breaking"],
+                            "priority": "high",
+                            "author": "TechNews"
+                        },
+                        {
+                            "id": "example_2",
+                            "title": "Market Analysis: Weekly Crypto Report",
+                            "content": "Comprehensive analysis of this week's cryptocurrency market movements and trends...",
+                            "media_urls": [],
+                            "media_type": "text",
+                            "source_url": "https://twitter.com/crypto/status/456",
+                            "scheduled_time": (current_time.replace(hour=current_time.hour+4)).strftime("%Y-%m-%d %H:%M:%S"),
+                            "time_remaining": "4s 0d",
+                            "status": "scheduled",
+                            "tags": ["crypto", "analysis"],
+                            "priority": "normal",
+                            "author": "CryptoAnalyst"
+                        }
+                    ]
+                }
             
             return JSONResponse(preview_data)
         except Exception as e:
@@ -523,15 +640,18 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
 def get_manifest_preview_card(token: str) -> str:
     """Manifest önizleme kartı"""
     return f'''
-    <div class="category-card">
+    <div class="category-card" style="grid-column: 1 / -1; max-width: none;">
         <div class="category-header">
             <span class="category-icon">📋</span>
             <h3>Sıradaki Manifest Gönderileri</h3>
         </div>
         <div class="category-content">
             <div class="form-group">
-                <button class="btn-save" onclick="loadManifestPreview()">🔄 Sıradaki Gönderileri Yükle</button>
-                <div id="manifest-preview" style="margin-top:15px;max-height:300px;overflow-y:auto;"></div>
+                <div style="display:flex;gap:10px;margin-bottom:15px;">
+                    <button class="btn-save" onclick="loadManifestPreview()" style="flex:1;">🔄 Manifest Yenile</button>
+                    <button class="btn-save" onclick="autoRefreshToggle()" id="auto-refresh-btn" style="flex:1;background:#ff9800;">⏱️ Otomatik Yenileme</button>
+                </div>
+                <div id="manifest-preview" style="margin-top:15px;max-height:600px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:8px;background:#fafafa;padding:15px;"></div>
             </div>
         </div>
     </div>
@@ -630,6 +750,12 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
         .backup-item {{display:flex;justify-content:space-between;align-items:center;padding:10px;border:1px solid #ddd;border-radius:6px;margin-bottom:10px}}
         .backup-info {{flex:1}}
         .backup-actions {{display:flex;gap:8px}}
+        .loading-spinner {{border:4px solid #f3f3f3;border-top:4px solid #3498db;border-radius:50%;width:40px;height:40px;animation:spin 2s linear infinite;margin:0 auto;}}
+        @keyframes spin {{0% {{transform:rotate(0deg);}} 100% {{transform:rotate(360deg);}}}}
+        .manifest-item {{transition:all 0.3s ease;}}
+        .manifest-item:hover {{box-shadow:0 4px 12px rgba(0,0,0,0.15);transform:translateY(-2px);}}
+        .manifest-header {{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:15px;border-radius:8px;margin-bottom:15px;}}
+        .manifest-header h4 {{color:white !important;}}
         @media (max-width:768px) {{.categories-grid {{grid-template-columns:1fr}} .header h1 {{font-size:1.8em}} .header-info {{flex-direction:column}}}}
     </style>
 </head>
@@ -815,35 +941,121 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
         function loadManifestPreview() {{
             const token = '{token}';
             const previewDiv = document.getElementById('manifest-preview');
-            previewDiv.innerHTML = '<p>Yükleniyor...</p>';
+            previewDiv.innerHTML = '<div style="text-align:center;padding:20px;"><div class="loading-spinner"></div><p>Manifest yükleniyor...</p></div>';
             
             fetch('/admin/api/manifest-preview?token=' + token)
             .then(r => r.json())
             .then(data => {{
                 if (data.error) {{
-                    previewDiv.innerHTML = `<p style="color:red;">Hata: ${{data.error}}</p>`;
+                    previewDiv.innerHTML = `<div style="color:red;padding:15px;border:1px solid #ffcdd2;background:#ffebee;border-radius:6px;">❌ <strong>Hata:</strong> ${{data.error}}</div>`;
                     return;
                 }}
                 
-                let html = `<h4>📋 Manifest Durumu</h4>`;
-                html += `<p><strong>URL:</strong> ${{data.manifest_url}}</p>`;
-                html += `<p><strong>Durum:</strong> ${{data.status}}</p>`;
+                let html = `<div class="manifest-header">`;
+                html += `<h4 style="margin:0 0 10px 0;color:#1976d2;">📋 Manifest Durumu</h4>`;
+                html += `<p style="margin:5px 0;"><strong>URL:</strong> <code style="background:#f5f5f5;padding:2px 6px;border-radius:3px;font-size:0.85em;">${{data.manifest_url}}</code></p>`;
+                html += `<p style="margin:5px 0;"><strong>Durum:</strong> ${{data.status}}</p>`;
+                if (data.last_updated) {{
+                    const lastUpdate = new Date(data.last_updated).toLocaleString('tr-TR');
+                    html += `<p style="margin:5px 0;font-size:0.9em;color:#666;"><strong>Son Güncelleme:</strong> ${{lastUpdate}}</p>`;
+                }}
+                html += `</div>`;
                 
                 if (data.next_items && data.next_items.length > 0) {{
-                    html += '<h5>🕒 Sıradaki Gönderiler:</h5>';
-                    data.next_items.forEach(item => {{
-                        html += `<div style="border:1px solid #ddd;padding:10px;margin:5px 0;border-radius:4px;">`;
-                        html += `<strong>${{item.title}}</strong><br>`;
-                        html += `<small>📅 ${{item.scheduled_time}}</small>`;
+                    html += '<div style="margin-top:15px;">';
+                    html += '<h5 style="margin:10px 0;color:#388e3c;">🕒 Sıradaki Gönderiler:</h5>';
+                    
+                    data.next_items.forEach((item, index) => {{
+                        const statusColor = item.status === 'scheduled' ? '#4caf50' : item.status === 'overdue' ? '#f44336' : '#ff9800';
+                        const priorityIcon = item.priority === 'high' ? '🔥' : item.priority === 'low' ? '📝' : '📄';
+                        
+                        html += `<div class="manifest-item" style="border:1px solid #e0e0e0;padding:15px;margin:10px 0;border-radius:8px;background:#fafafa;">`;
+                        
+                        // Başlık ve öncelik
+                        html += `<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">`;
+                        html += `<h6 style="margin:0;color:#1976d2;font-size:1.1em;">${{priorityIcon}} ${{item.title}}</h6>`;
+                        html += `<span style="background:${{statusColor}};color:white;padding:2px 8px;border-radius:12px;font-size:0.8em;">${{item.status.toUpperCase()}}</span>`;
+                        html += `</div>`;
+                        
+                        // İçerik (varsa)
+                        if (item.content && item.content.trim()) {{
+                            const shortContent = item.content.length > 100 ? item.content.substring(0, 100) + '...' : item.content;
+                            html += `<p style="margin:8px 0;color:#555;font-size:0.9em;line-height:1.4;">${{shortContent}}</p>`;
+                        }}
+                        
+                        // Medya önizleme
+                        if (item.media_urls && item.media_urls.length > 0) {{
+                            html += `<div style="margin:10px 0;">`;
+                            html += `<strong style="color:#7b1fa2;">🖼️ Medya (${{item.media_urls.length}} dosya):</strong><br>`;
+                            item.media_urls.slice(0, 3).forEach(url => {{
+                                if (url.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {{
+                                    html += `<img src="${{url}}" style="max-width:80px;max-height:60px;margin:5px 5px 5px 0;border-radius:4px;border:1px solid #ddd;" onerror="this.style.display='none'" />`;
+                                }} else {{
+                                    html += `<span style="background:#e3f2fd;color:#1976d2;padding:2px 6px;margin:2px;border-radius:3px;font-size:0.8em;">📎 Medya</span>`;
+                                }}
+                            }});
+                            if (item.media_urls.length > 3) {{
+                                html += `<span style="color:#666;font-size:0.8em;">+${{item.media_urls.length - 3}} daha...</span>`;
+                            }}
+                            html += `</div>`;
+                        }}
+                        
+                        // Zamanlama bilgileri
+                        html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;padding-top:10px;border-top:1px solid #e0e0e0;">`;
+                        
+                        if (item.scheduled_time) {{
+                            const scheduleDate = new Date(item.scheduled_time).toLocaleString('tr-TR');
+                            html += `<div><strong style="color:#5d4037;">📅 Zamanlama:</strong><br><span style="font-size:0.9em;">${{scheduleDate}}</span></div>`;
+                        }} else {{
+                            html += `<div><strong style="color:#5d4037;">📅 Zamanlama:</strong><br><span style="font-size:0.9em;color:#666;">Hemen gönder</span></div>`;
+                        }}
+                        
+                        html += `<div><strong style="color:#d32f2f;">⏰ Kalan Süre:</strong><br><span style="font-size:0.9em;font-weight:bold;color:${{statusColor}};">${{item.time_remaining}}</span></div>`;
+                        html += `</div>`;
+                        
+                        // Ek bilgiler
+                        html += `<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:5px;">`;
+                        if (item.author && item.author !== 'Bot') {{
+                            html += `<span style="background:#f3e5f5;color:#7b1fa2;padding:2px 6px;border-radius:3px;font-size:0.8em;">� ${{item.author}}</span>`;
+                        }}
+                        if (item.tags && item.tags.length > 0) {{
+                            item.tags.slice(0, 3).forEach(tag => {{
+                                html += `<span style="background:#e8f5e8;color:#2e7d32;padding:2px 6px;border-radius:3px;font-size:0.8em;">#${{tag}}</span>`;
+                            }});
+                        }}
+                        if (item.source_url) {{
+                            html += `<a href="${{item.source_url}}" target="_blank" style="background:#e3f2fd;color:#1976d2;padding:2px 6px;border-radius:3px;font-size:0.8em;text-decoration:none;">🔗 Kaynak</a>`;
+                        }}
+                        html += `</div>`;
+                        
                         html += `</div>`;
                     }});
+                    
+                    html += '</div>';
+                    
+                    // Özet istatistikler
+                    const scheduledCount = data.next_items.filter(item => item.status === 'scheduled').length;
+                    const overdueCount = data.next_items.filter(item => item.status === 'overdue').length;
+                    const readyCount = data.next_items.filter(item => item.status === 'ready').length;
+                    
+                    html += `<div style="margin-top:15px;padding:10px;background:#f5f5f5;border-radius:6px;">`;
+                    html += `<strong>📊 Özet:</strong> `;
+                    html += `<span style="color:#4caf50;">✅ ${{scheduledCount}} zamanlanmış</span> | `;
+                    html += `<span style="color:#ff9800;">⚡ ${{readyCount}} hazır</span>`;
+                    if (overdueCount > 0) {{
+                        html += ` | <span style="color:#f44336;">⚠️ ${{overdueCount}} süresi geçmiş</span>`;
+                    }}
+                    html += `</div>`;
                 }} else {{
-                    html += '<p>Sırada bekleyen gönderi yok.</p>';
+                    html += '<div style="text-align:center;padding:30px;color:#666;">';
+                    html += '<div style="font-size:3em;margin-bottom:10px;">📭</div>';
+                    html += '<p>Sırada bekleyen gönderi bulunamadı.</p>';
+                    html += '</div>';
                 }}
                 
                 previewDiv.innerHTML = html;
             }}).catch(e => {{
-                previewDiv.innerHTML = `<p style="color:red;">Ağ hatası: ${{e.message}}</p>`;
+                previewDiv.innerHTML = `<div style="color:red;padding:15px;border:1px solid #ffcdd2;background:#ffebee;border-radius:6px;">🌐 <strong>Ağ Hatası:</strong> ${{e.message}}</div>`;
             }});
         }}
         
@@ -919,6 +1131,31 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                 showNotification('✗ Ağ hatası: ' + e.message, 'error');
             }});
         }}
+        
+        let autoRefreshInterval = null;
+        function autoRefreshToggle() {{
+            const btn = document.getElementById('auto-refresh-btn');
+            if (autoRefreshInterval) {{
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+                btn.innerHTML = '⏱️ Otomatik Yenileme';
+                btn.style.background = '#ff9800';
+                showNotification('🔄 Otomatik yenileme durduruldu', 'success');
+            }} else {{
+                autoRefreshInterval = setInterval(loadManifestPreview, 30000); // 30 saniyede bir
+                btn.innerHTML = '⏸️ Yenilemeyi Durdur';
+                btn.style.background = '#4caf50';
+                showNotification('🔄 Otomatik yenileme başlatıldı (30s)', 'success');
+                loadManifestPreview(); // Hemen yükle
+            }}
+        }}
+        
+        // Sayfa yüklendiğinde manifest'i otomatik yükle
+        document.addEventListener('DOMContentLoaded', function() {{
+            if (document.getElementById('manifest-preview')) {{
+                loadManifestPreview();
+            }}
+        }});
     </script>
 </body>
 </html>"""
