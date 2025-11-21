@@ -1827,6 +1827,13 @@ def _init_fastapi():
                 return PlainTextResponse("", status_code=200)
             return {"status": "alive"}
 
+        # --- Kapsamlı Admin Paneli ---
+        try:
+            from admin_panel import register_admin_routes
+            register_admin_routes(app, env_path=".env", admin_token=os.getenv("ADMIN_TOKEN", ""))
+        except Exception as admin_panel_err:
+            print(f"[UYARI] Admin paneli yüklenemedi: {admin_panel_err}")
+        
         # --- Minimal Admin Interface ---
         from fastapi.responses import HTMLResponse, JSONResponse
         import os as _os
