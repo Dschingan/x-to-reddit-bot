@@ -1815,24 +1815,28 @@ def _init_fastapi():
                 next_human_utc = datetime.utcfromtimestamp(next_ts).strftime("%Y-%m-%d %H:%M:%S") + "Z" if next_ts else "-"
             except Exception:
                 next_human_utc = "-"
-            body = f"""
+            sub = SUBREDDIT
+            useq = str(USE_EXTERNAL_QUEUE).lower()
+            nxt = next_human_utc
+            tok = request.query_params.get('token','')
+            body = """
 <!doctype html>
 <html><head><meta charset='utf-8'><title>Bot Admin</title>
-<style>body{{font-family:sans-serif;max-width:840px;margin:20px auto;padding:0 16px}}button{padding:8px 12px;margin:4px}code{background:#f5f5f5;padding:2px 6px;border-radius:4px}</style>
+<style>body{font-family:sans-serif;max-width:840px;margin:20px auto;padding:0 16px}button{padding:8px 12px;margin:4px}code{background:#f5f5f5;padding:2px 6px;border-radius:4px}</style>
 </head><body>
 <h2>Bot Admin</h2>
-<p>Subreddit: <code>{SUBREDDIT}</code> | USE_EXTERNAL_QUEUE: <code>{str(USE_EXTERNAL_QUEUE).lower()}</code></p>
-<p>NEXT DUE (UTC): <code>{next_human_utc}</code></p>
+<p>Subreddit: <code>%s</code> | USE_EXTERNAL_QUEUE: <code>%s</code></p>
+<p>NEXT DUE (UTC): <code>%s</code></p>
 <div>
-  <form method='post' action='/admin/refresh?token='><input type='hidden' name='token' value='{request.query_params.get('token','')}'/><button>Manifest Refresh</button></form>
-  <form method='post' action='/admin/process_due?token='><input type='hidden' name='token' value='{request.query_params.get('token','')}'/><button>Process Manifest Now</button></form>
-  <form method='post' action='/admin/post_weekly?token='><input type='hidden' name='token' value='{request.query_params.get('token','')}'/><button>Create Weekly Pin (if due)</button></form>
-  <form method='post' action='/admin/toggle_queue?token='><input type='hidden' name='token' value='{request.query_params.get('token','')}'/><button>Toggle USE_EXTERNAL_QUEUE</button></form>
-  <form method='post' action='/admin/toggle_ignore_sched?token='><input type='hidden' name='token' value='{request.query_params.get('token','')}'/><button>Toggle MANIFEST_IGNORE_SCHEDULE</button></form>
+  <form method='post' action='/admin/refresh?token='><input type='hidden' name='token' value='%s'/><button>Manifest Refresh</button></form>
+  <form method='post' action='/admin/process_due?token='><input type='hidden' name='token' value='%s'/><button>Process Manifest Now</button></form>
+  <form method='post' action='/admin/post_weekly?token='><input type='hidden' name='token' value='%s'/><button>Create Weekly Pin (if due)</button></form>
+  <form method='post' action='/admin/toggle_queue?token='><input type='hidden' name='token' value='%s'/><button>Toggle USE_EXTERNAL_QUEUE</button></form>
+  <form method='post' action='/admin/toggle_ignore_sched?token='><input type='hidden' name='token' value='%s'/><button>Toggle MANIFEST_IGNORE_SCHEDULE</button></form>
 </div>
 <p>Supply token via query: <code>?token=YOUR_ADMIN_TOKEN</code> or header <code>X-Admin-Token</code>.</p>
 </body></html>
-"""
+""" % (sub, useq, nxt, tok, tok, tok, tok, tok)
             return HTMLResponse(body)
 
         @app.get("/admin/status")
