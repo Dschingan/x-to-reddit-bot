@@ -1530,6 +1530,16 @@ def _create_and_pin_weekly_post_if_due() -> None:
         if not run_today:
             return
         today_key = time.strftime("%Y-%m-%d", lt)
+        # Per-day marker to avoid duplicates even if API listing fails or process restarts
+        try:
+            marker_path = f".weekly_pin_{(SUBREDDIT or 'sub')}_{today_key}.done"
+        except Exception:
+            marker_path = f".weekly_pin_{today_key}.done"
+        try:
+            if os.path.exists(marker_path):
+                return
+        except Exception:
+            pass
 
         # Build title and body
         tarih = time.strftime("%d.%m.%Y", lt)
@@ -1548,8 +1558,27 @@ def _create_and_pin_weekly_post_if_due() -> None:
             "Her seviyeden oyuncuya açıktır, saygılı ve destekleyici bir ortam yaratmayı amaçlıyoruz. Keyifli oyunlar!"
         )
 
-        # Stateless dedupe: scan recent posts for today's weekly thread
+        # Stateless dedupe: check current stickies and recent posts for today's thread
         sr = reddit.subreddit(SUBREDDIT)
+        # Strong check: sticky slots
+        try:
+            for slot in (1, 2):
+                try:
+                    stickied = sr.sticky(number=slot)
+                except Exception:
+                    stickied = None
+                if not stickied:
+                    continue
+                try:
+                    st_author = getattr(stickied.author, 'name', '') or ''
+                except Exception:
+                    st_author = ''
+                st_title = getattr(stickied, 'title', '') or ''
+                if st_author.lower() == (REDDIT_USERNAME or '').lower() and st_title.startswith(SCHEDULED_PIN_TITLE_PREFIX):
+                    return
+        except Exception:
+            pass
+        # Fallback scan: recent posts
         try:
             for s in sr.new(limit=30):
                 try:
@@ -1584,6 +1613,12 @@ def _create_and_pin_weekly_post_if_due() -> None:
                 except Exception as se:
                     print(f"[UYARI] suggested_sort ayarlanamadı: {se}")
                 print(f"[+] Haftalık gönderi oluşturuldu ve sabitlendi: https://reddit.com{submission.permalink}")
+                # Create marker to prevent same-day duplicates
+                try:
+                    with open(marker_path, 'w', encoding='utf-8') as _mf:
+                        _mf.write(submission.id)
+                except Exception:
+                    pass
 
                 # Unsticky older megathreads so only the newest stays pinned
                 try:
