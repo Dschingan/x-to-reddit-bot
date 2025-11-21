@@ -1824,19 +1824,55 @@ def _init_fastapi():
 <html><head><meta charset='utf-8'><title>Bot Admin</title>
 <style>body{font-family:sans-serif;max-width:840px;margin:20px auto;padding:0 16px}button{padding:8px 12px;margin:4px}code{background:#f5f5f5;padding:2px 6px;border-radius:4px}</style>
 </head><body>
-<h2>Bot Admin</h2>
+<h2>Bot Yönetim Paneli</h2>
+<p>Bu sayfa, botu Render üzerinden uzaktan kontrol etmenizi sağlar. Token olmadan erişilemez.</p>
 <p>Subreddit: <code>%s</code> | USE_EXTERNAL_QUEUE: <code>%s</code></p>
-<p>NEXT DUE (UTC): <code>%s</code></p>
+<p>Bir sonraki planlı manifest gönderimi (UTC): <code>%s</code></p>
 <div>
-  <form method='post' action='/admin/refresh?token='><input type='hidden' name='token' value='%s'/><button>Manifest Refresh</button></form>
-  <form method='post' action='/admin/process_due?token='><input type='hidden' name='token' value='%s'/><button>Process Manifest Now</button></form>
-  <form method='post' action='/admin/post_weekly?token='><input type='hidden' name='token' value='%s'/><button>Create Weekly Pin (if due)</button></form>
-  <form method='post' action='/admin/toggle_queue?token='><input type='hidden' name='token' value='%s'/><button>Toggle USE_EXTERNAL_QUEUE</button></form>
-  <form method='post' action='/admin/toggle_ignore_sched?token='><input type='hidden' name='token' value='%s'/><button>Toggle MANIFEST_IGNORE_SCHEDULE</button></form>
+  <form method='post' action='/admin/refresh?token='><input type='hidden' name='token' value='%s'/><button>Manifest'i Yenile</button></form>
+  <form method='post' action='/admin/process_due?token='><input type='hidden' name='token' value='%s'/><button>Manifest'i Şimdi İşle (due varsa gönder)</button></form>
+  <form method='post' action='/admin/post_weekly?token='><input type='hidden' name='token' value='%s'/><button>Haftalık Sabit Gönderi (due ise oluştur)</button></form>
+  <form method='post' action='/admin/toggle_queue?token='><input type='hidden' name='token' value='%s'/><button>USE_EXTERNAL_QUEUE Aç/Kapat</button></form>
+  <form method='post' action='/admin/toggle_ignore_sched?token='><input type='hidden' name='token' value='%s'/><button>MANIFEST_IGNORE_SCHEDULE Aç/Kapat</button></form>
 </div>
-<p>Supply token via query: <code>?token=YOUR_ADMIN_TOKEN</code> or header <code>X-Admin-Token</code>.</p>
+<hr/>
+<h3>İleri Kontroller</h3>
+<div>
+  <form method='post' action='/admin/toggle_pin?token='><input type='hidden' name='token' value='%s'/><button>Haftalık Pin Aç/Kapat</button></form>
+  <form method='post' action='/admin/set_pin_schedule?token=' style='margin-top:8px'>
+    <input type='hidden' name='token' value='%s'/>
+    <label>Haftanın Günü (0=Pzt..6=Paz): <input name='weekday' type='number' min='-1' max='6' placeholder='4'/></label>
+    <label style='margin-left:8px'>Saat (0-23): <input name='hour' type='number' min='0' max='23' placeholder='9'/></label>
+    <button>Kaydet</button>
+  </form>
+  <form method='get' action='/admin/manifest_peek' style='margin-top:8px'>
+    <input type='hidden' name='token' value='%s'/>
+    <label>Önizleme adet: <input name='limit' type='number' min='1' max='20' value='10'/></label>
+    <button>Manifest Önizleme (JSON)</button>
+  </form>
+  <form method='post' action='/admin/post_by_id' style='margin-top:8px'>
+    <input type='hidden' name='token' value='%s'/>
+    <label>Manifest ID: <input name='iid' placeholder='1991...'/></label>
+    <button>Bu ID'yi Şimdi Gönder</button>
+  </form>
+  <form method='post' action='/admin/set_manifest_params?token=' style='margin-top:8px'>
+    <input type='hidden' name='token' value='%s'/>
+    <label>Post Aralığı (saniye): <input name='post_interval' type='number' min='0' max='3600' placeholder='600'/></label>
+    <label style='margin-left:8px'>Döngüde Maks Gönderi: <input name='max_per_cycle' type='number' min='1' max='10' placeholder='1'/></label>
+    <button>Kaydet</button>
+  </form>
+  <form method='post' action='/admin/toggle_high_watermark?token=' style='margin-top:8px'>
+    <input type='hidden' name='token' value='%s'/>
+    <button>High Watermark Aç/Kapat</button>
+  </form>
+  <div style='margin-top:8px'>
+    <a href='/admin/recent_reddit_posts?token=%s'>Son Reddit Gönderileri (JSON)</a> |
+    <a href='/admin/manifest_status?token=%s'>Manifest Durumu (JSON)</a>
+  </div>
+</div>
+<p>Token kullanımı: URL'de <code>?token=YOUR_ADMIN_TOKEN</code> veya header <code>X-Admin-Token</code>.</p>
 </body></html>
-""" % (sub, useq, nxt, tok, tok, tok, tok, tok)
+""" % (sub, useq, nxt, tok, tok, tok, tok, tok, tok, tok, tok)
             return HTMLResponse(body)
 
         @app.get("/admin/status")
@@ -1852,6 +1888,12 @@ def _init_fastapi():
                 "use_external_queue": USE_EXTERNAL_QUEUE,
                 "manifest_ignore_schedule": MANIFEST_IGNORE_SCHEDULE,
                 "manifest_url": MANIFEST_URL,
+                "scheduled_pin_enabled": SCHEDULED_PIN_ENABLED,
+                "scheduled_pin_weekday": SCHEDULED_PIN_WEEKDAY,
+                "scheduled_pin_hour": SCHEDULED_PIN_HOUR,
+                "manifest_post_interval_seconds": MANIFEST_POST_INTERVAL_SECONDS,
+                "manifest_max_posts_per_cycle": MANIFEST_MAX_POSTS_PER_CYCLE,
+                "high_watermark_enabled": HIGH_WATERMARK_ENABLED,
                 "next_due_epoch": next_ts,
             }
 
@@ -1895,6 +1937,464 @@ def _init_fastapi():
             global MANIFEST_IGNORE_SCHEDULE
             MANIFEST_IGNORE_SCHEDULE = not MANIFEST_IGNORE_SCHEDULE
             return {"ok": True, "manifest_ignore_schedule": MANIFEST_IGNORE_SCHEDULE}
+
+        @app.post("/admin/set_manifest_params")
+        def admin_set_manifest_params(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            global MANIFEST_POST_INTERVAL_SECONDS, MANIFEST_MAX_POSTS_PER_CYCLE
+            from urllib.parse import parse_qs
+            try:
+                qs = parse_qs(str(request.url).split("?",1)[1] if "?" in str(request.url) else "")
+            except Exception:
+                qs = {}
+            def _get(name):
+                try:
+                    v = qs.get(name)
+                    return v[0] if isinstance(v, list) and v else None
+                except Exception:
+                    return None
+            pi = _get("post_interval")
+            mc = _get("max_per_cycle")
+            try:
+                if pi is not None and str(pi).strip() != "":
+                    MANIFEST_POST_INTERVAL_SECONDS = int(pi)
+                if mc is not None and str(mc).strip() != "":
+                    MANIFEST_MAX_POSTS_PER_CYCLE = int(mc)
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+            return {"ok": True, "manifest_post_interval_seconds": MANIFEST_POST_INTERVAL_SECONDS, "manifest_max_posts_per_cycle": MANIFEST_MAX_POSTS_PER_CYCLE}
+
+        @app.post("/admin/toggle_high_watermark")
+        def admin_toggle_high_watermark(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            global HIGH_WATERMARK_ENABLED
+            HIGH_WATERMARK_ENABLED = not HIGH_WATERMARK_ENABLED
+            return {"ok": True, "high_watermark_enabled": HIGH_WATERMARK_ENABLED}
+
+        @app.get("/admin/recent_reddit_posts")
+        def admin_recent_reddit_posts(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            try:
+                sr = reddit.subreddit(SUBREDDIT)
+                out = []
+                for s in sr.new(limit=30):
+                    try:
+                        author_name = getattr(s.author, 'name', '') or ''
+                    except Exception:
+                        author_name = ''
+                    if author_name.lower() != (REDDIT_USERNAME or '').lower():
+                        continue
+                    out.append({
+                        "id": getattr(s, 'id', ''),
+                        "title": getattr(s, 'title', ''),
+                        "created_utc": getattr(s, 'created_utc', 0),
+                        "stickied": getattr(s, 'stickied', False),
+                        "permalink": getattr(s, 'permalink', ''),
+                    })
+                return {"items": out}
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=500)
+
+        # --- Compose & Post from Twitter ---
+        def _extract_tweet_id(s: str) -> str | None:
+            try:
+                if not s:
+                    return None
+                ss = s.strip()
+                # If it's purely numeric, assume id
+                if ss.isdigit():
+                    return ss
+                # Try to parse from URL patterns
+                # .../status/<id>
+                import re
+                m = re.search(r"/status/(\d+)", ss)
+                if m:
+                    return m.group(1)
+                return None
+            except Exception:
+                return None
+
+        @app.get("/admin/compose", response_class=HTMLResponse)
+        def admin_compose(request: Request):
+            if not _is_admin(request):
+                return HTMLResponse("Unauthorized", status_code=401)
+            # Fetch flair options
+            try:
+                tpls = _fetch_link_flair_templates(SUBREDDIT)
+            except Exception:
+                tpls = []
+            tok = request.query_params.get('token','')
+            # Build options HTML
+            options = ["<option value=''>Otomatik (AI/Kural)</option>"]
+            for t in tpls:
+                options.append("<option value='%s'>%s</option>" % (t.get('id',''), t.get('text','')))
+            options_html = "\n".join(options)
+            body = """
+<!doctype html>
+<html><head><meta charset='utf-8'><title>Tweet'ten Gönder</title>
+<style>body{font-family:sans-serif;max-width:920px;margin:20px auto;padding:0 16px}input,textarea,select{width:100%%;padding:6px;margin:4px 0}label{font-weight:600} .row{display:flex;gap:12px} .col{flex:1}</style>
+</head><body>
+<h2>Tweet'ten Reddit Gönderisi Oluştur</h2>
+<p>Tweet URL/ID gir, başlığı/detayı düzenle, flair seç ve hemen gönder.</p>
+<form method='post' action='/admin/compose_submit'>
+  <input type='hidden' name='token' value='%s'/>
+  <div class='row'>
+    <div class='col'>
+      <label>Tweet URL veya ID</label>
+      <input name='tweet' placeholder='https://x.com/.../status/1991... veya 1991...'/>
+    </div>
+    <div class='col'>
+      <label>Subreddit</label>
+      <input name='subreddit' value='%s'/>
+    </div>
+  </div>
+  <label>Başlık</label>
+  <input name='title' placeholder='Başlık (zorunlu)'/>
+  <label>Metin (opsiyonel)</label>
+  <textarea name='body' rows='4' placeholder='Metin gövdesi (opsiyonel)'></textarea>
+  <label>Medya URL'leri (her satıra bir; video varsa yalnızca ilk video kullanılır)</label>
+  <textarea name='media_urls' rows='5' placeholder='https://...jpg\nhttps://...mp4'></textarea>
+  <div class='row'>
+    <div class='col'>
+      <label>Flair</label>
+      <select name='flair_id'>%s</select>
+    </div>
+    <div class='col'>
+      <label>NSFW</label>
+      <select name='nsfw'><option value='false'>Hayır</option><option value='true'>Evet</option></select>
+    </div>
+    <div class='col'>
+      <label>Spoiler</label>
+      <select name='spoiler'><option value='false'>Hayır</option><option value='true'>Evet</option></select>
+    </div>
+    <div class='col'>
+      <label>Sticky</label>
+      <select name='sticky'><option value='false'>Hayır</option><option value='true'>Evet</option></select>
+    </div>
+  </div>
+  <div style='margin:8px 0'>
+    <button>Hemen Gönder</button>
+  </div>
+  <p style='margin-top:6px'>Medya URL'lerini otomatik çekmek isterseniz tweet alanını doldurup <a href='/admin/try_fetch_media?token=%s'>bu bağlantıyı</a> açın ve sonuçlardan URL'leri kopyalayın.</p>
+</form>
+</body></html>
+""" % (tok, SUBREDDIT, options_html, tok)
+            return HTMLResponse(body)
+
+        @app.get("/admin/try_fetch_media")
+        def admin_try_fetch_media(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            tw = request.query_params.get('tweet') or ''
+            tid = _extract_tweet_id(tw)
+            if not tid:
+                return {"ok": False, "error": "tweet id/url gerekli"}
+            # Best-effort TWSCRAPE fetch for media
+            try:
+                # Lazy import or use existing init
+                async def _run():
+                    try:
+                        api = await init_twscrape_api()
+                        # Many twscrape builds expose tweet() or tweet_by_id; try both
+                        tw = None
+                        try:
+                            tw = await api.tweet(int(tid))
+                        except Exception:
+                            try:
+                                tw = await api.tweet_by_id(int(tid))
+                            except Exception:
+                                tw = None
+                        if not tw:
+                            return {"ok": False, "error": "tweet bulunamadı"}
+                        media_urls = []
+                        md = getattr(tw, 'media', None)
+                        if md:
+                            photos = getattr(md, 'photos', []) or []
+                            for p in photos:
+                                u = getattr(p, 'url', None)
+                                if u:
+                                    media_urls.append(u)
+                            videos = getattr(md, 'videos', []) or []
+                            for v in videos:
+                                vars = getattr(v, 'variants', []) or []
+                                if vars:
+                                    best = max(vars, key=lambda x: getattr(x, 'bitrate', 0))
+                                    u = getattr(best, 'url', None)
+                                    if u:
+                                        media_urls.append(u)
+                        return {"ok": True, "id": str(getattr(tw,'id',tid)), "text": getattr(tw,'rawContent',''), "media_urls": media_urls}
+                    finally:
+                        try:
+                            await api.aclose()
+                        except Exception:
+                            pass
+                import asyncio as _aio
+                loop = _aio.new_event_loop()
+                _aio.set_event_loop(loop)
+                try:
+                    res = loop.run_until_complete(_run())
+                finally:
+                    loop.close()
+                return res
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
+        @app.post("/admin/compose_submit")
+        def admin_compose_submit(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            # Parse form fields from URL (Render sends form as query in simple forms)
+            from urllib.parse import parse_qs
+            try:
+                qs = parse_qs(str(request.url).split("?",1)[1] if "?" in str(request.url) else "")
+            except Exception:
+                qs = {}
+            def _get(name, default=""):
+                try:
+                    v = qs.get(name)
+                    return (v[0] if isinstance(v, list) and v else default)
+                except Exception:
+                    return default
+            subreddit_name = (_get('subreddit') or SUBREDDIT).strip() or SUBREDDIT
+            title = _get('title').strip()
+            body = _get('body').strip()
+            flair_id = _get('flair_id').strip() or None
+            nsfw = (_get('nsfw','false').lower() == 'true')
+            spoiler = (_get('spoiler','false').lower() == 'true')
+            sticky = (_get('sticky','false').lower() == 'true')
+            media_urls_raw = _get('media_urls')
+            media_urls = [s.strip() for s in media_urls_raw.splitlines() if s.strip()]
+            if not title:
+                return JSONResponse({"ok": False, "error": "başlık gerekli"}, status_code=400)
+            if not media_urls:
+                return JSONResponse({"ok": False, "error": "en az bir medya URL gerekli"}, status_code=400)
+            # Choose media: prefer first video else all images
+            videos = [u for u in media_urls if ('.mp4' in u.lower() or 'video' in u.lower())]
+            images = [u for u in media_urls if any(ext in u.lower() for ext in ['.jpg','.jpeg','.png','.webp','.gif'])]
+            chosen = [videos[0]] if videos else images
+            if not chosen:
+                chosen = media_urls[:1]
+            # Download and submit
+            media_files = []
+            try:
+                for idx2, url in enumerate(chosen):
+                    ext = os.path.splitext(url)[1].split('?')[0] or ('.mp4' if (url.lower().endswith('.mp4')) else '.jpg')
+                    fname = f"compose_{int(time.time())}_{idx2}{ext}"
+                    p = download_media(url, fname)
+                    if p:
+                        media_files.append(p)
+                if not media_files:
+                    return JSONResponse({"ok": False, "error": "medya indirilemedi"}, status_code=500)
+                ok = submit_post(title, media_files, original_tweet_text=body, remainder_text="", subreddit_name=subreddit_name, flair_id=flair_id, nsfw=nsfw, spoiler=spoiler)
+                # Sticky is optional via PRAW
+                if ok and sticky:
+                    try:
+                        # Try to locate just-posted submission by title
+                        sr = reddit.subreddit(subreddit_name)
+                        for s in sr.new(limit=10):
+                            an = getattr(s.author,'name','') or ''
+                            if an.lower() == (REDDIT_USERNAME or '').lower() and getattr(s,'title','') == title:
+                                try:
+                                    s.mod.sticky(state=True, bottom=False)
+                                except Exception:
+                                    pass
+                                break
+                    except Exception:
+                        pass
+                return {"ok": bool(ok)}
+            finally:
+                for fp in media_files:
+                    try:
+                        if os.path.exists(fp):
+                            os.remove(fp)
+                    except Exception:
+                        pass
+
+        @app.get("/admin/manifest_status")
+        def admin_manifest_status(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            try:
+                manifest = None
+                if MANIFEST_URL:
+                    _hdr = {"Accept": "application/json", "User-Agent": get_random_user_agent()}
+                    r = requests.get(MANIFEST_URL, headers=_hdr, timeout=10)
+                    if r.status_code == 200:
+                        manifest = r.json()
+                else:
+                    with open(MANIFEST_PATH, 'r', encoding='utf-8') as f:
+                        manifest = json.load(f)
+                if not isinstance(manifest, dict):
+                    return {"items": []}
+                from datetime import datetime, timezone
+                now = time.time()
+                items = manifest.get('items') or []
+                due = []
+                upcoming = []
+                for it in items:
+                    s = str((it.get('scheduled_at') or '').strip())
+                    if not s:
+                        continue
+                    t = s.replace('Z', '+00:00')
+                    ts = datetime.fromisoformat(t).astimezone(timezone.utc).timestamp()
+                    if ts <= now:
+                        due.append({"id": it.get('id'), "title": it.get('title'), "scheduled_at": it.get('scheduled_at')})
+                    else:
+                        upcoming.append({"id": it.get('id'), "title": it.get('title'), "scheduled_at": it.get('scheduled_at')})
+                return {"due": due, "upcoming": upcoming}
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=500)
+
+        @app.post("/admin/toggle_pin")
+        def admin_toggle_pin(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            global SCHEDULED_PIN_ENABLED
+            SCHEDULED_PIN_ENABLED = not SCHEDULED_PIN_ENABLED
+            return {"ok": True, "scheduled_pin_enabled": SCHEDULED_PIN_ENABLED}
+
+        @app.post("/admin/set_pin_schedule")
+        def admin_set_pin_schedule(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            global SCHEDULED_PIN_WEEKDAY, SCHEDULED_PIN_HOUR
+            try:
+                form = request.query_params if request.method == "GET" else request._url.query
+            except Exception:
+                form = None
+            # Fallback: parse from request.url
+            from urllib.parse import parse_qs, urlparse
+            try:
+                qs = parse_qs(str(request.url).split("?",1)[1] if "?" in str(request.url) else "")
+            except Exception:
+                qs = {}
+            def _get(name, default=None):
+                try:
+                    if isinstance(qs.get(name), list) and qs.get(name):
+                        return qs.get(name)[0]
+                except Exception:
+                    pass
+                return default
+            w = _get("weekday")
+            h = _get("hour")
+            try:
+                if w is not None and str(w).strip() != "":
+                    SCHEDULED_PIN_WEEKDAY = int(w)
+                if h is not None and str(h).strip() != "":
+                    SCHEDULED_PIN_HOUR = int(h)
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+            return {"ok": True, "scheduled_pin_weekday": SCHEDULED_PIN_WEEKDAY, "scheduled_pin_hour": SCHEDULED_PIN_HOUR}
+
+        @app.get("/admin/manifest_peek")
+        def admin_manifest_peek(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            try:
+                lim = int(request.query_params.get("limit", 10))
+            except Exception:
+                lim = 10
+            manifest = None
+            try:
+                if MANIFEST_URL:
+                    _hdr = {"Accept": "application/json", "User-Agent": get_random_user_agent()}
+                    r = requests.get(MANIFEST_URL, headers=_hdr, timeout=10)
+                    if r.status_code == 200:
+                        manifest = r.json()
+                else:
+                    with open(MANIFEST_PATH, 'r', encoding='utf-8') as f:
+                        manifest = json.load(f)
+            except Exception as e:
+                return JSONResponse({"error": f"manifest error: {e}"}, status_code=500)
+            if not isinstance(manifest, dict):
+                return {"items": []}
+            items = manifest.get('items') or []
+            out = []
+            for it in items[:lim]:
+                out.append({
+                    "id": it.get('id'),
+                    "title": it.get('title'),
+                    "scheduled_at": it.get('scheduled_at'),
+                    "has_media": bool(it.get('media')),
+                })
+            return {"items": out}
+
+        @app.post("/admin/post_by_id")
+        def admin_post_by_id(request: Request):
+            if not _is_admin(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            # Read iid from form or query
+            from urllib.parse import parse_qs
+            try:
+                body_bytes = request.scope.get('body')  # may be None
+            except Exception:
+                body_bytes = None
+            try:
+                iid = request.query_params.get('iid') or None
+                if not iid and body_bytes:
+                    data = parse_qs(body_bytes.decode('utf-8'))
+                    iid = (data.get('iid') or [None])[0]
+            except Exception:
+                iid = request.query_params.get('iid')
+            if not iid:
+                return JSONResponse({"ok": False, "error": "iid required"}, status_code=400)
+            # Load manifest and locate item
+            manifest = None
+            try:
+                if MANIFEST_URL:
+                    _hdr = {"Accept": "application/json", "User-Agent": get_random_user_agent()}
+                    r = requests.get(MANIFEST_URL, headers=_hdr, timeout=10)
+                    if r.status_code == 200:
+                        manifest = r.json()
+                else:
+                    with open(MANIFEST_PATH, 'r', encoding='utf-8') as f:
+                        manifest = json.load(f)
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": f"manifest error: {e}"}, status_code=500)
+            if not isinstance(manifest, dict):
+                return JSONResponse({"ok": False, "error": "manifest invalid"}, status_code=500)
+            items = manifest.get('items') or []
+            target = None
+            for it in items:
+                if str(it.get('id', '')).strip() == str(iid).strip():
+                    target = it
+                    break
+            if not target:
+                return JSONResponse({"ok": False, "error": "id not found"}, status_code=404)
+            title = (target.get('title') or '').strip() or f"Manifest Item {iid}"
+            body = (target.get('body') or '').strip()
+            media = target.get('media') or []
+            if not isinstance(media, list) or len(media) == 0:
+                return JSONResponse({"ok": False, "error": "no media"}, status_code=400)
+            # choose media (video first)
+            videos = [m for m in media if (m.get('type','').lower() == 'video' and m.get('url'))]
+            images = [m for m in media if (m.get('type','').lower() == 'image' and m.get('url'))]
+            chosen = [videos[0]] if videos else images
+            if not chosen:
+                return JSONResponse({"ok": False, "error": "no valid media"}, status_code=400)
+            media_files = []
+            try:
+                for idx2, m in enumerate(chosen):
+                    url = m.get('url')
+                    ext = os.path.splitext(url)[1].split('?')[0] or ('.mp4' if (m.get('type','').lower()=='video') else '.jpg')
+                    fname = f"manifest_{iid}_{idx2}{ext}"
+                    p = download_media(url, fname)
+                    if p:
+                        media_files.append(p)
+                if not media_files:
+                    return JSONResponse({"ok": False, "error": "download failed"}, status_code=500)
+                ok = submit_post(title, media_files, original_tweet_text=body, remainder_text="")
+                return {"ok": bool(ok)}
+            finally:
+                for fp in media_files:
+                    try:
+                        if os.path.exists(fp):
+                            os.remove(fp)
+                    except Exception:
+                        pass
 
         @app.api_route("/process/{tweet_id}", methods=["GET", "POST"])
         async def process_tweet_endpoint(tweet_id: str):
