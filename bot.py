@@ -8,18 +8,21 @@ import re
 import sys
 import time
 import json
-import os
-import base64
-import random
+import asyncio
+import logging
+import sqlite3
 import hashlib
-import requests
+import tempfile
 import subprocess
 from pathlib import Path
-from urllib.parse import unquote
-from PIL import Image
-import io
-from bs4 import BeautifulSoup
-import asyncio
+from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse, parse_qs
+import random
+import re
+import traceback
+from typing import List, Optional, Dict, Any, Tuple
+import base64
+import schedule
 import threading
 from twscrape import API, gather
 from types import SimpleNamespace
@@ -5338,7 +5341,359 @@ def main_loop():
         print("⏳ 5 dakika bekleniyor...")
         time.sleep(300)
 
+# ============================================================================
+# RETWEET API KONTROL SİSTEMİ
+# ============================================================================
+
+def setup_retweet_database():
+    """Retweet veritabanı tablosunu oluştur"""
+    try:
+        conn = _db_connect()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    # Retweet tablosu oluştur
+                    cur.execute('''
+                        CREATE TABLE IF NOT EXISTS processed_retweets (
+                            id SERIAL PRIMARY KEY,
+                            tweet_id BIGINT UNIQUE NOT NULL,
+                            original_tweet_id BIGINT NOT NULL,
+                            user_id BIGINT NOT NULL,
+                            processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                    ''')
+                    print("[+] Retweet veritabanı tablosu hazır")
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[HATA] Retweet veritabanı kurulumu: {e}")
+
+def check_retweet_processed(tweet_id: str) -> bool:
+    """Retweet'in daha önce işlenip işlenmediğini kontrol et"""
+    try:
+        tweet_id_int = int(str(tweet_id))
+        conn = _db_connect()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1 FROM processed_retweets WHERE tweet_id = %s", (tweet_id_int,))
+                    return cur.fetchone() is not None
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[HATA] Retweet kontrol hatası: {e}")
+        return False
+
+def save_processed_retweet(tweet_id: str, original_tweet_id: str, user_id: str):
+    """İşlenmiş retweet'i veritabanına kaydet"""
+    try:
+        tweet_id_int = int(str(tweet_id))
+        original_tweet_id_int = int(str(original_tweet_id))
+        user_id_int = int(str(user_id))
+        
+        conn = _db_connect()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO processed_retweets (tweet_id, original_tweet_id, user_id) VALUES (%s, %s, %s) ON CONFLICT (tweet_id) DO NOTHING",
+                        (tweet_id_int, original_tweet_id_int, user_id_int)
+                    )
+                    print(f"[+] Retweet kaydedildi: {tweet_id}")
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[HATA] Retweet kaydetme hatası: {e}")
+
+def cleanup_old_retweets():
+    """30 günden eski retweet kayıtlarını sil"""
+    try:
+        conn = _db_connect()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM processed_retweets WHERE processed_at < NOW() - INTERVAL '30 days'"
+                    )
+                    deleted_count = cur.rowcount
+                    if deleted_count > 0:
+                        print(f"[+] {deleted_count} eski retweet kaydı temizlendi")
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[HATA] Retweet temizleme hatası: {e}")
+
+def fetch_user_retweets_api(username: str) -> list:
+    """Twitter API kullanarak kullanıcının retweetlerini çek"""
+    try:
+        api_key = os.getenv('TWITTER_API_KEY')
+        api_secret = os.getenv('TWITTER_API_SECRET')
+        bearer_token = os.getenv('TWITTER_BEARER_TOKEN')
+        
+        if not bearer_token:
+            print("[HATA] Twitter Bearer Token bulunamadı")
+            return []
+        
+        # Twitter API v2 kullanarak retweet'leri çek
+        headers = {
+            'Authorization': f'Bearer {bearer_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Kullanıcı ID'sini al
+        user_url = f"https://api.twitter.com/2/users/by/username/{username}"
+        user_response = requests.get(user_url, headers=headers)
+        
+        if user_response.status_code != 200:
+            print(f"[HATA] Kullanıcı bulunamadı: {user_response.status_code}")
+            return []
+        
+        user_data = user_response.json()
+        user_id = user_data['data']['id']
+        
+        # Son tweet'leri çek (retweet'ler dahil)
+        tweets_url = f"https://api.twitter.com/2/users/{user_id}/tweets"
+        params = {
+            'max_results': 10,
+            'tweet.fields': 'created_at,referenced_tweets,author_id',
+            'expansions': 'referenced_tweets.id,referenced_tweets.id.author_id',
+            'user.fields': 'username'
+        }
+        
+        tweets_response = requests.get(tweets_url, headers=headers, params=params)
+        
+        if tweets_response.status_code != 200:
+            print(f"[HATA] Tweet'ler çekilemedi: {tweets_response.status_code}")
+            return []
+        
+        tweets_data = tweets_response.json()
+        
+        if 'data' not in tweets_data:
+            print("[+] Yeni retweet bulunamadı")
+            return []
+        
+        retweets = []
+        for tweet in tweets_data['data']:
+            # Retweet kontrolü
+            if 'referenced_tweets' in tweet:
+                for ref in tweet['referenced_tweets']:
+                    if ref['type'] == 'retweeted':
+                        # Bu bir retweet
+                        retweet_info = {
+                            'id': tweet['id'],
+                            'original_tweet_id': ref['id'],
+                            'user_id': user_id,
+                            'created_at': tweet['created_at']
+                        }
+                        retweets.append(retweet_info)
+                        break
+        
+        return retweets
+        
+    except Exception as e:
+        print(f"[HATA] Retweet API hatası: {e}")
+        return []
+
+def process_retweet(retweet_info: dict):
+    """Retweet'i işle ve Reddit'e gönder"""
+    try:
+        tweet_id = retweet_info['id']
+        original_tweet_id = retweet_info['original_tweet_id']
+        
+        # Daha önce işlenmiş mi kontrol et
+        if check_retweet_processed(tweet_id):
+            print(f"[+] Retweet zaten işlenmiş: {tweet_id}")
+            return
+        
+        print(f"[+] Yeni retweet işleniyor: {tweet_id} -> {original_tweet_id}")
+        
+        # Orijinal tweet'i TWSCRAPE ile çek
+        try:
+            async def fetch_original_tweet():
+                api = API()
+                try:
+                    tweet = await api.tweet_details(original_tweet_id)
+                    return tweet
+                except Exception as e:
+                    print(f"[HATA] Orijinal tweet çekilemedi: {e}")
+                    return None
+            
+            # Async fonksiyonu çalıştır
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            original_tweet = loop.run_until_complete(fetch_original_tweet())
+            loop.close()
+            
+            if not original_tweet:
+                print(f"[HATA] Orijinal tweet bulunamadı: {original_tweet_id}")
+                save_processed_retweet(tweet_id, original_tweet_id, retweet_info['user_id'])
+                return
+            
+            # Tweet'i normal işleme sürecinden geçir
+            tweet_data = {
+                'id': original_tweet_id,
+                'text': original_tweet.rawContent or "",
+                'created_at': original_tweet.date.isoformat() if original_tweet.date else "",
+                'media_urls': []
+            }
+            
+            # Medya URL'lerini çıkar
+            if hasattr(original_tweet, 'media') and original_tweet.media:
+                for media in original_tweet.media:
+                    if hasattr(media, 'url'):
+                        tweet_data['media_urls'].append(media.url)
+            
+            print(f"[+] Retweet içeriği: {tweet_data['text'][:100]}...")
+            
+            # Normal tweet işleme fonksiyonunu çağır
+            # Bu, çeviri, medya indirme ve Reddit gönderimi yapacak
+            process_single_tweet(tweet_data, is_retweet=True)
+            
+            # İşlenmiş olarak kaydet
+            save_processed_retweet(tweet_id, original_tweet_id, retweet_info['user_id'])
+            
+        except Exception as process_error:
+            print(f"[HATA] Retweet işleme hatası: {process_error}")
+            # Hata olsa bile kaydı yap ki tekrar denemesin
+            save_processed_retweet(tweet_id, original_tweet_id, retweet_info['user_id'])
+            
+    except Exception as e:
+        print(f"[HATA] Retweet genel hatası: {e}")
+
+def check_retweets_scheduled():
+    """Zamanlanmış retweet kontrolü"""
+    try:
+        # Retweet kontrolü aktif mi?
+        if os.getenv('RETWEET_CHECK_ENABLED', 'false').lower() != 'true':
+            return
+        
+        target_user = os.getenv('SECONDARY_RETWEET_TARGET', '')
+        if not target_user:
+            print("[UYARI] SECONDARY_RETWEET_TARGET tanımlı değil")
+            return
+        
+        print(f"[+] {target_user} kullanıcısının retweetleri kontrol ediliyor...")
+        
+        # Eski kayıtları temizle
+        cleanup_old_retweets()
+        
+        # Retweet'leri çek
+        retweets = fetch_user_retweets_api(target_user)
+        
+        if not retweets:
+            print("[+] Yeni retweet bulunamadı")
+            return
+        
+        # Sadece son retweet'i işle (en yeni)
+        latest_retweet = max(retweets, key=lambda x: x['created_at'])
+        print(f"[+] En son retweet işleniyor: {latest_retweet['id']}")
+        
+        process_retweet(latest_retweet)
+        
+    except Exception as e:
+        print(f"[HATA] Zamanlanmış retweet kontrolü: {e}")
+
+def setup_retweet_scheduler():
+    """Retweet kontrol zamanlayıcısını kur"""
+    try:
+        if os.getenv('RETWEET_CHECK_ENABLED', 'false').lower() != 'true':
+            print("[+] Retweet kontrolü devre dışı")
+            return
+        
+        # Kontrol saatlerini al
+        check_times = os.getenv('RETWEET_CHECK_TIMES', '14:00,17:00').split(',')
+        
+        for check_time in check_times:
+            check_time = check_time.strip()
+            if ':' in check_time:
+                schedule.every().day.at(check_time).do(check_retweets_scheduled)
+                print(f"[+] Retweet kontrolü zamanlandı: {check_time}")
+        
+        # Scheduler'ı ayrı thread'de çalıştır
+        def run_scheduler():
+            while True:
+                schedule.run_pending()
+                time.sleep(60)  # Her dakika kontrol et
+        
+        scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+        scheduler_thread.start()
+        print("[+] Retweet zamanlayıcısı başlatıldı")
+        
+    except Exception as e:
+        print(f"[HATA] Retweet zamanlayıcı kurulumu: {e}")
+
+def process_single_tweet(tweet_data: dict, is_retweet: bool = False):
+    """Tek bir tweet'i işle (hem normal hem retweet için)"""
+    try:
+        tweet_id = tweet_data['id']
+        text = tweet_data['text']
+        media_urls = tweet_data.get('media_urls', [])
+        
+        prefix = "[RT]" if is_retweet else "[+]"
+        print(f"{prefix} Tweet işleniyor: {tweet_id}")
+        
+        # Medya dosyalarını indir
+        media_files = []
+        if media_urls:
+            print(f"{prefix} {len(media_urls)} medya dosyası indiriliyor...")
+            for url in media_urls:
+                try:
+                    media_file = download_media(url)
+                    if media_file:
+                        media_files.append(media_file)
+                except Exception as media_error:
+                    print(f"[UYARI] Medya indirilemedi: {media_error}")
+        
+        # Metni temizle ve çevir
+        cleaned_text = clean_tweet_text(text)
+        if not cleaned_text:
+            print(f"{prefix} Tweet metni boş, atlanıyor")
+            return
+        
+        # Çeviri yap
+        translated = translate_text(cleaned_text)
+        
+        # Başlığı hazırla
+        title_candidates = [
+            (translated or "").strip(),
+            (cleaned_text or "").strip(),
+        ]
+        chosen_text = next((c for c in title_candidates if c), "")
+        
+        if not chosen_text:
+            chosen_text = f"Twitter paylaşımı - {tweet_id}"
+        
+        title_to_use, remainder_to_post = smart_split_title(chosen_text, 300)
+        
+        print(f"{prefix} Başlık: {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
+        
+        # Reddit'e gönder
+        success = submit_post(title_to_use, media_files, text, remainder_text=remainder_to_post)
+        
+        if success:
+            print(f"{prefix} Başarıyla işlendi: {tweet_id}")
+        else:
+            print(f"[UYARI] İşlenemedi: {tweet_id}")
+        
+        # Geçici dosyaları temizle
+        for fpath in media_files:
+            try:
+                if os.path.exists(fpath):
+                    os.remove(fpath)
+            except Exception:
+                pass
+                
+    except Exception as e:
+        print(f"[HATA] Tweet işleme hatası: {e}")
+
 if __name__ == "__main__":
+    # Retweet veritabanını kur
+    setup_retweet_database()
+    
+    # Retweet zamanlayıcısını başlat
+    setup_retweet_scheduler()
+    
     if os.getenv("LOCAL_ONLY"):
         # Sadece iş döngüsünü çalıştır
         try:
