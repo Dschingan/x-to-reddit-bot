@@ -1837,14 +1837,6 @@ def _init_fastapi():
         except Exception as admin_panel_err:
             print(f"[UYARI] Admin paneli yüklenemedi: {admin_panel_err}")
         
-        # --- Rate Limiter API Routes ---
-        try:
-            from admin_rate_limiter_extension import register_rate_limiter_routes
-            register_rate_limiter_routes(app, admin_token=os.getenv("ADMIN_TOKEN", ""))
-            print("[+] Rate limiter API route'ları eklendi")
-        except Exception as rl_err:
-            print(f"[UYARI] Rate limiter route'ları yüklenemedi: {rl_err}")
-        
         # --- Minimal Admin Interface ---
         from fastapi.responses import HTMLResponse, JSONResponse
         import os as _os
