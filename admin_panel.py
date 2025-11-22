@@ -1150,22 +1150,77 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                             html += `</div>`;
                         }}
                         
-                        // Medya sayısı (varsa) - hem media_urls hem de media array'ini kontrol et
-                        const mediaCount = (item.media_urls && item.media_urls.length) || (item.media && item.media.length) || 0;
-                        if (mediaCount > 0) {{
+                        // Medya görüntüleme - hem media_urls hem de media array'ini kontrol et
+                        const mediaItems = item.media_urls || (item.media && item.media.map(m => m.url)) || [];
+                        const mediaObjects = item.media || [];
+                        
+                        if (mediaItems.length > 0) {{
                             html += `<div style="margin:10px 0;padding:8px;background:#f0f8ff;border-radius:6px;border-left:4px solid #1976d2;">`;
-                            html += `<strong style="color:#1976d2;">📎 ${{mediaCount}} medya dosyası mevcut</strong>`;
+                            html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">`;
+                            html += `<strong style="color:#1976d2;">📎 ${{mediaItems.length}} medya dosyası</strong>`;
+                            html += `<button onclick="toggleMediaView('${{item.id}}')" style="background:#1976d2;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">👁️ Görüntüle</button>`;
+                            html += `</div>`;
                             
                             // Medya türlerini göster
                             const mediaTypes = [];
-                            if (item.media && item.media.length > 0) {{
-                                item.media.forEach(media => {{
+                            if (mediaObjects.length > 0) {{
+                                mediaObjects.forEach(media => {{
                                     if (media.type === 'video') mediaTypes.push('🎥 Video');
                                     else if (media.type === 'image') mediaTypes.push('🖼️ Resim');
                                     else mediaTypes.push('📎 Dosya');
                                 }});
-                                html += `<br><small style="color:#666;">${{mediaTypes.join(', ')}}</small>`;
+                                html += `<small style="color:#666;">${{mediaTypes.join(', ')}}</small>`;
+                            }} else {{
+                                // Fallback: URL'den tür tahmin et
+                                mediaItems.forEach(url => {{
+                                    if (/\.(mp4|webm|mov)$/i.test(url)) mediaTypes.push('🎥 Video');
+                                    else if (/\.(jpg|jpeg|png|gif|webp)$/i.test(url)) mediaTypes.push('🖼️ Resim');
+                                    else mediaTypes.push('📎 Dosya');
+                                }});
+                                html += `<small style="color:#666;">${{mediaTypes.join(', ')}}</small>`;
                             }}
+                            
+                            // Gizli medya görüntüleme alanı
+                            html += `<div id="media-view-${{item.id}}" style="display:none;margin-top:10px;border-top:1px solid #ddd;padding-top:10px;">`;
+                            
+                            mediaItems.forEach((url, idx) => {{
+                                const mediaType = mediaObjects[idx] ? mediaObjects[idx].type : 
+                                    (/\.(mp4|webm|mov)$/i.test(url) ? 'video' : 
+                                     /\.(jpg|jpeg|png|gif|webp)$/i.test(url) ? 'image' : 'file');
+                                
+                                html += `<div style="margin:8px 0;padding:8px;border:1px solid #e0e0e0;border-radius:6px;background:white;">`;
+                                html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">`;
+                                html += `<strong style="font-size:0.9em;">Medya ${{idx + 1}}</strong>`;
+                                html += `<div style="display:flex;gap:5px;">`;
+                                
+                                if (mediaType === 'video') {{
+                                    html += `<button onclick="openMediaModal('${{url}}', 'video')" style="background:#ff5722;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">▶️ Oynat</button>`;
+                                }} else if (mediaType === 'image') {{
+                                    html += `<button onclick="openMediaModal('${{url}}', 'image')" style="background:#4caf50;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">🔍 Büyüt</button>`;
+                                }}
+                                
+                                html += `<button onclick="window.open('${{url}}', '_blank')" style="background:#2196f3;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">🔗 Aç</button>`;
+                                html += `<button onclick="copyToClipboard('${{url}}')" style="background:#9e9e9e;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">📋 Kopyala</button>`;
+                                html += `</div>`;
+                                html += `</div>`;
+                                
+                                // Küçük önizleme
+                                if (mediaType === 'image') {{
+                                    html += `<img src="${{url}}" style="max-width:200px;max-height:150px;border-radius:4px;border:1px solid #ddd;cursor:pointer;" onclick="openMediaModal('${{url}}', 'image')" />`;
+                                }} else if (mediaType === 'video') {{
+                                    html += `<video style="max-width:200px;max-height:150px;border-radius:4px;border:1px solid #ddd;cursor:pointer;" onclick="openMediaModal('${{url}}', 'video')" muted>`;
+                                    html += `<source src="${{url}}" type="video/mp4">Video desteklenmiyor</video>`;
+                                }} else {{
+                                    html += `<div style="width:200px;height:100px;background:#f5f5f5;border-radius:4px;border:1px solid #ddd;display:flex;align-items:center;justify-content:center;color:#666;">`;
+                                    html += `<span style="font-size:2em;">📎</span>`;
+                                    html += `</div>`;
+                                }}
+                                
+                                html += `<div style="margin-top:8px;font-size:0.8em;color:#666;word-break:break-all;">${{url}}</div>`;
+                                html += `</div>`;
+                            }});
+                            
+                            html += `</div>`;
                             html += `</div>`;
                         }}
                         
@@ -1369,6 +1424,55 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
             }}
         }}
         
+        
+        function toggleMediaView(itemId) {{
+            const mediaDiv = document.getElementById('media-view-' + itemId);
+            if (mediaDiv.style.display === 'none') {{
+                mediaDiv.style.display = 'block';
+            }} else {{
+                mediaDiv.style.display = 'none';
+            }}
+        }}
+        
+        function openMediaModal(url, type) {{
+            const modal = document.createElement('div');
+            modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:10000;display:flex;align-items:center;justify-content:center;';
+            
+            let content = '';
+            if (type === 'image') {{
+                content = `<img src="${{url}}" style="max-width:90%;max-height:90%;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.5);" />`;
+            }} else if (type === 'video') {{
+                content = `<video controls style="max-width:90%;max-height:90%;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.5);" autoplay><source src="${{url}}" type="video/mp4">Video oynatılamıyor.</video>`;
+            }}
+            
+            modal.innerHTML = `
+                <div style="position:relative;">
+                    ${{content}}
+                    <button onclick="this.parentElement.parentElement.remove()" style="position:absolute;top:-15px;right:-15px;background:#f44336;color:white;border:none;border-radius:50%;width:40px;height:40px;font-size:20px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,0.3);">×</button>
+                </div>
+            `;
+            
+            modal.onclick = function(e) {{
+                if (e.target === modal) modal.remove();
+            }};
+            
+            document.body.appendChild(modal);
+        }}
+        
+        function copyToClipboard(text) {{
+            navigator.clipboard.writeText(text).then(function() {{
+                showNotification('✓ URL panoya kopyalandı', 'success');
+            }}).catch(function() {{
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                showNotification('✓ URL panoya kopyalandı', 'success');
+            }});
+        }}
         
         // Sayfa yüklendiğinde manifest'i otomatik yükle
         document.addEventListener('DOMContentLoaded', function() {{
