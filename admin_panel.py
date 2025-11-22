@@ -591,13 +591,42 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         
         try:
-            data = await request.json()
-            title = data.get("title", "").strip()
-            content = data.get("content", "").strip()
-            schedule_time = data.get("schedule_time", "")
+            # Handle both JSON and FormData
+            content_type = request.headers.get("content-type", "")
+            
+            if "multipart/form-data" in content_type:
+                # Handle file upload
+                form = await request.form()
+                title = form.get("title", "").strip()
+                content = form.get("content", "").strip()
+                schedule_time = form.get("schedule_time", "")
+                media_files = form.getlist("media")
+            else:
+                # Handle JSON data
+                data = await request.json()
+                title = data.get("title", "").strip()
+                content = data.get("content", "").strip()
+                schedule_time = data.get("schedule_time", "")
+                media_files = []
             
             if not title:
                 return JSONResponse({"success": False, "error": "Başlık gerekli"})
+            
+            # Process media files if any
+            media_paths = []
+            if media_files:
+                import tempfile
+                temp_dir = Path(tempfile.gettempdir()) / "manual_posts"
+                temp_dir.mkdir(exist_ok=True)
+                
+                for media_file in media_files:
+                    if hasattr(media_file, 'filename') and media_file.filename:
+                        # Save uploaded file
+                        file_path = temp_dir / f"{int(time.time())}_{media_file.filename}"
+                        with open(file_path, "wb") as f:
+                            content_bytes = await media_file.read()
+                            f.write(content_bytes)
+                        media_paths.append(str(file_path))
             
             # Manuel gönderi veritabanına kaydet (basit implementasyon)
             manual_post = {
@@ -605,12 +634,47 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
                 "title": title,
                 "content": content,
                 "schedule_time": schedule_time,
+                "media_paths": media_paths,
                 "created_at": datetime.now().isoformat(),
                 "status": "scheduled" if schedule_time else "ready"
             }
             
+            # Eğer hemen gönderilecekse, bot.py'deki submit_post fonksiyonunu çağır
+            if not schedule_time and manual_post["status"] == "ready":
+                try:
+                    # Import bot functions
+                    import sys
+                    import os
+                    sys.path.append(os.path.dirname(__file__))
+                    
+                    # Lazy import to avoid circular imports
+                    from bot import submit_post
+                    
+                    # Submit the post immediately
+                    success = submit_post(title, media_paths, original_tweet_text=content, remainder_text="")
+                    
+                    if success:
+                        manual_post["status"] = "posted"
+                        # Clean up temporary files
+                        for path in media_paths:
+                            try:
+                                if os.path.exists(path):
+                                    os.remove(path)
+                            except Exception:
+                                pass
+                        return JSONResponse({"success": True, "post_id": manual_post["id"], "message": "Gönderi başarıyla Reddit'e gönderildi!"})
+                    else:
+                        return JSONResponse({"success": False, "error": "Reddit'e gönderilemedi"})
+                        
+                except ImportError:
+                    # Bot module not available, just save for later processing
+                    pass
+                except Exception as submit_error:
+                    return JSONResponse({"success": False, "error": f"Gönderim hatası: {str(submit_error)}"})
+            
             # Gerçek implementasyonda veritabanına kaydedilecek
-            return JSONResponse({"success": True, "post_id": manual_post["id"]})
+            # Şimdilik sadece başarılı yanıt dön
+            return JSONResponse({"success": True, "post_id": manual_post["id"], "message": "Gönderi oluşturuldu"})
         except Exception as e:
             return JSONResponse({"success": False, "error": str(e)})
     
@@ -635,6 +699,31 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
             return JSONResponse({"posts": scheduled_posts})
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.post("/admin/api/refresh-manifest")
+    async def api_refresh_manifest(request: Request):
+        """API: Manifest'i yeniden yükle"""
+        if not _is_admin(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        
+        try:
+            # FORCE_REBUILD_MANIFEST environment variable'ını geçici olarak true yap
+            original_value = manager.get_env_var("FORCE_REBUILD_MANIFEST")
+            manager.set_env_var("FORCE_REBUILD_MANIFEST", "true")
+            
+            # Kısa bir süre bekle
+            import time
+            time.sleep(1)
+            
+            # Eski değeri geri yükle
+            if original_value:
+                manager.set_env_var("FORCE_REBUILD_MANIFEST", original_value)
+            else:
+                manager.set_env_var("FORCE_REBUILD_MANIFEST", "false")
+            
+            return JSONResponse({"success": True, "message": "Manifest yenileme sinyali gönderildi"})
+        except Exception as e:
+            return JSONResponse({"success": False, "error": str(e)})
     
     @app.post("/admin/api/update-manifest-item")
     async def api_update_manifest_item(request: Request):
@@ -687,7 +776,7 @@ def get_manifest_preview_card(token: str) -> str:
         <div class="category-content">
             <div class="form-group">
                 <div style="display:flex;gap:10px;margin-bottom:15px;">
-                    <button class="btn-save" onclick="loadManifestPreview()" style="flex:1;">🔄 Manifest Yenile</button>
+                    <button class="btn-save" onclick="loadManifestPreview(true)" style="flex:1;">🔄 Manifest Yenile</button>
                     <button class="btn-save" onclick="autoRefreshToggle()" id="auto-refresh-btn" style="flex:1;background:#ff9800;">⏱️ Otomatik Yenileme</button>
                 </div>
                 <div id="manifest-preview" style="margin-top:15px;max-height:600px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:8px;background:#fafafa;padding:15px;"></div>
@@ -715,7 +804,8 @@ def get_manual_post_card(token: str) -> str:
             </div>
             <div class="form-group">
                 <label>Medya Yükle</label>
-                <input type="file" id="manual-media" accept="image/*,video/*" style="width:100%;padding:10px;margin-bottom:10px;border:2px solid #ddd;border-radius:6px;"/>
+                <input type="file" id="manual-media" accept="image/*,video/*" multiple style="width:100%;padding:10px;margin-bottom:10px;border:2px solid #ddd;border-radius:6px;" onchange="previewMedia(this)"/>
+                <div id="media-preview" style="margin-top:10px;display:none;"></div>
             </div>
             <div class="form-group">
                 <label>Zamanlama (Opsiyonel)</label>
@@ -977,11 +1067,37 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
             }};
         }}
         
-        function loadManifestPreview() {{
+        function loadManifestPreview(forceRefresh = false) {{
             const token = '{token}';
             const previewDiv = document.getElementById('manifest-preview');
             previewDiv.innerHTML = '<div style="text-align:center;padding:20px;"><div class="loading-spinner"></div><p>Manifest yükleniyor...</p></div>';
             
+            // Eğer force refresh isteniyorsa, önce manifest'i yenile
+            if (forceRefresh) {{
+                fetch('/admin/api/refresh-manifest', {{
+                    method: 'POST',
+                    headers: {{'X-Admin-Token': token}}
+                }}).then(r => r.json()).then(refreshData => {{
+                    if (refreshData.success) {{
+                        showNotification('✓ Manifest yenileme sinyali gönderildi', 'success');
+                        // Kısa bir süre bekle ve sonra preview'ı yükle
+                        setTimeout(() => {{
+                            loadActualManifestPreview(token, previewDiv);
+                        }}, 2000);
+                    }} else {{
+                        showNotification('✗ Manifest yenilenemedi: ' + refreshData.error, 'error');
+                        loadActualManifestPreview(token, previewDiv);
+                    }}
+                }}).catch(e => {{
+                    showNotification('✗ Yenileme hatası: ' + e.message, 'error');
+                    loadActualManifestPreview(token, previewDiv);
+                }});
+            }} else {{
+                loadActualManifestPreview(token, previewDiv);
+            }}
+        }}
+        
+        function loadActualManifestPreview(token, previewDiv) {{
             fetch('/admin/api/manifest-preview?token=' + token)
             .then(r => r.json())
             .then(data => {{
@@ -1027,7 +1143,7 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                             html += `<div style="margin:10px 0;">`;
                             html += `<strong style="color:#7b1fa2;">🖼️ Medya (${{item.media_urls.length}} dosya):</strong><br>`;
                             item.media_urls.slice(0, 3).forEach(url => {{
-                                if (typeof url === 'string' && /\.(jpg|jpeg|png|gif|webp)$/i.test(url)) {{
+                                if (typeof url === 'string' && /\.(jpg|jpeg|png|gif|webp)$/i.test(String(url))) {{
                                     html += `<img src="${{url}}" style="max-width:80px;max-height:60px;margin:5px 5px 5px 0;border-radius:4px;border:1px solid #ddd;" onerror="this.style.display='none'" />`;
                                 }} else {{
                                     html += `<span style="background:#e3f2fd;color:#1976d2;padding:2px 6px;margin:2px;border-radius:3px;font-size:0.8em;">📎 Medya</span>`;
@@ -1049,7 +1165,7 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                             html += `<div><strong style="color:#5d4037;">📅 Zamanlama:</strong><br><span style="font-size:0.9em;color:#666;">Hemen gönder</span></div>`;
                         }}
                         
-                        html += `<div><strong style="color:#d32f2f;">⏰ Kalan Süre:</strong><br><span style="font-size:0.9em;font-weight:bold;color:${{statusColor}};">${{item.time_remaining}}</span></div>`;
+                        html += `<div><strong style="color:#d32f2f;">📊 Durum:</strong><br><span style="font-size:0.9em;font-weight:bold;color:${{statusColor}};">${{item.status.toUpperCase()}}</span></div>`;
                         html += `</div>`;
                         
                         // Ek bilgiler
@@ -1098,30 +1214,91 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
             }});
         }}
         
+        function previewMedia(input) {{
+            const previewDiv = document.getElementById('media-preview');
+            previewDiv.innerHTML = '';
+            
+            if (input.files && input.files.length > 0) {{
+                previewDiv.style.display = 'block';
+                previewDiv.innerHTML = '<h4 style="margin:0 0 10px 0;">📎 Seçilen Medya:</h4>';
+                
+                Array.from(input.files).forEach((file, index) => {{
+                    const fileDiv = document.createElement('div');
+                    fileDiv.style.cssText = 'display:flex;align-items:center;gap:10px;margin:5px 0;padding:10px;border:1px solid #ddd;border-radius:6px;background:#f9f9f9;';
+                    
+                    if (file.type.startsWith('image/')) {{
+                        const img = document.createElement('img');
+                        img.style.cssText = 'width:60px;height:60px;object-fit:cover;border-radius:4px;border:1px solid #ccc;';
+                        img.src = URL.createObjectURL(file);
+                        fileDiv.appendChild(img);
+                    }} else if (file.type.startsWith('video/')) {{
+                        const video = document.createElement('video');
+                        video.style.cssText = 'width:60px;height:60px;object-fit:cover;border-radius:4px;border:1px solid #ccc;';
+                        video.src = URL.createObjectURL(file);
+                        video.muted = true;
+                        fileDiv.appendChild(video);
+                    }} else {{
+                        const icon = document.createElement('div');
+                        icon.style.cssText = 'width:60px;height:60px;display:flex;align-items:center;justify-content:center;background:#e3f2fd;border-radius:4px;font-size:24px;';
+                        icon.textContent = '📎';
+                        fileDiv.appendChild(icon);
+                    }}
+                    
+                    const info = document.createElement('div');
+                    info.style.cssText = 'flex:1;';
+                    info.innerHTML = `<strong>${{file.name}}</strong><br><small>${{(file.size / 1024 / 1024).toFixed(2)}} MB - ${{file.type}}</small>`;
+                    fileDiv.appendChild(info);
+                    
+                    const removeBtn = document.createElement('button');
+                    removeBtn.style.cssText = 'background:#f44336;color:white;border:none;border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:14px;';
+                    removeBtn.textContent = '×';
+                    removeBtn.onclick = function() {{
+                        // Create new FileList without this file
+                        const dt = new DataTransfer();
+                        Array.from(input.files).forEach((f, i) => {{
+                            if (i !== index) dt.items.add(f);
+                        }});
+                        input.files = dt.files;
+                        previewMedia(input);
+                    }};
+                    fileDiv.appendChild(removeBtn);
+                    
+                    previewDiv.appendChild(fileDiv);
+                }});
+            }} else {{
+                previewDiv.style.display = 'none';
+            }}
+        }}
+        
         function createManualPost() {{
             const token = '{token}';
             const title = document.getElementById('manual-title').value.trim();
             const content = document.getElementById('manual-content').value.trim();
             const schedule = document.getElementById('manual-schedule').value;
+            const mediaFiles = document.getElementById('manual-media').files;
             
             if (!title) {{
                 showNotification('✗ Başlık gerekli!', 'error');
                 return;
             }}
             
-            const postData = {{
-                title: title,
-                content: content,
-                schedule_time: schedule
-            }};
+            // FormData kullanarak medya dosyalarını da gönder
+            const formData = new FormData();
+            formData.append('title', title);
+            formData.append('content', content);
+            formData.append('schedule_time', schedule);
+            
+            // Medya dosyalarını ekle
+            for (let i = 0; i < mediaFiles.length; i++) {{
+                formData.append('media', mediaFiles[i]);
+            }}
             
             fetch('/admin/api/manual-post', {{
                 method: 'POST',
                 headers: {{
-                    'Content-Type': 'application/json',
                     'X-Admin-Token': token
                 }},
-                body: JSON.stringify(postData)
+                body: formData
             }}).then(r => r.json()).then(data => {{
                 if (data.success) {{
                     showNotification('✓ Gönderi oluşturuldu: ' + data.post_id, 'success');
@@ -1129,6 +1306,8 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                     document.getElementById('manual-title').value = '';
                     document.getElementById('manual-content').value = '';
                     document.getElementById('manual-schedule').value = '';
+                    document.getElementById('manual-media').value = '';
+                    document.getElementById('media-preview').style.display = 'none';
                 }} else {{
                     showNotification('✗ Hata: ' + data.error, 'error');
                 }}
@@ -1268,7 +1447,8 @@ def get_dashboard_manifest_card(token: str) -> str:
                                     html += `<button onclick="removeMedia('${{item.id}}', ${{idx}})" style="position:absolute;top:-5px;right:-5px;background:#f44336;color:white;border:none;border-radius:50%;width:20px;height:20px;font-size:12px;cursor:pointer;">×</button>`;
                                     html += `</div>`;
                                 }} else {{
-                                    html += `<div style="padding:10px;background:#e3f2fd;border-radius:6px;border:1px solid #1976d2;color:#1976d2;font-size:0.9em;">📎 ${{url.split('/').pop()}}</div>`;
+                                    const fileName = (typeof url === 'string' && url.includes('/')) ? url.split('/').pop() : 'Medya';
+                                    html += `<div style="padding:10px;background:#e3f2fd;border-radius:6px;border:1px solid #1976d2;color:#1976d2;font-size:0.9em;">📎 ${{fileName}}</div>`;
                                 }}
                             }});
                             html += `</div>`;
@@ -1283,8 +1463,8 @@ def get_dashboard_manifest_card(token: str) -> str:
                         html += `<input type="datetime-local" id="schedule-${{item.id}}" value="${{scheduleValue}}" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;" />`;
                         html += `</div>`;
                         html += `<div>`;
-                        html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;">⏰ Kalan Süre:</label>`;
-                        html += `<div style="padding:8px;background:#f5f5f5;border-radius:4px;font-weight:600;color:${{statusColor}};">${{item.time_remaining}}</div>`;
+                        html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;">📊 Durum:</label>`;
+                        html += `<div style="padding:8px;background:#f5f5f5;border-radius:4px;font-weight:600;color:${{statusColor}};">${{item.status.toUpperCase()}}</div>`;
                         html += `</div>`;
                         html += `</div>`;
                         
