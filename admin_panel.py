@@ -1169,22 +1169,23 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                             item.media_urls.forEach((url, idx) => {{
                                 html += `<div style="display:flex;align-items:center;gap:10px;margin:5px 0;padding:5px;border:1px solid #e0e0e0;border-radius:4px;background:white;">`;
                                 
-                                if (typeof url === 'string' && /\.(jpg|jpeg|png|gif|webp)$/i.test(String(url))) {{
-                                    html += `<img src="${{url}}" style="width:50px;height:50px;object-fit:cover;border-radius:4px;" />`;
-                                    html += `<div style="flex:1;"><strong>Resim ${{idx + 1}}</strong><br><small>${{url}}</small></div>`;
-                                    html += `<button onclick="openMediaModal('${{url}}', 'image')" style="background:#4caf50;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">🔍 Büyüt</button>`;
-                                }} else if (typeof url === 'string' && /\.(mp4|webm|mov)$/i.test(String(url))) {{
+                                const urlString = String(url);
+                                if (typeof url === 'string' && /\.(jpg|jpeg|png|gif|webp)$/i.test(urlString)) {{
+                                    html += `<img src="${{urlString}}" style="width:50px;height:50px;object-fit:cover;border-radius:4px;" />`;
+                                    html += `<div style="flex:1;"><strong>Resim ${{idx + 1}}</strong><br><small>${{urlString}}</small></div>`;
+                                    html += `<button onclick="openMediaModal('${{urlString}}', 'image')" style="background:#4caf50;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">🔍 Büyüt</button>`;
+                                }} else if (typeof url === 'string' && /\.(mp4|webm|mov)$/i.test(urlString)) {{
                                     html += `<div style="width:50px;height:50px;background:#ff5722;border-radius:4px;display:flex;align-items:center;justify-content:center;color:white;font-size:20px;">▶️</div>`;
-                                    html += `<div style="flex:1;"><strong>Video ${{idx + 1}}</strong><br><small>${{url}}</small></div>`;
-                                    html += `<button onclick="openMediaModal('${{url}}', 'video')" style="background:#ff5722;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">▶️ Oynat</button>`;
-                                }} else if (typeof url === 'string' && url.startsWith('http')) {{
+                                    html += `<div style="flex:1;"><strong>Video ${{idx + 1}}</strong><br><small>${{urlString}}</small></div>`;
+                                    html += `<button onclick="openMediaModal('${{urlString}}', 'video')" style="background:#ff5722;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">▶️ Oynat</button>`;
+                                }} else if (typeof url === 'string' && urlString.startsWith('http')) {{
                                     html += `<div style="width:50px;height:50px;background:#2196f3;border-radius:4px;display:flex;align-items:center;justify-content:center;color:white;font-size:20px;">🔗</div>`;
-                                    html += `<div style="flex:1;"><strong>Link ${{idx + 1}}</strong><br><small>${{url}}</small></div>`;
-                                    html += `<button onclick="window.open('${{url}}', '_blank')" style="background:#2196f3;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">🔗 Aç</button>`;
+                                    html += `<div style="flex:1;"><strong>Link ${{idx + 1}}</strong><br><small>${{urlString}}</small></div>`;
+                                    html += `<button onclick="window.open('${{urlString}}', '_blank')" style="background:#2196f3;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">🔗 Aç</button>`;
                                 }} else {{
                                     html += `<div style="width:50px;height:50px;background:#e3f2fd;border-radius:4px;display:flex;align-items:center;justify-content:center;color:#1976d2;font-size:20px;">📎</div>`;
-                                    html += `<div style="flex:1;"><strong>Dosya ${{idx + 1}}</strong><br><small>${{url}}</small></div>`;
-                                    html += `<button onclick="copyToClipboard('${{url}}')" style="background:#9e9e9e;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">📋 Kopyala</button>`;
+                                    html += `<div style="flex:1;"><strong>Dosya ${{idx + 1}}</strong><br><small>${{urlString}}</small></div>`;
+                                    html += `<button onclick="copyToClipboard('${{urlString}}')" style="background:#9e9e9e;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">📋 Kopyala</button>`;
                                 }}
                                 
                                 html += `</div>`;
@@ -1203,7 +1204,8 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                             html += `<div><strong style="color:#5d4037;">📅 Zamanlama:</strong><br><span style="font-size:0.9em;color:#666;">Hemen gönder</span></div>`;
                         }}
                         
-                        html += `<div><strong style="color:#d32f2f;">📊 Durum:</strong><br><span style="font-size:0.9em;font-weight:bold;color:${{statusColor}};">${{item.status.toUpperCase()}}</span></div>`;
+                        const displayStatus = item.status || 'BEKLEMEDE';
+                        html += `<div><strong style="color:#d32f2f;">📊 Durum:</strong><br><span style="font-size:0.9em;font-weight:bold;color:${{statusColor}};">${{displayStatus.toUpperCase()}}</span></div>`;
                         html += `</div>`;
                         
                         // Ek bilgiler
