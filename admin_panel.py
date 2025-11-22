@@ -777,7 +777,10 @@ def get_manifest_preview_card(token: str) -> str:
             <div class="form-group">
                 <div style="display:flex;gap:10px;margin-bottom:15px;">
                     <button class="btn-save" onclick="loadManifestPreview(true)" style="flex:1;">🔄 Manifest Yenile</button>
-                    <button class="btn-save" onclick="autoRefreshToggle()" id="auto-refresh-btn" style="flex:1;background:#ff9800;">⏱️ Otomatik Yenileme</button>
+                    <button class="btn-save" onclick="autoRefreshToggle()" id="auto-refresh-btn" style="flex:1;background:#ff9800;" title="30 saniyede bir otomatik yenileme yapar">⏱️ Otomatik Yenileme</button>
+                </div>
+                <div style="margin-bottom:15px;padding:10px;background:#fff3cd;border-radius:6px;border-left:4px solid #ffc107;">
+                    <strong>💡 Otomatik Yenileme:</strong> Aktif edildiğinde manifest listesi 30 saniyede bir otomatik olarak yenilenir. Yeni gönderiler ve değişiklikleri görmek için kullanışlıdır.
                 </div>
                 <div id="manifest-preview" style="margin-top:15px;max-height:600px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:8px;background:#fafafa;padding:15px;"></div>
             </div>
@@ -903,6 +906,7 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                 <a href="/admin/panel?token={token}" class="nav-btn active">⚙️ Ayarlar</a>
                 <button onclick="backupEnv()" class="nav-btn">💾 Yedekle</button>
                 <button onclick="showBackups()" class="nav-btn">📂 Yedekler</button>
+                <button onclick="window.open('{os.getenv('MANIFEST_URL', '#')}', '_blank')" class="nav-btn">📈 Manifest Düzenle</button>
                 {'<span class="nav-btn" style="background:#4CAF50;color:white;">🔄 Manifest Modu</span>' if use_external_queue else '<span class="nav-btn" style="background:#FF9800;color:white;">📡 Canlı Takip</span>'}
             </div>
         </div>
@@ -1138,74 +1142,32 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                             html += `<p style="margin:8px 0;color:#555;font-size:0.9em;line-height:1.4;">${{shortContent}}</p>`;
                         }}
                         
-                        // Medya önizleme
-                        if (item.media_urls && item.media_urls.length > 0) {{
+                        // Kaynak URL butonu
+                        if (item.source_url) {{
                             html += `<div style="margin:10px 0;">`;
-                            html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">`;
-                            html += `<strong style="color:#7b1fa2;">🖼️ Medya (${{item.media_urls.length}} dosya):</strong>`;
-                            html += `<button onclick="toggleMediaPreview('${{item.id}}')" style="background:#4caf50;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">👁️ Önizleme</button>`;
+                            html += `<button onclick="window.open('${{item.source_url}}', '_blank')" style="background:#1976d2;color:white;border:none;padding:8px 16px;border-radius:6px;font-size:0.9em;cursor:pointer;display:flex;align-items:center;gap:8px;width:100%;">`;
+                            html += `<span>🔗</span><span>Orijinal Tweet'i Görüntüle</span>`;
+                            html += `</button>`;
                             html += `</div>`;
-                            
-                            // Küçük thumbnail'ler
-                            html += `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;">`;
-                            item.media_urls.slice(0, 6).forEach((url, idx) => {{
-                                if (typeof url === 'string' && /\.(jpg|jpeg|png|gif|webp)$/i.test(String(url))) {{
-                                    html += `<img src="${{url}}" style="width:40px;height:40px;object-fit:cover;border-radius:4px;border:1px solid #ddd;cursor:pointer;" onclick="openMediaModal('${{url}}', 'image')" title="Resmi büyüt" />`;
-                                }} else if (typeof url === 'string' && /\.(mp4|webm|mov)$/i.test(String(url))) {{
-                                    html += `<div style="width:40px;height:40px;background:#ff5722;border-radius:4px;display:flex;align-items:center;justify-content:center;color:white;font-size:16px;cursor:pointer;" onclick="openMediaModal('${{url}}', 'video')" title="Videoyu oynat">▶️</div>`;
-                                }} else if (typeof url === 'string' && url.startsWith('http')) {{
-                                    html += `<div style="width:40px;height:40px;background:#2196f3;border-radius:4px;display:flex;align-items:center;justify-content:center;color:white;font-size:12px;cursor:pointer;" onclick="window.open('${{url}}', '_blank')" title="URL'yi aç">🔗</div>`;
-                                }} else {{
-                                    html += `<div style="width:40px;height:40px;background:#e3f2fd;border-radius:4px;display:flex;align-items:center;justify-content:center;color:#1976d2;font-size:12px;">📎</div>`;
-                                }}
-                            }});
-                            if (item.media_urls.length > 6) {{
-                                html += `<div style="width:40px;height:40px;background:#f5f5f5;border-radius:4px;display:flex;align-items:center;justify-content:center;color:#666;font-size:10px;">+${{item.media_urls.length - 6}}</div>`;
-                            }}
-                            html += `</div>`;
-                            
-                            // Gizli detaylı medya listesi
-                            html += `<div id="media-detail-${{item.id}}" style="display:none;margin-top:10px;padding:10px;background:#f9f9f9;border-radius:6px;max-height:200px;overflow-y:auto;">`;
-                            item.media_urls.forEach((url, idx) => {{
-                                html += `<div style="display:flex;align-items:center;gap:10px;margin:5px 0;padding:5px;border:1px solid #e0e0e0;border-radius:4px;background:white;">`;
-                                
-                                const urlString = String(url);
-                                if (typeof url === 'string' && /\.(jpg|jpeg|png|gif|webp)$/i.test(urlString)) {{
-                                    html += `<img src="${{urlString}}" style="width:50px;height:50px;object-fit:cover;border-radius:4px;" />`;
-                                    html += `<div style="flex:1;"><strong>Resim ${{idx + 1}}</strong><br><small>${{urlString}}</small></div>`;
-                                    html += `<button onclick="openMediaModal('${{urlString}}', 'image')" style="background:#4caf50;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">🔍 Büyüt</button>`;
-                                }} else if (typeof url === 'string' && /\.(mp4|webm|mov)$/i.test(urlString)) {{
-                                    html += `<div style="width:50px;height:50px;background:#ff5722;border-radius:4px;display:flex;align-items:center;justify-content:center;color:white;font-size:20px;">▶️</div>`;
-                                    html += `<div style="flex:1;"><strong>Video ${{idx + 1}}</strong><br><small>${{urlString}}</small></div>`;
-                                    html += `<button onclick="openMediaModal('${{urlString}}', 'video')" style="background:#ff5722;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">▶️ Oynat</button>`;
-                                }} else if (typeof url === 'string' && urlString.startsWith('http')) {{
-                                    html += `<div style="width:50px;height:50px;background:#2196f3;border-radius:4px;display:flex;align-items:center;justify-content:center;color:white;font-size:20px;">🔗</div>`;
-                                    html += `<div style="flex:1;"><strong>Link ${{idx + 1}}</strong><br><small>${{urlString}}</small></div>`;
-                                    html += `<button onclick="window.open('${{urlString}}', '_blank')" style="background:#2196f3;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">🔗 Aç</button>`;
-                                }} else {{
-                                    html += `<div style="width:50px;height:50px;background:#e3f2fd;border-radius:4px;display:flex;align-items:center;justify-content:center;color:#1976d2;font-size:20px;">📎</div>`;
-                                    html += `<div style="flex:1;"><strong>Dosya ${{idx + 1}}</strong><br><small>${{urlString}}</small></div>`;
-                                    html += `<button onclick="copyToClipboard('${{urlString}}')" style="background:#9e9e9e;color:white;border:none;padding:4px 8px;border-radius:4px;font-size:0.8em;cursor:pointer;">📋 Kopyala</button>`;
-                                }}
-                                
-                                html += `</div>`;
-                            }});
-                            html += `</div>`;
+                        }}
+                        
+                        // Medya sayısı (varsa)
+                        if (item.media_urls && item.media_urls.length > 0) {{
+                            html += `<div style="margin:10px 0;padding:8px;background:#f0f8ff;border-radius:6px;border-left:4px solid #1976d2;">`;
+                            html += `<strong style="color:#1976d2;">📎 ${{item.media_urls.length}} medya dosyası mevcut</strong>`;
                             html += `</div>`;
                         }}
                         
                         // Zamanlama bilgileri
-                        html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;padding-top:10px;border-top:1px solid #e0e0e0;">`;
+                        html += `<div style="margin-top:10px;padding-top:10px;border-top:1px solid #e0e0e0;">`;
                         
                         if (item.scheduled_time) {{
                             const scheduleDate = new Date(item.scheduled_time).toLocaleString('tr-TR');
-                            html += `<div><strong style="color:#5d4037;">📅 Zamanlama:</strong><br><span style="font-size:0.9em;">${{scheduleDate}}</span></div>`;
+                            html += `<div><strong style="color:#5d4037;">📅 Zamanlama:</strong> <span style="font-size:0.9em;">${{scheduleDate}}</span></div>`;
                         }} else {{
-                            html += `<div><strong style="color:#5d4037;">📅 Zamanlama:</strong><br><span style="font-size:0.9em;color:#666;">Hemen gönder</span></div>`;
+                            html += `<div><strong style="color:#5d4037;">📅 Zamanlama:</strong> <span style="font-size:0.9em;color:#666;">Hemen gönder</span></div>`;
                         }}
                         
-                        const displayStatus = item.status || 'BEKLEMEDE';
-                        html += `<div><strong style="color:#d32f2f;">📊 Durum:</strong><br><span style="font-size:0.9em;font-weight:bold;color:${{statusColor}};">${{displayStatus.toUpperCase()}}</span></div>`;
                         html += `</div>`;
                         
                         // Ek bilgiler
@@ -1408,54 +1370,6 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
             }}
         }}
         
-        function toggleMediaPreview(itemId) {{
-            const detailDiv = document.getElementById('media-detail-' + itemId);
-            if (detailDiv.style.display === 'none') {{
-                detailDiv.style.display = 'block';
-            }} else {{
-                detailDiv.style.display = 'none';
-            }}
-        }}
-        
-        function openMediaModal(url, type) {{
-            const modal = document.createElement('div');
-            modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:10000;display:flex;align-items:center;justify-content:center;';
-            
-            let content = '';
-            if (type === 'image') {{
-                content = `<img src="${{url}}" style="max-width:90%;max-height:90%;border-radius:8px;" />`;
-            }} else if (type === 'video') {{
-                content = `<video controls style="max-width:90%;max-height:90%;border-radius:8px;" autoplay><source src="${{url}}" type="video/mp4">Video oynatılamıyor.</video>`;
-            }}
-            
-            modal.innerHTML = `
-                <div style="position:relative;">
-                    ${{content}}
-                    <button onclick="this.parentElement.parentElement.remove()" style="position:absolute;top:-10px;right:-10px;background:#f44336;color:white;border:none;border-radius:50%;width:30px;height:30px;font-size:18px;cursor:pointer;">×</button>
-                </div>
-            `;
-            
-            modal.onclick = function(e) {{
-                if (e.target === modal) modal.remove();
-            }};
-            
-            document.body.appendChild(modal);
-        }}
-        
-        function copyToClipboard(text) {{
-            navigator.clipboard.writeText(text).then(function() {{
-                showNotification('✓ URL panoya kopyalandı', 'success');
-            }}).catch(function() {{
-                // Fallback for older browsers
-                const textArea = document.createElement('textarea');
-                textArea.value = text;
-                document.body.appendChild(textArea);
-                textArea.select();
-                document.execCommand('copy');
-                document.body.removeChild(textArea);
-                showNotification('✓ URL panoya kopyalandı', 'success');
-            }});
-        }}
         
         // Sayfa yüklendiğinde manifest'i otomatik yükle
         document.addEventListener('DOMContentLoaded', function() {{
@@ -1731,7 +1645,7 @@ def get_dashboard_html(stats: Dict[str, Any], token: str = "") -> str:
                 <a href="/admin/panel?token={token}" class="nav-btn">⚙️ Ayarlar</a>
                 <button onclick="backupEnv()" class="nav-btn">💾 Yedekle</button>
                 <button onclick="showBackups()" class="nav-btn">📂 Yedekler</button>
-                <a href="/admin/manifest?token={token}" class="nav-btn">📈 Manifest Düzenle</a>
+                <button onclick="window.open('{os.getenv('MANIFEST_URL', '#')}', '_blank')" class="nav-btn">📈 Manifest Düzenle</button>
             </div>
         </div>
         
