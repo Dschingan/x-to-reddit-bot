@@ -1131,9 +1131,8 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                         html += `<div class="manifest-item" style="border:1px solid #e0e0e0;padding:15px;margin:10px 0;border-radius:8px;background:#fafafa;">`;
                         
                         // Başlık ve öncelik
-                        html += `<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">`;
+                        html += `<div style="margin-bottom:10px;">`;
                         html += `<h6 style="margin:0;color:#1976d2;font-size:1.1em;">${{priorityIcon}} ${{item.title}}</h6>`;
-                        html += `<span style="background:${{statusColor}};color:white;padding:2px 8px;border-radius:12px;font-size:0.8em;">${{item.status.toUpperCase()}}</span>`;
                         html += `</div>`;
                         
                         // İçerik (varsa)
@@ -1151,18 +1150,32 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                             html += `</div>`;
                         }}
                         
-                        // Medya sayısı (varsa)
-                        if (item.media_urls && item.media_urls.length > 0) {{
+                        // Medya sayısı (varsa) - hem media_urls hem de media array'ini kontrol et
+                        const mediaCount = (item.media_urls && item.media_urls.length) || (item.media && item.media.length) || 0;
+                        if (mediaCount > 0) {{
                             html += `<div style="margin:10px 0;padding:8px;background:#f0f8ff;border-radius:6px;border-left:4px solid #1976d2;">`;
-                            html += `<strong style="color:#1976d2;">📎 ${{item.media_urls.length}} medya dosyası mevcut</strong>`;
+                            html += `<strong style="color:#1976d2;">📎 ${{mediaCount}} medya dosyası mevcut</strong>`;
+                            
+                            // Medya türlerini göster
+                            const mediaTypes = [];
+                            if (item.media && item.media.length > 0) {{
+                                item.media.forEach(media => {{
+                                    if (media.type === 'video') mediaTypes.push('🎥 Video');
+                                    else if (media.type === 'image') mediaTypes.push('🖼️ Resim');
+                                    else mediaTypes.push('📎 Dosya');
+                                }});
+                                html += `<br><small style="color:#666;">${{mediaTypes.join(', ')}}</small>`;
+                            }}
                             html += `</div>`;
                         }}
                         
                         // Zamanlama bilgileri
                         html += `<div style="margin-top:10px;padding-top:10px;border-top:1px solid #e0e0e0;">`;
                         
-                        if (item.scheduled_time) {{
-                            const scheduleDate = new Date(item.scheduled_time).toLocaleString('tr-TR');
+                        // scheduled_at veya scheduled_time alanını kontrol et
+                        const scheduledTime = item.scheduled_at || item.scheduled_time;
+                        if (scheduledTime) {{
+                            const scheduleDate = new Date(scheduledTime).toLocaleString('tr-TR');
                             html += `<div><strong style="color:#5d4037;">📅 Zamanlama:</strong> <span style="font-size:0.9em;">${{scheduleDate}}</span></div>`;
                         }} else {{
                             html += `<div><strong style="color:#5d4037;">📅 Zamanlama:</strong> <span style="font-size:0.9em;color:#666;">Hemen gönder</span></div>`;
@@ -1189,20 +1202,6 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                     }});
                     
                     html += '</div>';
-                    
-                    // Özet istatistikler
-                    const scheduledCount = data.next_items.filter(item => item.status === 'scheduled').length;
-                    const overdueCount = data.next_items.filter(item => item.status === 'overdue').length;
-                    const readyCount = data.next_items.filter(item => item.status === 'ready').length;
-                    
-                    html += `<div style="margin-top:15px;padding:10px;background:#f5f5f5;border-radius:6px;">`;
-                    html += `<strong>📊 Özet:</strong> `;
-                    html += `<span style="color:#4caf50;">✅ ${{scheduledCount}} zamanlanmış</span> | `;
-                    html += `<span style="color:#ff9800;">⚡ ${{readyCount}} hazır</span>`;
-                    if (overdueCount > 0) {{
-                        html += ` | <span style="color:#f44336;">⚠️ ${{overdueCount}} süresi geçmiş</span>`;
-                    }}
-                    html += `</div>`;
                 }} else {{
                     html += '<div style="text-align:center;padding:30px;color:#666;">';
                     html += '<div style="font-size:3em;margin-bottom:10px;">📭</div>';
@@ -1421,13 +1420,12 @@ def get_dashboard_manifest_card(token: str) -> str:
                         
                         html += `<div class="manifest-edit-item" style="border:1px solid #e0e0e0;padding:20px;margin:15px 0;border-radius:10px;background:#fafafa;position:relative;">`;
                         
-                        // Başlık ve durum
+                        // Başlık ve sil butonu
                         html += `<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:15px;">`;
                         html += `<div style="flex:1;">`;
                         html += `<input type="text" id="title-${{item.id}}" value="${{item.title}}" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-weight:600;font-size:1.1em;" />`;
                         html += `</div>`;
-                        html += `<div style="margin-left:15px;display:flex;gap:8px;align-items:center;">`;
-                        html += `<span style="background:${{statusColor}};color:white;padding:4px 10px;border-radius:12px;font-size:0.8em;font-weight:600;">${{item.status.toUpperCase()}}</span>`;
+                        html += `<div style="margin-left:15px;">`;
                         html += `<button onclick="deleteManifestItem('${{item.id}}')" style="background:#f44336;color:white;border:none;padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.8em;">🗑️ Sil</button>`;
                         html += `</div>`;
                         html += `</div>`;
@@ -1438,12 +1436,13 @@ def get_dashboard_manifest_card(token: str) -> str:
                         html += `<textarea id="content-${{item.id}}" rows="3" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;resize:vertical;">${{item.content || ''}}</textarea>`;
                         html += `</div>`;
                         
-                        // Medya yönetimi
-                        if (item.media_urls && item.media_urls.length > 0) {{
+                        // Medya yönetimi - hem media_urls hem de media array'ini kontrol et
+                        const mediaItems = item.media_urls || (item.media && item.media.map(m => m.url)) || [];
+                        if (mediaItems.length > 0) {{
                             html += `<div style="margin-bottom:15px;">`;
-                            html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;">🖼️ Medya (${{item.media_urls.length}} dosya):</label>`;
+                            html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;">🖼️ Medya (${{mediaItems.length}} dosya):</label>`;
                             html += `<div style="display:flex;flex-wrap:wrap;gap:10px;">`;
-                            item.media_urls.forEach((url, idx) => {{
+                            mediaItems.forEach((url, idx) => {{
                                 if (typeof url === 'string' && /\.(jpg|jpeg|png|gif|webp)$/i.test(url)) {{
                                     html += `<div style="position:relative;">`;
                                     html += `<img src="${{url}}" style="width:100px;height:80px;object-fit:cover;border-radius:6px;border:2px solid #ddd;" />`;
@@ -1459,16 +1458,11 @@ def get_dashboard_manifest_card(token: str) -> str:
                         }}
                         
                         // Zamanlama düzenleme
-                        html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:15px;">`;
-                        html += `<div>`;
+                        html += `<div style="margin-bottom:15px;">`;
                         html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;">📅 Zamanlama:</label>`;
-                        const scheduleValue = item.scheduled_time ? new Date(item.scheduled_time).toISOString().slice(0, 16) : '';
+                        const scheduledTime = item.scheduled_at || item.scheduled_time;
+                        const scheduleValue = scheduledTime ? new Date(scheduledTime).toISOString().slice(0, 16) : '';
                         html += `<input type="datetime-local" id="schedule-${{item.id}}" value="${{scheduleValue}}" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;" />`;
-                        html += `</div>`;
-                        html += `<div>`;
-                        html += `<label style="display:block;font-weight:600;margin-bottom:5px;color:#555;">📊 Durum:</label>`;
-                        html += `<div style="padding:8px;background:#f5f5f5;border-radius:4px;font-weight:600;color:${{statusColor}};">${{item.status.toUpperCase()}}</div>`;
-                        html += `</div>`;
                         html += `</div>`;
                         
                         // Ek bilgiler düzenleme
@@ -1494,20 +1488,6 @@ def get_dashboard_manifest_card(token: str) -> str:
                         
                         html += `</div>`;
                     }});
-                    
-                    // Özet
-                    const scheduledCount = data.next_items.filter(item => item.status === 'scheduled').length;
-                    const overdueCount = data.next_items.filter(item => item.status === 'overdue').length;
-                    const readyCount = data.next_items.filter(item => item.status === 'ready').length;
-                    
-                    html += `<div style="margin-top:20px;padding:15px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;border-radius:8px;text-align:center;">`;
-                    html += `<strong>📊 Özet:</strong> `;
-                    html += `<span>✅ ${{scheduledCount}} zamanlanmış</span> | `;
-                    html += `<span>⚡ ${{readyCount}} hazır</span>`;
-                    if (overdueCount > 0) {{
-                        html += ` | <span>⚠️ ${{overdueCount}} süresi geçmiş</span>`;
-                    }}
-                    html += `</div>`;
                 }} else {{
                     html = '<div style="text-align:center;padding:50px;color:#666;">';
                     html += '<div style="font-size:4em;margin-bottom:20px;">📭</div>';
