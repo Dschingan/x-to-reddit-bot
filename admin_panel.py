@@ -211,16 +211,7 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
             "vars": [
                 ("SECONDARY_RETWEET_TARGET", "İkincil Takip Hesabı", "text", "Ana hesap dışında takip edilecek ikinci Twitter hesabı (@username)"),
                 ("SECONDARY_RETWEET_TARGET_ID", "İkincil Hesap ID", "text", "İkincil takip hesabının sayısal Twitter ID'si"),
-                ("ENABLE_SECONDARY_RETWEETS", "İkincil Retweet Aktif", "checkbox", "✅ İkincil hesap retweet'lerini işle | ❌ Sadece ana hesap"),
                 ("LOCAL_ONLY", "Sadece Yerel Mod", "checkbox", "✅ Web arayüzü kapalı, sadece konsol | ❌ Web arayüzü açık"),
-            ]
-        },
-        "X API Rate Limiter": {
-            "icon": "⚡",
-            "hidden_if_external_queue": False,
-            "vars": [
-                ("X_API_MONTHLY_LIMIT", "Aylık API Limiti", "number", "X API Free Plan aylık tweet okuma limiti (varsayılan: 1500)"),
-                ("RATE_LIMITER_ENABLED", "Rate Limiter Aktif", "checkbox", "✅ API rate limiting aktif | ❌ Sınırsız istek"),
             ]
         }
     }
@@ -280,9 +271,6 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
         
         # Manuel gönderi kartı ekle
         categories_html += get_manual_post_card(token)
-        
-        # Rate limiter kontrol kartı ekle
-        categories_html += get_rate_limiter_card(token)
         
         return HTMLResponse(get_admin_html(categories_html, current_time, token, use_external_queue))
     
@@ -830,79 +818,6 @@ def get_manual_post_card(token: str) -> str:
             <div class="form-group">
                 <button class="btn-save" onclick="createManualPost()">📤 Gönderi Oluştur</button>
                 <button class="btn-save" onclick="viewScheduledPosts()" style="margin-left:10px;">📅 Zamanlanmış Gönderiler</button>
-            </div>
-        </div>
-    </div>
-    '''
-
-
-def get_rate_limiter_card(token: str) -> str:
-    """X API Rate Limiter kontrol kartı"""
-    return f'''
-    <div class="category-card" style="grid-column: 1 / -1; max-width: none;">
-        <div class="category-header">
-            <span class="category-icon">⚡</span>
-            <h3>X API Rate Limiter - Günlük İstek Yönetimi</h3>
-        </div>
-        <div class="category-content">
-            <!-- İstatistikler -->
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:25px;">
-                <div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:20px;border-radius:8px;text-align:center;">
-                    <h3 id="rl-daily-remaining" style="font-size:2em;margin-bottom:5px;color:white;">-</h3>
-                    <p style="font-size:0.9em;opacity:0.9;margin:0;">Günlük Kalan</p>
-                </div>
-                <div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:20px;border-radius:8px;text-align:center;">
-                    <h3 id="rl-daily-used" style="font-size:2em;margin-bottom:5px;color:white;">-</h3>
-                    <p style="font-size:0.9em;opacity:0.9;margin:0;">Bugün Kullanılan</p>
-                </div>
-                <div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:20px;border-radius:8px;text-align:center;">
-                    <h3 id="rl-monthly-remaining" style="font-size:2em;margin-bottom:5px;color:white;">-</h3>
-                    <p style="font-size:0.9em;opacity:0.9;margin:0;">Aylık Kalan</p>
-                </div>
-                <div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:20px;border-radius:8px;text-align:center;">
-                    <h3 id="rl-monthly-used" style="font-size:2em;margin-bottom:5px;color:white;">-</h3>
-                    <p style="font-size:0.9em;opacity:0.9;margin:0;">Bu Ay Kullanılan</p>
-                </div>
-            </div>
-            
-            <!-- Progress Bar -->
-            <div style="margin-bottom:20px;">
-                <strong>Günlük Kullanım:</strong>
-                <div style="background:#e0e0e0;border-radius:10px;height:20px;overflow:hidden;margin:10px 0;">
-                    <div id="rl-daily-progress" style="background:linear-gradient(90deg,#4caf50,#8bc34a);height:100%;width:0%;transition:width 0.3s;"></div>
-                </div>
-                <span id="rl-daily-percentage">0%</span>
-            </div>
-            
-            <!-- Günlük Limit Ayarı -->
-            <div class="form-group">
-                <label>Günlük Maksimum İstek Sayısı</label>
-                <small class="description">X API Free Plan varsayılan: 1,500 tweet/ay → ~45 tweet/gün (güvenli limit)</small>
-                <div style="display:flex;gap:10px;margin-top:10px;">
-                    <input type="number" id="rl-daily-limit-input" min="1" max="500" value="45" style="flex:1;padding:10px;border:2px solid #ddd;border-radius:6px;"/>
-                    <button class="btn-save" onclick="setRateLimiterDailyLimit()">💾 Limiti Kaydet</button>
-                    <button class="btn-save" onclick="resetRateLimiterDaily()" style="background:#f44336;">🔄 Günlük Sıfırla</button>
-                </div>
-            </div>
-            
-            <!-- Saatlik Zamanlama -->
-            <div class="form-group">
-                <label>Saatlik İstek Zamanlaması (0-23)</label>
-                <small class="description">Hangi saatlerde API isteği yapılacağını seçin. Yeşil = Aktif, Kırmızı = Pasif</small>
-                <div style="display:flex;gap:10px;margin:15px 0;">
-                    <button class="btn-save" onclick="enableAllRLHours()" style="background:#4caf50;">✅ Tümünü Aktif</button>
-                    <button class="btn-save" onclick="disableAllRLHours()" style="background:#f44336;">❌ Tümünü Pasif</button>
-                    <button class="btn-save" onclick="setBusinessRLHours()">🏢 Mesai (9-18)</button>
-                </div>
-                <div id="rl-hours-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(60px,1fr));gap:10px;margin:20px 0;">
-                    <!-- JavaScript ile doldurulacak -->
-                </div>
-                <button class="btn-save" onclick="saveRateLimiterHours()">💾 Saatleri Kaydet</button>
-            </div>
-            
-            <!-- Yenileme Butonu -->
-            <div style="margin-top:20px;">
-                <button class="btn-save" onclick="loadRateLimiterStatus()">🔄 İstatistikleri Yenile</button>
             </div>
         </div>
     </div>
@@ -1559,199 +1474,10 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
             }});
         }}
         
-        // ============================================================================
-        // RATE LIMITER FONKSİYONLARI
-        // ============================================================================
-        
-        let currentRLEnabledHours = [];
-        
-        function loadRateLimiterStatus() {{
-            const token = '{token}';
-            fetch('/admin/api/rate-limiter/status?token=' + token)
-            .then(r => r.json())
-            .then(data => {{
-                if (!data.success) {{
-                    showNotification('Rate limiter hatası: ' + (data.error || 'Bilinmeyen'), 'error');
-                    return;
-                }}
-                
-                const remaining = data.remaining;
-                const stats = data.stats;
-                
-                // İstatistikleri güncelle
-                document.getElementById('rl-daily-remaining').textContent = remaining.daily_remaining;
-                document.getElementById('rl-daily-used').textContent = remaining.daily_used;
-                document.getElementById('rl-monthly-remaining').textContent = remaining.monthly_remaining;
-                document.getElementById('rl-monthly-used').textContent = remaining.monthly_used;
-                
-                // Progress bar
-                const dailyPercent = (remaining.daily_used / remaining.daily_limit * 100).toFixed(1);
-                document.getElementById('rl-daily-progress').style.width = dailyPercent + '%';
-                document.getElementById('rl-daily-percentage').textContent = dailyPercent + '%';
-                
-                // Limit input
-                document.getElementById('rl-daily-limit-input').value = remaining.daily_limit;
-                
-                // Aktif saatleri güncelle
-                currentRLEnabledHours = stats.enabled_hours || [];
-                renderRLHoursGrid();
-                
-                showNotification('✓ İstatistikler güncellendi', 'success');
-            }})
-            .catch(e => {{
-                showNotification('✗ Ağ hatası: ' + e.message, 'error');
-            }});
-        }}
-        
-        function renderRLHoursGrid() {{
-            const grid = document.getElementById('rl-hours-grid');
-            grid.innerHTML = '';
-            
-            for (let hour = 0; hour < 24; hour++) {{
-                const btn = document.createElement('div');
-                btn.style.cssText = 'padding:15px;border:2px solid #ddd;border-radius:8px;background:white;cursor:pointer;text-align:center;transition:all 0.3s;font-weight:600;';
-                btn.textContent = hour.toString().padStart(2, '0') + ':00';
-                
-                if (currentRLEnabledHours.includes(hour)) {{
-                    btn.style.background = 'linear-gradient(135deg,#4caf50,#8bc34a)';
-                    btn.style.color = 'white';
-                    btn.style.borderColor = '#4caf50';
-                }} else {{
-                    btn.style.background = '#f44336';
-                    btn.style.color = 'white';
-                    btn.style.borderColor = '#f44336';
-                }}
-                
-                btn.onclick = function() {{
-                    toggleRLHour(hour);
-                }};
-                
-                btn.onmouseover = function() {{
-                    this.style.transform = 'translateY(-2px)';
-                    this.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
-                }};
-                
-                btn.onmouseout = function() {{
-                    this.style.transform = 'translateY(0)';
-                    this.style.boxShadow = 'none';
-                }};
-                
-                grid.appendChild(btn);
-            }}
-        }}
-        
-        function toggleRLHour(hour) {{
-            const index = currentRLEnabledHours.indexOf(hour);
-            if (index > -1) {{
-                currentRLEnabledHours.splice(index, 1);
-            }} else {{
-                currentRLEnabledHours.push(hour);
-            }}
-            currentRLEnabledHours.sort((a, b) => a - b);
-            renderRLHoursGrid();
-        }}
-        
-        function enableAllRLHours() {{
-            currentRLEnabledHours = Array.from({{length: 24}}, (_, i) => i);
-            renderRLHoursGrid();
-        }}
-        
-        function disableAllRLHours() {{
-            currentRLEnabledHours = [];
-            renderRLHoursGrid();
-        }}
-        
-        function setBusinessRLHours() {{
-            currentRLEnabledHours = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18];
-            renderRLHoursGrid();
-        }}
-        
-        function saveRateLimiterHours() {{
-            const token = '{token}';
-            fetch('/admin/api/rate-limiter/set-enabled-hours', {{
-                method: 'POST',
-                headers: {{
-                    'Content-Type': 'application/json',
-                    'X-Admin-Token': token
-                }},
-                body: JSON.stringify({{hours: currentRLEnabledHours}})
-            }})
-            .then(r => r.json())
-            .then(data => {{
-                if (data.success) {{
-                    showNotification('✓ Saatler kaydedildi', 'success');
-                    loadRateLimiterStatus();
-                }} else {{
-                    showNotification('✗ Hata: ' + data.error, 'error');
-                }}
-            }})
-            .catch(e => {{
-                showNotification('✗ Ağ hatası: ' + e.message, 'error');
-            }});
-        }}
-        
-        function setRateLimiterDailyLimit() {{
-            const token = '{token}';
-            const limit = parseInt(document.getElementById('rl-daily-limit-input').value);
-            
-            if (limit < 1 || limit > 500) {{
-                showNotification('✗ Limit 1-500 arasında olmalı', 'error');
-                return;
-            }}
-            
-            fetch('/admin/api/rate-limiter/set-daily-limit', {{
-                method: 'POST',
-                headers: {{
-                    'Content-Type': 'application/json',
-                    'X-Admin-Token': token
-                }},
-                body: JSON.stringify({{limit: limit}})
-            }})
-            .then(r => r.json())
-            .then(data => {{
-                if (data.success) {{
-                    showNotification('✓ Günlük limit ayarlandı: ' + limit, 'success');
-                    loadRateLimiterStatus();
-                }} else {{
-                    showNotification('✗ Hata: ' + data.error, 'error');
-                }}
-            }})
-            .catch(e => {{
-                showNotification('✗ Ağ hatası: ' + e.message, 'error');
-            }});
-        }}
-        
-        function resetRateLimiterDaily() {{
-            if (!confirm('Günlük kullanımı sıfırlamak istediğinizden emin misiniz?')) return;
-            
-            const token = '{token}';
-            fetch('/admin/api/rate-limiter/reset-daily', {{
-                method: 'POST',
-                headers: {{'X-Admin-Token': token}}
-            }})
-            .then(r => r.json())
-            .then(data => {{
-                if (data.success) {{
-                    showNotification('✓ Günlük kullanım sıfırlandı', 'success');
-                    loadRateLimiterStatus();
-                }} else {{
-                    showNotification('✗ Hata: ' + data.error, 'error');
-                }}
-            }})
-            .catch(e => {{
-                showNotification('✗ Ağ hatası: ' + e.message, 'error');
-            }});
-        }}
-        
         // Sayfa yüklendiğinde manifest'i otomatik yükle
         document.addEventListener('DOMContentLoaded', function() {{
             if (document.getElementById('manifest-preview')) {{
                 loadManifestPreview();
-            }}
-            
-            // Rate limiter varsa yükle
-            if (document.getElementById('rl-hours-grid')) {{
-                loadRateLimiterStatus();
             }}
         }});
     </script>
