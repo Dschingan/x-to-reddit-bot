@@ -11,7 +11,6 @@ import json
 import asyncio
 import calendar
 from datetime import datetime, timedelta
-from 상태_관리 import StateManager
 import sqlite3
 import hashlib
 import tempfile
