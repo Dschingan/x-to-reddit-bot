@@ -9,7 +9,9 @@ import sys
 import time
 import json
 import asyncio
-import logging
+import calendar
+from datetime import datetime, timedelta
+from 상태_관리 import StateManager
 import sqlite3
 import hashlib
 import tempfile
@@ -1749,7 +1751,43 @@ def _is_title_already_posted_by_bot(title: str, limit: int = 50) -> bool:
     return False
 
 # Main loop
+# Kota yönetimi için değişkenler
+last_post_time = None
+
+def is_post_allowed_by_quota():
+    """Aylık kotaya göre gönderi yapılıp yapılamayacağını kontrol eder."""
+    global last_post_time
+    monthly_quota_str = os.getenv("MONTHLY_POST_QUOTA")
+    
+    if not monthly_quota_str or not monthly_quota_str.isdigit() or int(monthly_quota_str) <= 0:
+        return True  # Kota ayarlanmamışsa veya geçersizse, her zaman izin ver
+
+    monthly_quota = int(monthly_quota_str)
+    now = datetime.now()
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    
+    # Ay içindeki toplam saniye sayısını hesapla
+    total_seconds_in_month = days_in_month * 24 * 60 * 60
+    
+    # İki gönderi arasındaki minimum bekleme süresini hesapla
+    interval_seconds = total_seconds_in_month / monthly_quota
+    
+    if last_post_time is None:
+        # İlk gönderi, her zaman izin ver
+        return True
+    
+    # Son gönderiden bu yana geçen süreyi kontrol et
+    time_since_last_post = (now - last_post_time).total_seconds()
+    
+    if time_since_last_post >= interval_seconds:
+        return True
+    else:
+        remaining_time = interval_seconds - time_since_last_post
+        print(f"[KOTA] Kota nedeniyle gönderi atlanıyor. Sonraki gönderi için kalan süre: {timedelta(seconds=remaining_time)}")
+        return False
+
 def main_loop():
+    global last_post_time
     while True:
         try:
             process_external_due_items()
@@ -4832,6 +4870,10 @@ def main_loop():
         try:
             print("\n" + "="*50)
             print(f"[+] Tweet kontrol ediliyor... ({time.strftime('%Y-%m-%d %H:%M:%S')})")
+
+            if not is_post_allowed_by_quota():
+                time.sleep(60)
+                continue
             # Önce planlı haftalık gönderiyi kontrol et/oluştur
             _create_and_pin_weekly_post_if_due()
 
@@ -5118,15 +5160,16 @@ def main_loop():
                 if not chosen_text:
                     chosen_text = f"@{TWITTER_SCREENNAME} paylaşımı - {tweet_id}"
                 title_to_use, remainder_to_post = smart_split_title(chosen_text, 300)
-                print(f"[+] Kullanılacak başlık ({len(title_to_use)}): {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
+                print(f"[+] RT Kullanılacak başlık ({len(title_to_use)}): {title_to_use[:80]}{'...' if len(title_to_use) > 80 else ''}")
                 if remainder_to_post:
-                    print(f"[+] Başlığın kalan kısmı ({len(remainder_to_post)} karakter) gönderi açıklaması/yorum olarak eklenecek")
-                print("[+] Reddit'e post gönderiliyor...")
+                    print(f"[+] RT Başlığın kalan kısmı ({len(remainder_to_post)} karakter) gönderi açıklaması/yorum olarak eklenecek")
+                print("[+] RT Reddit'e post gönderiliyor...")
                 success = submit_post(title_to_use, media_files, text, remainder_text=remainder_to_post)
                 if success:
-                    print(f"[+] Tweet başarıyla işlendi: {tweet_id}")
+                    print(f"[SUCCESS] RT {tweet_id} başarıyla gönderildi.")
+                    last_post_time = datetime.now()
                 else:
-                    print(f"[UYARI] Tweet işlenemedi ama ID zaten kaydedildi: {tweet_id}")
+                    print(f"[UYARI] RT işlenemedi ama ID zaten kaydedildi: {tweet_id}")
                     for fpath in media_files:
                         try:
                             if os.path.exists(fpath):
