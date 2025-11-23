@@ -205,6 +205,13 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
                 ("SCHEDULED_PIN_ENABLED", "Haftalık Sabit Gönderi", "checkbox", "✅ Her hafta belirlenen günde otomatik pin gönderisi yap"),
             ]
         },
+        "Kota Ayarları": {
+            "icon": "📊",
+            "hidden_if_external_queue": False,
+            "vars": [
+                ("MONTHLY_POST_QUOTA", "Aylık Gönderi Kotası", "number", "Botun bir ay içinde çekeceği maksimum gönderi sayısı. Eşit olarak dağıtılır."),
+            ]
+        },
         "Diğer Ayarlar": {
             "icon": "⚙️",
             "hidden_if_external_queue": True,
@@ -338,16 +345,6 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
         except Exception as e:
             return JSONResponse({"success": False, "error": str(e)})
     
-    @app.get("/admin/dashboard", response_class=HTMLResponse)
-    def admin_dashboard(request: Request):
-        """Gelişmiş dashboard"""
-        if not _is_admin(request):
-            return HTMLResponse("<h1>Unauthorized</h1>", status_code=401)
-        
-        token = request.query_params.get("token", "")
-        stats = manager.get_env_stats()
-        
-        return HTMLResponse(get_dashboard_html(stats, token))
     
     @app.get("/admin/api/stats")
     def api_get_stats(request: Request):
@@ -902,8 +899,7 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                 <div class="info-item"><strong>Dosya:</strong> .env</div>
             </div>
             <div class="nav-buttons">
-                <a href="/admin/dashboard?token={token}" class="nav-btn">📊 Dashboard</a>
-                <a href="/admin/panel?token={token}" class="nav-btn active">⚙️ Ayarlar</a>
+                <a href="/admin/panel?token={token}" class="nav-btn active">⚙️ Yapılandırma</a>
                 <button onclick="backupEnv()" class="nav-btn">💾 Yedekle</button>
                 <button onclick="showBackups()" class="nav-btn">📂 Yedekler</button>
                 <button onclick="window.open('{os.getenv('MANIFEST_URL', '#')}', '_blank')" class="nav-btn">📈 Manifest Düzenle</button>
@@ -1141,10 +1137,10 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                             html += `<p style="margin:8px 0;color:#555;font-size:0.9em;line-height:1.4;">${{shortContent}}</p>`;
                         }}
                         
-                        // Kaynak URL butonu
+                        // Kaynak URL butonu - Manifest URL'sine yönlendir
                         if (item.source_url) {{
                             html += `<div style="margin:10px 0;">`;
-                            html += `<button onclick="window.open('${{item.source_url}}', '_blank')" style="background:#1976d2;color:white;border:none;padding:8px 16px;border-radius:6px;font-size:0.9em;cursor:pointer;display:flex;align-items:center;gap:8px;width:100%;">`;
+                            html += `<button onclick="openSourceUrl('${{item.source_url}}')" style="background:#1976d2;color:white;border:none;padding:8px 16px;border-radius:6px;font-size:0.9em;cursor:pointer;display:flex;align-items:center;gap:8px;width:100%;">`;
                             html += `<span>🔗</span><span>Orijinal Tweet'i Görüntüle</span>`;
                             html += `</button>`;
                             html += `</div>`;
@@ -1472,6 +1468,24 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                 document.body.removeChild(textArea);
                 showNotification('✓ URL panoya kopyalandı', 'success');
             }});
+        }}
+        
+        function openSourceUrl(url) {{
+            // Önce doğrudan URL'yi açmayı dene
+            try {{
+                window.open(url, '_blank');
+            }} catch(e) {{
+                // Hata durumunda manifest URL'sine yönlendir
+                const manifestUrl = '{os.getenv('MANIFEST_URL', '')}';
+                if (manifestUrl) {{
+                    showNotification('⚠️ Tweet URL açılamadı, manifest sayfasına yönlendiriliyorsunuz...', 'error');
+                    setTimeout(() => {{
+                        window.open(manifestUrl, '_blank');
+                    }}, 1000);
+                }} else {{
+                    showNotification('✗ URL açılamadı ve manifest URL tanımlı değil', 'error');
+                }}
+            }}
         }}
         
         // Sayfa yüklendiğinde manifest'i otomatik yükle
