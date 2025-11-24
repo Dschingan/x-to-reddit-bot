@@ -33,13 +33,16 @@ class AdminPanelManager:
     
     def get_env_var(self, key: str) -> Optional[str]:
         """Belirli bir .env değişkenini al"""
+        self.env_vars = self._load_env()  # Her seferinde yeniden yükle
         return self.env_vars.get(key)
     
     def set_env_var(self, key: str, value: str) -> bool:
         """Belirli bir .env değişkenini ayarla"""
         try:
+            self.env_vars = self._load_env()  # Önce yeniden yükle
             self.env_vars[key] = value
             self._save_env()
+            os.environ[key] = value  # OS environment'ı da güncelle
             return True
         except Exception as e:
             print(f"[HATA] .env ayarlanamadı: {e}")
@@ -60,6 +63,7 @@ class AdminPanelManager:
     
     def get_all_env_vars(self) -> Dict[str, str]:
         """Tüm .env değişkenlerini al"""
+        self.env_vars = self._load_env()  # Her seferinde yeniden yükle
         return self.env_vars.copy()
     
     def delete_env_var(self, key: str) -> bool:
@@ -1011,17 +1015,30 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                 return;
             }}
             
+            button.disabled = true;
+            const originalText = button.textContent;
+            button.textContent = '⏳ Kaydediliyor...';
+            
             fetch('/admin/api/set-env', {{
                 method: 'POST',
                 headers: {{'Content-Type': 'application/json', 'X-Admin-Token': token}},
                 body: JSON.stringify({{key: varName, value: value}})
             }}).then(r => r.json()).then(data => {{
+                button.disabled = false;
+                button.textContent = originalText;
+                
                 if (data.success) {{
                     showNotification('✓ ' + varName + ' kaydedildi', 'success');
+                    // Checkbox'ı güncelle
+                    if (input.type === 'checkbox') {{
+                        input.checked = (value === 'true');
+                    }}
                 }} else {{
                     showNotification('✗ Hata: ' + (data.error || 'Bilinmeyen hata'), 'error');
                 }}
             }}).catch(e => {{
+                button.disabled = false;
+                button.textContent = originalText;
                 showNotification('✗ Ağ hatası: ' + e.message, 'error');
             }});
         }}
