@@ -34,6 +34,7 @@ import logging
 import sqlite3
 # Pnytter kaldırıldı - sadece TWSCRAPE kullanılacak
 # Lazy import için Google AI modüllerini kaldır - ihtiyaç duyulduğunda import edilecek
+# Tweepy lazy import - Twitter API v2 için
 
 # FastAPI for web service - lazy import
 # from fastapi import FastAPI, Request - lazy import
@@ -146,6 +147,130 @@ DOWNLOAD_READ_TIMEOUT = float(os.getenv("DOWNLOAD_READ_TIMEOUT", "60") or 60)
 DOWNLOAD_CHUNK_SLEEP_MS = int(os.getenv("DOWNLOAD_CHUNK_SLEEP_MS", "0") or 0)
 MANIFEST_IGNORE_SCHEDULE = os.getenv("MANIFEST_IGNORE_SCHEDULE", "false").strip().lower() == "true"
 MANIFEST_POST_INTERVAL_SECONDS = int(os.getenv("MANIFEST_POST_INTERVAL_SECONDS", "600") or 600)
+
+# --- Twitter API v2 Ayarları ---
+USE_TWITTER_API_V2 = os.getenv("USE_TWITTER_API_V2", "false").strip().lower() == "true"
+TWITTER_API_V2_BEARER_TOKEN = os.getenv("TWITTER_API_V2_BEARER_TOKEN", "").strip()
+TWITTER_API_V2_FALLBACK = os.getenv("TWITTER_API_V2_FALLBACK", "false").strip().lower() == "true"
+MONTHLY_TWEET_QUOTA = int(os.getenv("MONTHLY_TWEET_QUOTA", "100") or 100)
+MONTHLY_RATE_LIMIT_QUOTA = int(os.getenv("MONTHLY_RATE_LIMIT_QUOTA", "1000") or 1000)
+TWITTER_API_V2_MAX_RESULTS = min(100, max(1, int(os.getenv("TWITTER_API_V2_MAX_RESULTS", "100") or 100)))
+
+# Twitter API v2 client (lazy init)
+twitter_api_v2_client = None
+
+# Quota tracking
+class QuotaTracker:
+    """Twitter API v2 quota ve rate limit takibi"""
+    def __init__(self, db_path: str = "quota_tracker.db"):
+        self.db_path = db_path
+        self._init_db()
+    
+    def _init_db(self):
+        """Quota veritabanını başlat"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS quota_usage (
+                    id INTEGER PRIMARY KEY,
+                    year INTEGER,
+                    month INTEGER,
+                    tweets_fetched INTEGER DEFAULT 0,
+                    api_calls_made INTEGER DEFAULT 0,
+                    last_reset TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[UYARI] Quota DB başlatılamadı: {e}")
+    
+    def get_current_month_usage(self) -> Dict[str, int]:
+        """Mevcut ay için quota kullanımını al"""
+        try:
+            now = datetime.now()
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT tweets_fetched, api_calls_made FROM quota_usage WHERE year=? AND month=?",
+                (now.year, now.month)
+            )
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                return {"tweets_fetched": result[0], "api_calls_made": result[1]}
+            return {"tweets_fetched": 0, "api_calls_made": 0}
+        except Exception as e:
+            print(f"[UYARI] Quota sorgusu hatası: {e}")
+            return {"tweets_fetched": 0, "api_calls_made": 0}
+    
+    def can_fetch_tweets(self, count: int = 1) -> bool:
+        """Tweet çekebilir mi kontrol et"""
+        usage = self.get_current_month_usage()
+        return usage["tweets_fetched"] + count <= MONTHLY_TWEET_QUOTA
+    
+    def can_make_api_call(self) -> bool:
+        """API çağrısı yapabilir mi kontrol et"""
+        usage = self.get_current_month_usage()
+        return usage["api_calls_made"] + 1 <= MONTHLY_RATE_LIMIT_QUOTA
+    
+    def record_tweet_fetch(self, count: int = 1):
+        """Tweet çekme işlemini kaydet"""
+        try:
+            now = datetime.now()
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM quota_usage WHERE year=? AND month=?",
+                (now.year, now.month)
+            )
+            row = cursor.fetchone()
+            
+            if row:
+                cursor.execute(
+                    "UPDATE quota_usage SET tweets_fetched = tweets_fetched + ? WHERE id=?",
+                    (count, row[0])
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO quota_usage (year, month, tweets_fetched) VALUES (?, ?, ?)",
+                    (now.year, now.month, count)
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[UYARI] Quota kaydı hatası: {e}")
+    
+    def record_api_call(self):
+        """API çağrısını kaydet"""
+        try:
+            now = datetime.now()
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM quota_usage WHERE year=? AND month=?",
+                (now.year, now.month)
+            )
+            row = cursor.fetchone()
+            
+            if row:
+                cursor.execute(
+                    "UPDATE quota_usage SET api_calls_made = api_calls_made + 1 WHERE id=?",
+                    (row[0],)
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO quota_usage (year, month, api_calls_made) VALUES (?, ?, ?)",
+                    (now.year, now.month, 1)
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[UYARI] API çağrısı kaydı hatası: {e}")
+
+# Quota tracker instance
+quota_tracker = QuotaTracker()
 
 # --- Localization helpers (Unicode + casing) ---
 def _nfc(s: str) -> str:
@@ -613,6 +738,104 @@ async def init_twscrape_api():
         except Exception as de:
             print(f"[DIAG] pool inceleme hatası: {de}")
     return twscrape_api
+
+async def init_twitter_api_v2():
+    """Twitter API v2 client'ını başlat (tweepy kullanarak)"""
+    global twitter_api_v2_client
+    if twitter_api_v2_client is None:
+        try:
+            import tweepy
+            if not TWITTER_API_V2_BEARER_TOKEN:
+                print("[UYARI] Twitter API v2 Bearer Token bulunamadı")
+                return None
+            
+            twitter_api_v2_client = tweepy.Client(
+                bearer_token=TWITTER_API_V2_BEARER_TOKEN,
+                wait_on_rate_limit=True
+            )
+            print("[+] Twitter API v2 client başlatıldı")
+        except ImportError:
+            print("[HATA] tweepy modülü yüklü değil. 'pip install tweepy' çalıştırın")
+            return None
+        except Exception as e:
+            print(f"[HATA] Twitter API v2 başlatılamadı: {e}")
+            return None
+    
+    return twitter_api_v2_client
+
+async def fetch_tweets_with_api_v2(query: str, max_results: int = None) -> List[Dict[str, Any]]:
+    """Twitter API v2 kullanarak tweet çek"""
+    if not TWITTER_API_V2_BEARER_TOKEN:
+        print("[UYARI] Twitter API v2 Bearer Token ayarlanmamış")
+        return []
+    
+    # Quota kontrol
+    if not quota_tracker.can_make_api_call():
+        print(f"[UYARI] Aylık rate limit kotası aşıldı ({MONTHLY_RATE_LIMIT_QUOTA})")
+        return []
+    
+    if max_results is None:
+        max_results = TWITTER_API_V2_MAX_RESULTS
+    else:
+        max_results = min(max_results, TWITTER_API_V2_MAX_RESULTS)
+    
+    try:
+        client = await init_twitter_api_v2()
+        if not client:
+            return []
+        
+        # API çağrısını kaydet
+        quota_tracker.record_api_call()
+        
+        # Tweet çek
+        tweets_data = client.search_recent_tweets(
+            query=query,
+            max_results=max_results,
+            tweet_fields=['created_at', 'author_id', 'public_metrics', 'lang'],
+            expansions=['author_id'],
+            user_fields=['username', 'name', 'verified']
+        )
+        
+        if not tweets_data or not tweets_data.data:
+            print("[INFO] API v2: Tweet bulunamadı")
+            return []
+        
+        # Tweet sayısını kontrol et
+        tweet_count = len(tweets_data.data)
+        if not quota_tracker.can_fetch_tweets(tweet_count):
+            print(f"[UYARI] Aylık tweet çekme kotası aşılacak ({MONTHLY_TWEET_QUOTA})")
+            return []
+        
+        # Quota'yı güncelle
+        quota_tracker.record_tweet_fetch(tweet_count)
+        
+        # Tweet'leri format et
+        result = []
+        users_map = {u.id: u for u in (tweets_data.includes['users'] or [])}
+        
+        for tweet in tweets_data.data:
+            user = users_map.get(tweet.author_id)
+            result.append({
+                'id': tweet.id,
+                'text': tweet.text,
+                'created_at': tweet.created_at,
+                'author': {
+                    'id': tweet.author_id,
+                    'username': user.username if user else 'unknown',
+                    'name': user.name if user else 'Unknown',
+                    'verified': user.verified if user else False
+                },
+                'metrics': tweet.public_metrics if tweet.public_metrics else {},
+                'language': tweet.lang if tweet.lang else 'unknown',
+                'source': 'twitter_api_v2'
+            })
+        
+        print(f"[+] API v2: {tweet_count} tweet çekildi")
+        return result
+    
+    except Exception as e:
+        print(f"[HATA] Twitter API v2 çekme hatası: {e}")
+        return []
 
 async def _get_best_media_urls(tweet_id: int | str) -> tuple[str | None, str | None]:
     """twscrape ile tweet detaylarından en iyi MP4 ve HLS URL'lerini bul.
