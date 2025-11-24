@@ -150,6 +150,18 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
                 ("TWSCRAPE_DEBUG", "TWSCRAPE Debug", "checkbox", "Tweet çekme işlemlerinde detaylı log göster"),
             ]
         },
+        "Twitter API v2 Ayarları": {
+            "icon": "🔌",
+            "hidden_if_external_queue": False,
+            "vars": [
+                ("USE_TWITTER_API_V2", "API v2 Desteği", "checkbox", "✅ Twitter API v2 kullan | ❌ Sadece twscrape kullan"),
+                ("TWITTER_API_V2_BEARER_TOKEN", "API v2 Bearer Token", "text", "Twitter API v2 için Bearer Token (https://developer.twitter.com)"),
+                ("TWITTER_API_V2_FALLBACK", "API v2 Fallback", "checkbox", "✅ twscrape başarısız olursa API v2 kullan | ❌ Sadece twscrape"),
+                ("MONTHLY_TWEET_QUOTA", "Aylık Tweet Çekme Kotası", "number", "Ayda çekilecek maksimum tweet sayısı (varsayılan: 100)"),
+                ("MONTHLY_RATE_LIMIT_QUOTA", "Aylık Rate Limit Kotası", "number", "Ayda kullanılabilecek maksimum API çağrısı (varsayılan: 1000)"),
+                ("TWITTER_API_V2_MAX_RESULTS", "Tek Sorgu Max Sonuç", "number", "Bir API çağrısında döndürülecek maksimum tweet (1-100, varsayılan: 100)"),
+            ]
+        },
         "Reddit Ayarları": {
             "icon": "🔴",
             "hidden_if_external_queue": False,
@@ -272,7 +284,10 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
             
             categories_html += "</div></div>"
         
-        # Manifest önizleme kartını en üste ekle
+        # Quota durumu kartını en üste ekle
+        categories_html = get_quota_status_card(token) + categories_html
+        
+        # Manifest önizleme kartını ekle
         if use_external_queue:
             categories_html = get_manifest_preview_card(token) + categories_html
         
@@ -360,6 +375,43 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
             return JSONResponse(stats)
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/admin/api/quota-status")
+    def api_get_quota_status(request: Request):
+        """API: Twitter API v2 quota durumunu al"""
+        if not _is_admin(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        
+        try:
+            # Bot.py'den quota_tracker'ı import et
+            import sys
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("bot", "bot.py")
+            bot_module = importlib.util.module_from_spec(spec)
+            
+            # Quota bilgisini al
+            try:
+                from bot import quota_tracker, MONTHLY_TWEET_QUOTA, MONTHLY_RATE_LIMIT_QUOTA
+                usage = quota_tracker.get_current_month_usage()
+                
+                return JSONResponse({
+                    "success": True,
+                    "tweets_fetched": usage["tweets_fetched"],
+                    "tweets_quota": MONTHLY_TWEET_QUOTA,
+                    "tweets_remaining": max(0, MONTHLY_TWEET_QUOTA - usage["tweets_fetched"]),
+                    "api_calls_made": usage["api_calls_made"],
+                    "api_calls_quota": MONTHLY_RATE_LIMIT_QUOTA,
+                    "api_calls_remaining": max(0, MONTHLY_RATE_LIMIT_QUOTA - usage["api_calls_made"]),
+                    "tweets_percent": round((usage["tweets_fetched"] / MONTHLY_TWEET_QUOTA * 100) if MONTHLY_TWEET_QUOTA > 0 else 0, 1),
+                    "api_calls_percent": round((usage["api_calls_made"] / MONTHLY_RATE_LIMIT_QUOTA * 100) if MONTHLY_RATE_LIMIT_QUOTA > 0 else 0, 1)
+                })
+            except ImportError:
+                return JSONResponse({
+                    "success": False,
+                    "error": "Quota tracker bulunamadı"
+                })
+        except Exception as e:
+            return JSONResponse({"success": False, "error": str(e)})
     
     @app.post("/admin/api/backup")
     def api_backup_env(request: Request):
@@ -761,6 +813,25 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
         except Exception as e:
             return JSONResponse({"success": False, "error": str(e)})
 
+
+def get_quota_status_card(token: str) -> str:
+    """Twitter API v2 Quota durumu kartı"""
+    return f'''
+    <div class="category-card" style="grid-column: 1 / -1; max-width: none;">
+        <div class="category-header">
+            <span class="category-icon">📊</span>
+            <h3>Twitter API v2 Quota Durumu</h3>
+        </div>
+        <div class="category-content">
+            <div class="form-group">
+                <button class="btn-save" onclick="loadQuotaStatus()" style="width:100%;margin-bottom:15px;">🔄 Quota Yükle</button>
+                <div id="quota-status" style="margin-top:15px;">
+                    <div style="text-align:center;padding:20px;"><div class="loading-spinner"></div><p>Quota yükleniyor...</p></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    '''
 
 def get_manifest_preview_card(token: str) -> str:
     """Manifest önizleme kartı"""
@@ -1470,8 +1541,73 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
             }}
         }}
         
-        // Sayfa yüklendiğinde manifest'i otomatik yükle
+        // Quota durumunu yükle
+        function loadQuotaStatus() {{
+            const token = '{token}';
+            const quotaDiv = document.getElementById('quota-status');
+            quotaDiv.innerHTML = '<div style="text-align:center;padding:20px;"><div class="loading-spinner"></div><p>Quota yükleniyor...</p></div>';
+            
+            fetch('/admin/api/quota-status?token=' + token)
+            .then(r => r.json())
+            .then(data => {{
+                if (data.success) {{
+                    const tweetsPercent = data.tweets_percent || 0;
+                    const apiPercent = data.api_calls_percent || 0;
+                    
+                    let html = '<div style="margin-bottom:20px;">';
+                    
+                    // Tweet Quota
+                    html += '<div style="margin-bottom:15px;">';
+                    html += '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">';
+                    html += `<strong>📤 Tweet Çekme Kotası</strong>`;
+                    html += `<span style="color:#666;">${{data.tweets_fetched}} / ${{data.tweets_quota}}</span>`;
+                    html += '</div>';
+                    html += `<div style="width:100%;height:20px;background:#e0e0e0;border-radius:10px;overflow:hidden;">`;
+                    html += `<div style="width:${{tweetsPercent}}%;height:100%;background:linear-gradient(90deg,#667eea,#764ba2);transition:width 0.3s;"></div>`;
+                    html += '</div>';
+                    html += `<small style="color:#666;">Kalan: ${{data.tweets_remaining}} (${{tweetsPercent}}% kullanıldı)</small>`;
+                    html += '</div>';
+                    
+                    // API Calls Quota
+                    html += '<div style="margin-bottom:15px;">';
+                    html += '<div style="display:flex;justify-content:space-between;margin-bottom:5px;">';
+                    html += `<strong>🔌 API Çağrısı Kotası</strong>`;
+                    html += `<span style="color:#666;">${{data.api_calls_made}} / ${{data.api_calls_quota}}</span>`;
+                    html += '</div>';
+                    html += `<div style="width:100%;height:20px;background:#e0e0e0;border-radius:10px;overflow:hidden;">`;
+                    html += `<div style="width:${{apiPercent}}%;height:100%;background:linear-gradient(90deg,#ff9800,#f44336);transition:width 0.3s;"></div>`;
+                    html += '</div>';
+                    html += `<small style="color:#666;">Kalan: ${{data.api_calls_remaining}} (${{apiPercent}}% kullanıldı)</small>`;
+                    html += '</div>';
+                    
+                    html += '</div>';
+                    
+                    // Uyarı mesajları
+                    if (tweetsPercent > 80) {{
+                        html += '<div style="padding:10px;background:#fff3cd;border-radius:6px;border-left:4px solid #ffc107;margin-top:10px;">';
+                        html += '<strong>⚠️ Uyarı:</strong> Tweet çekme kotası %80\'i aştı!';
+                        html += '</div>';
+                    }}
+                    if (apiPercent > 80) {{
+                        html += '<div style="padding:10px;background:#fff3cd;border-radius:6px;border-left:4px solid #ffc107;margin-top:10px;">';
+                        html += '<strong>⚠️ Uyarı:</strong> API çağrısı kotası %80\'i aştı!';
+                        html += '</div>';
+                    }}
+                    
+                    quotaDiv.innerHTML = html;
+                }} else {{
+                    quotaDiv.innerHTML = `<div style="color:red;padding:15px;border:1px solid #ffcdd2;background:#ffebee;border-radius:6px;">❌ Hata: ${{data.error}}</div>`;
+                }}
+            }}).catch(e => {{
+                quotaDiv.innerHTML = `<div style="color:red;padding:15px;border:1px solid #ffcdd2;background:#ffebee;border-radius:6px;">❌ Ağ hatası: ${{e.message}}</div>`;
+            }});
+        }}
+        
+        // Sayfa yüklendiğinde manifest'i ve quota'yı otomatik yükle
         document.addEventListener('DOMContentLoaded', function() {{
+            if (document.getElementById('quota-status')) {{
+                loadQuotaStatus();
+            }}
             if (document.getElementById('manifest-preview')) {{
                 loadManifestPreview();
             }}
