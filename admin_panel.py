@@ -160,6 +160,8 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
                 ("MONTHLY_TWEET_QUOTA", "Aylık Tweet Çekme Kotası", "number", "Ayda çekilecek maksimum tweet sayısı (varsayılan: 100)"),
                 ("MONTHLY_RATE_LIMIT_QUOTA", "Aylık Rate Limit Kotası", "number", "Ayda kullanılabilecek maksimum API çağrısı (varsayılan: 1000)"),
                 ("TWITTER_API_V2_MAX_RESULTS", "Tek Sorgu Max Sonuç", "number", "Bir API çağrısında döndürülecek maksimum tweet (1-100, varsayılan: 100)"),
+                ("TEST_TWEET_LINK", "Test Tweet Linki", "text", "API v2 test için tweet linki (https://twitter.com/user/status/123456789)"),
+                ("API_V2_TEST_MODE", "API v2 Test Modu", "checkbox", "✅ Test modu etkin (tweet çek ve medya indir) | ❌ Normal mod"),
             ]
         },
         "Reddit Ayarları": {
@@ -985,21 +987,30 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
     </div>
     <script>
         function saveEnvVar(varName, button) {{
-            const group = button.parentElement;
-            const inputs = group.querySelectorAll('.env-input');
-            let input = null;
-            for (let i of inputs) {{
-                if (i.name === varName) {{
-                    input = i;
-                    break;
-                }}
+            // Button'ın parent'i form-group, form-group içinde input'ı ara
+            const group = button.closest('.form-group');
+            if (!group) {{
+                showNotification('✗ Form grubu bulunamadı', 'error');
+                return;
             }}
-            if (!input) return;
+            
+            const input = group.querySelector('.env-input[name="' + varName + '"]');
+            if (!input) {{
+                showNotification('✗ Input bulunamadı: ' + varName, 'error');
+                return;
+            }}
+            
             let value = input.value;
             if (input.type === 'checkbox') {{
                 value = input.checked ? 'true' : 'false';
             }}
+            
             const token = input.dataset.token;
+            if (!token) {{
+                showNotification('✗ Token bulunamadı', 'error');
+                return;
+            }}
+            
             fetch('/admin/api/set-env', {{
                 method: 'POST',
                 headers: {{'Content-Type': 'application/json', 'X-Admin-Token': token}},
