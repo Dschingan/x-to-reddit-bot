@@ -264,7 +264,7 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
                 
                 if input_type == "checkbox":
                     checked = "checked" if current_value.lower() in ["true", "1", "yes"] else ""
-                    categories_html += f'<div class="form-group"><label class="checkbox-label"><input type="checkbox" name="{var_name}" {checked} class="env-input" data-token="{token}"/><span class="checkbox-text">{label}</span></label><small class="description">{description}</small></div>'
+                    categories_html += f'<div class="form-group"><label class="checkbox-label"><input type="checkbox" name="{var_name}" {checked} class="env-input" data-token="{token}"/><span class="checkbox-text">{label}</span></label><small class="description">{description}</small><button class="btn-save" onclick="saveEnvVar(\'{var_name}\', this)">💾 Kaydet</button></div>'
                 elif input_type == "textarea":
                     categories_html += f'<div class="form-group"><label>{label}</label><small class="description">{description}</small><textarea class="env-input" name="{var_name}" rows="3" data-token="{token}" placeholder="Değer girin...">{current_value}</textarea><button class="btn-save" onclick="saveEnvVar(\'{var_name}\', this)">💾 Kaydet</button></div>'
                 else:
@@ -963,24 +963,6 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                 setTimeout(() => notif.remove(), 300);
             }}, 3000);
         }}
-        document.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {{
-            checkbox.addEventListener('change', function() {{
-                const varName = this.name;
-                const value = this.checked ? 'true' : 'false';
-                const token = this.dataset.token;
-                fetch('/admin/api/set-env', {{
-                    method: 'POST',
-                    headers: {{'Content-Type': 'application/json', 'X-Admin-Token': token}},
-                    body: JSON.stringify({{key: varName, value: value}})
-                }}).then(r => r.json()).then(data => {{
-                    if (data.success) {{
-                        showNotification('✓ ' + varName + ' güncellendi', 'success');
-                    }}
-                }}).catch(e => {{
-                    showNotification('✗ Hata: ' + e.message, 'error');
-                }});
-            }});
-        }});
         
         function backupEnv() {{
             const token = '{token}';
