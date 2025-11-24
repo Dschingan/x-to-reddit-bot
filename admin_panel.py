@@ -1043,11 +1043,15 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
                 button.textContent = originalText;
                 
                 if (data.success) {{
-                    showNotification('✓ ' + varName + ' kaydedildi', 'success');
+                    showNotification('✓ ' + varName + ' kaydedildi! Sayfa 2 saniye sonra yenilenir...', 'success');
                     // Checkbox'ı güncelle
                     if (input.type === 'checkbox') {{
                         input.checked = (value === 'true');
                     }}
+                    // 2 saniye sonra sayfayı yenile
+                    setTimeout(() => {{
+                        location.reload();
+                    }}, 2000);
                 }} else {{
                     showNotification('✗ Hata: ' + (data.error || 'Bilinmeyen hata'), 'error');
                 }}
