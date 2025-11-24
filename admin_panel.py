@@ -305,7 +305,11 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
     @app.post("/admin/api/set-env")
     async def api_set_env(request: Request):
         """API: .env değişkenini ayarla"""
+        token_header = request.headers.get("X-Admin-Token", "")
+        print(f"[DEBUG] API /admin/api/set-env - Token: '{token_header}', Admin Token: '{admin_token}'")
+        
         if not _is_admin(request):
+            print(f"[DEBUG] Admin kontrolü başarısız")
             return JSONResponse({"success": False, "error": "Unauthorized"}, status_code=401)
         
         try:
@@ -313,14 +317,19 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
             key = data.get("key", "").strip()
             value = data.get("value", "")
             
+            print(f"[DEBUG] Saving {key}={value}")
+            
             if not key:
                 return JSONResponse({"success": False, "error": "Key gerekli"})
             
             if manager.set_env_var(key, value):
+                print(f"[DEBUG] Başarıyla kaydedildi: {key}={value}")
                 return JSONResponse({"success": True, "key": key})
             else:
+                print(f"[DEBUG] Kaydedilemedi: {key}")
                 return JSONResponse({"success": False, "error": "Kaydedilemedi"})
         except Exception as e:
+            print(f"[DEBUG] Exception: {e}")
             return JSONResponse({"success": False, "error": str(e)})
     
     @app.get("/admin/api/env-vars")
@@ -1019,11 +1028,17 @@ def get_admin_html(categories_html: str, current_time: str, token: str = "", use
             const originalText = button.textContent;
             button.textContent = '⏳ Kaydediliyor...';
             
+            console.log('Saving:', varName, '=', value, 'Token:', token);
+            
             fetch('/admin/api/set-env', {{
                 method: 'POST',
                 headers: {{'Content-Type': 'application/json', 'X-Admin-Token': token}},
                 body: JSON.stringify({{key: varName, value: value}})
-            }}).then(r => r.json()).then(data => {{
+            }}).then(r => {{
+                console.log('Response status:', r.status);
+                return r.json();
+            }}).then(data => {{
+                console.log('Response data:', data);
                 button.disabled = false;
                 button.textContent = originalText;
                 
