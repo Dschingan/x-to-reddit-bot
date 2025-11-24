@@ -155,6 +155,8 @@ TWITTER_API_V2_FALLBACK = os.getenv("TWITTER_API_V2_FALLBACK", "false").strip().
 MONTHLY_TWEET_QUOTA = int(os.getenv("MONTHLY_TWEET_QUOTA", "100") or 100)
 MONTHLY_RATE_LIMIT_QUOTA = int(os.getenv("MONTHLY_RATE_LIMIT_QUOTA", "1000") or 1000)
 TWITTER_API_V2_MAX_RESULTS = min(100, max(1, int(os.getenv("TWITTER_API_V2_MAX_RESULTS", "100") or 100)))
+TEST_TWEET_LINK = os.getenv("TEST_TWEET_LINK", "").strip()
+API_V2_TEST_MODE = os.getenv("API_V2_TEST_MODE", "false").strip().lower() == "true"
 
 # Twitter API v2 client (lazy init)
 twitter_api_v2_client = None
@@ -836,6 +838,159 @@ async def fetch_tweets_with_api_v2(query: str, max_results: int = None) -> List[
     except Exception as e:
         print(f"[HATA] Twitter API v2 çekme hatası: {e}")
         return []
+
+def extract_tweet_id_from_url(url: str) -> Optional[int]:
+    """Tweet URL'sinden tweet ID'sini çıkar"""
+    try:
+        # https://twitter.com/user/status/123456789 formatından ID çıkar
+        if "/status/" in url:
+            tweet_id = url.split("/status/")[-1].split("?")[0].strip()
+            return int(tweet_id)
+    except Exception:
+        pass
+    return None
+
+async def test_api_v2_tweet_fetch():
+    """Test modu: API v2 ile tweet çek ve medya indir"""
+    if not API_V2_TEST_MODE or not TEST_TWEET_LINK:
+        print("[INFO] Test modu etkin değil veya tweet linki ayarlanmamış")
+        return
+    
+    print("\n" + "="*60)
+    print("[TEST] Twitter API v2 Test Modu Başlatıldı")
+    print("="*60)
+    
+    tweet_id = extract_tweet_id_from_url(TEST_TWEET_LINK)
+    if not tweet_id:
+        print(f"[HATA] Tweet ID çıkarılamadı: {TEST_TWEET_LINK}")
+        return
+    
+    print(f"[+] Tweet ID: {tweet_id}")
+    
+    try:
+        # API v2 client'ı başlat
+        client = await init_twitter_api_v2()
+        if not client:
+            print("[HATA] API v2 client başlatılamadı")
+            return
+        
+        # Tweet detaylarını çek
+        print("[+] Tweet detayları çekiliyor...")
+        tweet_data = client.get_tweet(
+            id=tweet_id,
+            tweet_fields=['created_at', 'author_id', 'public_metrics', 'lang', 'attachments'],
+            expansions=['author_id', 'attachments.media_keys'],
+            media_fields=['url', 'preview_image_url', 'type', 'variants'],
+            user_fields=['username', 'name', 'verified']
+        )
+        
+        if not tweet_data or not tweet_data.data:
+            print("[HATA] Tweet bulunamadı")
+            return
+        
+        tweet = tweet_data.data
+        print(f"\n[✓] Tweet Bulundu:")
+        print(f"    ID: {tweet.id}")
+        print(f"    Metin: {tweet.text[:100]}...")
+        print(f"    Oluşturulma: {tweet.created_at}")
+        print(f"    Dil: {tweet.lang}")
+        
+        # Yazar bilgisi
+        if tweet_data.includes and tweet_data.includes.get('users'):
+            author = next((u for u in tweet_data.includes['users'] if u.id == tweet.author_id), None)
+            if author:
+                print(f"    Yazar: @{author.username} ({author.name})")
+                print(f"    Doğrulanmış: {author.verified}")
+        
+        # Metrikler
+        if tweet.public_metrics:
+            print(f"    Beğeni: {tweet.public_metrics.get('like_count', 0)}")
+            print(f"    Retweet: {tweet.public_metrics.get('retweet_count', 0)}")
+            print(f"    Yanıt: {tweet.public_metrics.get('reply_count', 0)}")
+        
+        # Medya işleme
+        media_list = []
+        if tweet_data.includes and tweet_data.includes.get('media'):
+            print(f"\n[+] Medya Bulundu: {len(tweet_data.includes['media'])} dosya")
+            
+            for idx, media in enumerate(tweet_data.includes['media'], 1):
+                print(f"\n    [{idx}] Medya Türü: {media.type}")
+                
+                if media.type == 'photo':
+                    print(f"        URL: {media.url}")
+                    media_list.append({
+                        'type': 'photo',
+                        'url': media.url,
+                        'id': media.media_key
+                    })
+                
+                elif media.type == 'video' or media.type == 'animated_gif':
+                    # Video variants'ından en iyi kaliteyi seç
+                    if media.variants:
+                        video_url = None
+                        for variant in media.variants:
+                            if variant.get('content_type') == 'video/mp4':
+                                video_url = variant.get('url')
+                                break
+                        
+                        if video_url:
+                            print(f"        Video URL: {video_url}")
+                            media_list.append({
+                                'type': 'video',
+                                'url': video_url,
+                                'id': media.media_key
+                            })
+                    
+                    if media.preview_image_url:
+                        print(f"        Önizleme: {media.preview_image_url}")
+        
+        # Medya indir
+        if media_list:
+            print(f"\n[+] {len(media_list)} medya indiriliyor...")
+            download_dir = Path("test_downloads")
+            download_dir.mkdir(exist_ok=True)
+            
+            for idx, media in enumerate(media_list, 1):
+                try:
+                    if media['type'] == 'photo':
+                        filename = download_dir / f"tweet_{tweet_id}_photo_{idx}.jpg"
+                        print(f"    [{idx}] Fotoğraf indiriliyor: {filename}")
+                        response = requests.get(media['url'], timeout=30)
+                        response.raise_for_status()
+                        filename.write_bytes(response.content)
+                        print(f"        ✓ İndirildi: {filename.stat().st_size} bytes")
+                    
+                    elif media['type'] == 'video':
+                        filename = download_dir / f"tweet_{tweet_id}_video_{idx}.mp4"
+                        print(f"    [{idx}] Video indiriliyor: {filename}")
+                        response = requests.get(media['url'], timeout=60, stream=True)
+                        response.raise_for_status()
+                        
+                        total_size = int(response.headers.get('content-length', 0))
+                        downloaded = 0
+                        
+                        with open(filename, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    if total_size:
+                                        percent = (downloaded / total_size) * 100
+                                        print(f"        İndirme: {percent:.1f}%", end='\r')
+                        
+                        print(f"        ✓ İndirildi: {filename.stat().st_size} bytes")
+                
+                except Exception as e:
+                    print(f"        ✗ Hata: {e}")
+        
+        print("\n" + "="*60)
+        print("[✓] Test Tamamlandı")
+        print("="*60 + "\n")
+    
+    except Exception as e:
+        print(f"[HATA] Test hatası: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def _get_best_media_urls(tweet_id: int | str) -> tuple[str | None, str | None]:
     """twscrape ile tweet detaylarından en iyi MP4 ve HLS URL'lerini bul.
@@ -5953,6 +6108,12 @@ def process_single_tweet(tweet_data: dict, is_retweet: bool = False):
         print(f"[HATA] Tweet işleme hatası: {e}")
 
 if __name__ == "__main__":
+    # Test modu kontrol et
+    if API_V2_TEST_MODE and TEST_TWEET_LINK:
+        print("[TEST] Test modu etkin, API v2 test çalıştırılıyor...")
+        asyncio.run(test_api_v2_tweet_fetch())
+        sys.exit(0)
+    
     # Retweet veritabanını kur
     setup_retweet_database()
     
