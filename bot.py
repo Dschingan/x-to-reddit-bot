@@ -1,4 +1,3 @@
-from dotenv import load_dotenv
 import os
 import random
 import time
@@ -43,7 +42,8 @@ import sqlite3
 # import psycopg2 - lazy import
 # from psycopg2.extras import RealDictCursor - lazy import
 
-load_dotenv()
+# NOT: load_dotenv() kaldırıldı - ortam değişkenleri os.getenv() ile dinamik olarak okunacak
+# Bu sayede admin panel'de yapılan değişiklikler bot tarafından görülecek
 
 # Resolve script directory and accounts DB absolute path early
 SCRIPT_DIR = Path(__file__).resolve().parent
