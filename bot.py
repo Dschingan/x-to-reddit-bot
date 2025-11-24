@@ -376,7 +376,21 @@ if sys.platform.startswith('win'):
     except Exception as _enc_e:
         print(f"[UYARI] Windows encoding ayarı atlandı: {_enc_e}")
 
-load_dotenv()
+# .env dosyasını manuel olarak yükle (load_dotenv import'ı olmadan)
+try:
+    env_file = Path(".env")
+    if env_file.exists():
+        with open(env_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+except Exception as e:
+    print(f"[UYARI] .env dosyası yüklenemedi: {e}")
 
 SUBREDDIT = "bf6_tr"
 
