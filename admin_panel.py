@@ -278,7 +278,7 @@ def register_admin_routes(app: FastAPI, env_path: str = ".env", admin_token: str
             
             for var_name, label, input_type, description in info["vars"]:
                 # Render env variables'dan değeri al, yoksa .env'den
-                current_value = os.getenv(var_name) or manager.get_env_var(var_name) or ""
+                current_value = manager.get_env_var(var_name)  # Sadece .env'den al
                 
                 if input_type == "checkbox":
                     checked = "checked" if current_value.lower() in ["true", "1", "yes"] else ""
