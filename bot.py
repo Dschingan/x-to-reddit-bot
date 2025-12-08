@@ -2,35 +2,108 @@ import os
 import random
 import time
 import requests
+import snscrape.modules.twitter as sntwitter
 import praw
-import re
-import sys
-import time
-import json
-import asyncio
-import calendar
-from datetime import datetime, timedelta
-import sqlite3
-import hashlib
-import tempfile
-import subprocess
-from pathlib import Path
-from datetime import datetime, timezone, timedelta
-from urllib.parse import urlparse, parse_qs
-import random
-import re
-import traceback
-from typing import List, Optional, Dict, Any, Tuple
-import base64
 import schedule
-import threading
-from twscrape import API, gather
-from types import SimpleNamespace
-import shutil
-import m3u8
-import unicodedata
-import logging
-import sqlite3
+import time
+import psycopg2
+from dotenv import load_dotenv
+
+# AI ve metin işleme fonksiyonları için gerekli importlar
+# ... (varsa, eski koddan alınacak)
+
+load_dotenv()
+
+# .env'den veritabanı ve reddit bilgileri
+DATABASE_URL = os.getenv('DATABASE_URL')
+REDDIT_CLIENT_ID = os.getenv('REDDIT_CLIENT_ID')
+REDDIT_CLIENT_SECRET = os.getenv('REDDIT_CLIENT_SECRET')
+REDDIT_USERNAME = os.getenv('REDDIT_USERNAME')
+REDDIT_PASSWORD = os.getenv('REDDIT_PASSWORD')
+REDDIT_USER_AGENT = os.getenv('REDDIT_USER_AGENT')
+SUBREDDIT = os.getenv('SUBREDDIT')
+
+# Reddit bağlantısı
+reddit = praw.Reddit(
+    client_id=REDDIT_CLIENT_ID,
+    client_secret=REDDIT_CLIENT_SECRET,
+    username=REDDIT_USERNAME,
+    password=REDDIT_PASSWORD,
+    user_agent=REDDIT_USER_AGENT
+)
+
+# Veritabanı bağlantısı
+conn = psycopg2.connect(DATABASE_URL)
+cur = conn.cursor()
+
+# Paylaşılan tweetleri kaydetmek için tablo
+cur.execute('''CREATE TABLE IF NOT EXISTS shared_tweets (
+    tweet_id VARCHAR(50) PRIMARY KEY
+)''')
+conn.commit()
+
+def is_tweet_shared(tweet_id):
+    cur.execute('SELECT tweet_id FROM shared_tweets WHERE tweet_id = %s', (tweet_id,))
+    return cur.fetchone() is not None
+
+def mark_tweet_shared(tweet_id):
+    cur.execute('INSERT INTO shared_tweets (tweet_id) VALUES (%s) ON CONFLICT DO NOTHING', (tweet_id,))
+    conn.commit()
+
+def process_tweet_text(text):
+    # AI, çeviri, metin düzeltme fonksiyonları
+    # Çeviri: Gemini/OpenAI ile Türkçeye çevir
+    try:
+        translated = translate_text(text)
+        if translated:
+            return translated
+    except Exception as e:
+        print(f"[UYARI] Çeviri hatası: {e}")
+    return text
+
+def get_last_3_tweets():
+    tweets = []
+    for i, tweet in enumerate(sntwitter.TwitterUserScraper('BF6Media').get_items()):
+        if i >= 3:
+            break
+        if not is_tweet_shared(str(tweet.id)):
+            tweets.append(tweet)
+    return tweets
+
+def share_to_subreddit(tweet):
+    # Tweet içeriğini işleme
+    text = tweet.content
+    processed_text = process_tweet_text(text)
+    has_video = False
+    video_url = None
+    if hasattr(tweet, 'media') and tweet.media:
+        for m in tweet.media:
+            if hasattr(m, 'variants'):
+                for v in m.variants:
+                    if v.get('contentType', '').startswith('video'):
+                        video_url = v.get('url')
+                        has_video = True
+                        break
+    # AI ile flair seçimi
+    flair_id = select_flair_with_ai(processed_text, text, has_video)
+    subreddit = reddit.subreddit(SUBREDDIT)
+    if video_url:
+        submission = subreddit.submit_video(title=processed_text[:100], url=video_url, flair_id=flair_id)
+    else:
+        submission = subreddit.submit(title=processed_text[:100], selftext=processed_text, flair_id=flair_id)
+    mark_tweet_shared(str(tweet.id))
+
+def job():
+    tweets = get_last_3_tweets()
+    for tweet in tweets:
+        share_to_subreddit(tweet)
+
+schedule.every().day.at('13:00').do(job)
+
+if __name__ == '__main__':
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
 # Pnytter kaldırıldı - sadece TWSCRAPE kullanılacak
 # Lazy import için Google AI modüllerini kaldır - ihtiyaç duyulduğunda import edilecek
 # Tweepy lazy import - Twitter API v2 için
