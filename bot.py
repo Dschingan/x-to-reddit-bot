@@ -2227,7 +2227,7 @@ def _init_fastapi():
         # Lazy import
         try:
             from fastapi import FastAPI, Request
-            from fastapi.responses import PlainTextResponse
+            from fastapi.responses import PlainTextResponse, FileResponse, RedirectResponse
             import threading
         except ImportError:
             raise RuntimeError("FastAPI veya threading mevcut değil")
@@ -2240,7 +2240,18 @@ def _init_fastapi():
         def root(request: Request):
             if request.method == "HEAD":
                 return PlainTextResponse("", status_code=200)
-            return "OK"
+            # Admin paneline yönlendir
+            return RedirectResponse(url="/admin-panel", status_code=302)
+        
+        # Admin panel HTML'i serve et
+        @app.get("/admin-panel", response_class=FileResponse)
+        async def admin_panel_html():
+            from pathlib import Path
+            admin_html = Path(__file__).parent / "templates" / "admin.html"
+            if admin_html.exists():
+                return FileResponse(admin_html, media_type="text/html")
+            # Fallback: root'a yönlendir
+            return RedirectResponse(url="/", status_code=302)
 
         @app.api_route("/healthz", methods=["GET", "HEAD"], response_class=PlainTextResponse)
         def healthz(request: Request):
