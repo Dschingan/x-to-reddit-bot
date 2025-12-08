@@ -2244,14 +2244,215 @@ def _init_fastapi():
             return RedirectResponse(url="/admin-panel", status_code=302)
         
         # Admin panel HTML'i serve et
-        @app.get("/admin-panel", response_class=FileResponse)
+        @app.get("/admin-panel")
         async def admin_panel_html():
             from pathlib import Path
+            from fastapi.responses import HTMLResponse
             admin_html = Path(__file__).parent / "templates" / "admin.html"
             if admin_html.exists():
-                return FileResponse(admin_html, media_type="text/html")
-            # Fallback: root'a yönlendir
-            return RedirectResponse(url="/", status_code=302)
+                return HTMLResponse(admin_html.read_text(encoding="utf-8"))
+            
+            # Fallback: basit inline admin paneli
+            return HTMLResponse("""<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Panel</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { 
+            max-width: 800px; 
+            margin: 0 auto; 
+            background: white; 
+            border-radius: 10px; 
+            padding: 30px; 
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+        h1 { 
+            color: #333; 
+            margin-bottom: 30px; 
+            text-align: center;
+            font-size: 28px;
+        }
+        .form-group { 
+            margin-bottom: 20px; 
+        }
+        label { 
+            display: block; 
+            margin-bottom: 8px; 
+            color: #555; 
+            font-weight: 500;
+        }
+        input, textarea { 
+            width: 100%; 
+            padding: 12px; 
+            border: 2px solid #ddd; 
+            border-radius: 5px; 
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        input:focus, textarea:focus { 
+            outline: none; 
+            border-color: #667eea;
+            box-shadow: 0 0 5px rgba(102, 126, 234, 0.3);
+        }
+        button { 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white; 
+            padding: 12px 30px; 
+            border: none; 
+            border-radius: 5px; 
+            cursor: pointer; 
+            font-size: 16px;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+        button:hover { 
+            transform: translateY(-2px);
+        }
+        button:active {
+            transform: translateY(0);
+        }
+        .message { 
+            padding: 15px; 
+            border-radius: 5px; 
+            margin-bottom: 20px; 
+            display: none;
+        }
+        .success { 
+            background: #d4edda; 
+            color: #155724; 
+            border: 1px solid #c3e6cb;
+        }
+        .error { 
+            background: #f8d7da; 
+            color: #721c24; 
+            border: 1px solid #f5c6cb;
+        }
+        .form-section {
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #eee;
+        }
+        .form-section:last-child {
+            border-bottom: none;
+        }
+        .form-section h3 {
+            margin-bottom: 15px;
+            color: #667eea;
+            font-size: 18px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⚙️ Admin Paneli</h1>
+        <div class="message" id="message"></div>
+        <form id="envForm">
+            <div class="form-section">
+                <h3>🐦 Twitter Ayarları</h3>
+                <div class="form-group">
+                    <label for="TWITTER_QUERY">Twitter Arama Sorgusu:</label>
+                    <input type="text" id="TWITTER_QUERY" name="TWITTER_QUERY" placeholder="Örn: python programming">
+                </div>
+                <div class="form-group">
+                    <label for="MAX_TWEETS">Maximum Tweet Sayısı:</label>
+                    <input type="number" id="MAX_TWEETS" name="MAX_TWEETS" placeholder="100">
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h3>🤖 Reddit Ayarları</h3>
+                <div class="form-group">
+                    <label for="REDDIT_CLIENT_ID">Reddit Client ID:</label>
+                    <input type="text" id="REDDIT_CLIENT_ID" name="REDDIT_CLIENT_ID">
+                </div>
+                <div class="form-group">
+                    <label for="REDDIT_CLIENT_SECRET">Reddit Client Secret:</label>
+                    <input type="password" id="REDDIT_CLIENT_SECRET" name="REDDIT_CLIENT_SECRET">
+                </div>
+                <div class="form-group">
+                    <label for="REDDIT_USERNAME">Reddit Kullanıcı Adı:</label>
+                    <input type="text" id="REDDIT_USERNAME" name="REDDIT_USERNAME">
+                </div>
+                <div class="form-group">
+                    <label for="REDDIT_PASSWORD">Reddit Şifresi:</label>
+                    <input type="password" id="REDDIT_PASSWORD" name="REDDIT_PASSWORD">
+                </div>
+                <div class="form-group">
+                    <label for="TARGET_SUBREDDIT">Hedef Subreddit:</label>
+                    <input type="text" id="TARGET_SUBREDDIT" name="TARGET_SUBREDDIT" placeholder="Örn: learnprogramming">
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h3>⏱️ Diğer Ayarlar</h3>
+                <div class="form-group">
+                    <label for="UPDATE_INTERVAL">Güncelleme Aralığı (saniye):</label>
+                    <input type="number" id="UPDATE_INTERVAL" name="UPDATE_INTERVAL" placeholder="3600">
+                </div>
+            </div>
+
+            <button type="submit">💾 Kaydet</button>
+        </form>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            fetch('/api/env')
+                .then(response => response.json())
+                .then(data => {
+                    Object.keys(data).forEach(key => {
+                        const element = document.getElementById(key);
+                        if (element) {
+                            element.value = data[key];
+                        }
+                    });
+                })
+                .catch(error => console.error('Hata:', error));
+        });
+
+        document.getElementById('envForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(this);
+            const data = Object.fromEntries(formData);
+
+            fetch('/api/env', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            })
+            .then(response => response.json())
+            .then(result => {
+                const messageDiv = document.getElementById('message');
+                messageDiv.className = 'message ' + result.status;
+                messageDiv.textContent = result.message;
+                messageDiv.style.display = 'block';
+                
+                setTimeout(() => {
+                    messageDiv.style.display = 'none';
+                }, 3000);
+            })
+            .catch(error => {
+                const messageDiv = document.getElementById('message');
+                messageDiv.className = 'message error';
+                messageDiv.textContent = 'Bir hata oluştu: ' + error;
+                messageDiv.style.display = 'block';
+            });
+        });
+    </script>
+</body>
+</html>""")
 
         @app.api_route("/healthz", methods=["GET", "HEAD"], response_class=PlainTextResponse)
         def healthz(request: Request):
