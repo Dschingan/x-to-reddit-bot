@@ -46,3 +46,5 @@ update-checker>=0.18.0
 
 # Database
 psycopg2-binary>=2.9.9
+snscrape
+flask
