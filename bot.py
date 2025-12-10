@@ -3298,6 +3298,12 @@ def _init_fastapi():
 # Expose ASGI app for 'uvicorn bot:app' imports (Render)
 app = None if LOCAL_ONLY else _init_fastapi()
 
+# Run the FastAPI application with Uvicorn when the script is run directly
+if __name__ == "__main__" and not LOCAL_ONLY and app is not None:
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))  # Default to port 8000 if PORT env var is not set
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
 # Route tanımları _init_fastapi() fonksiyonuna taşındı
 
 # Nitter multi-instance fonksiyonu kaldırıldı - legacy scraper removed; using Twitter API v2
