@@ -2,17 +2,59 @@ import os
 import random
 import time
 import requests
-import snscrape.modules.twitter as sntwitter
+# Removed: import snscrape.modules.twitter as sntwitter
 import praw
 import schedule
 import time
 import psycopg2
 from dotenv import load_dotenv
 
+# Add missing imports
+from pathlib import Path
+import sqlite3
+from datetime import datetime
+import re
+import threading
+import base64
+import unicodedata
+import sys
+
+# Add missing imports
+import shutil
+from types import SimpleNamespace
+from PIL import Image
+
+# Add additional missing imports
+import logging
+import asyncio
+import json
+import subprocess
+import hashlib
+import calendar
+from datetime import timedelta
+from typing import Dict, List, Any, Optional
+
+# Ensure all required modules are available for the script.
+
 # AI ve metin işleme fonksiyonları için gerekli importlar
 # ... (varsa, eski koddan alınacak)
 
 load_dotenv()
+
+# Environment variables (minimum required for Twitter API v2 operation):
+# - TWITTER_API_V2_BEARER_TOKEN: Your Twitter (X) API v2 Bearer Token. Required for all API v2 calls.
+# - USE_TWITTER_API_V2: Set to "true" to enable v2 code paths (optional; default handled in code).
+# - TWITTER_SCREENNAME: The main account screen name used by the bot (e.g. "BF6Media").
+#
+# Example .env entries:
+# TWITTER_API_V2_BEARER_TOKEN=AAAAAAAAA...your_token_here...
+# USE_TWITTER_API_V2=true
+# TWITTER_SCREENNAME=BF6Media
+#
+# Notes:
+# - This repository previously used twscrape; twscrape-based paths have been removed
+#   or replaced with Twitter API v2 calls. Ensure `TWITTER_API_V2_BEARER_TOKEN` is
+#   present in your environment before running the bot.
 
 # .env'den veritabanı ve reddit bilgileri
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -50,6 +92,42 @@ def mark_tweet_shared(tweet_id):
     cur.execute('INSERT INTO shared_tweets (tweet_id) VALUES (%s) ON CONFLICT DO NOTHING', (tweet_id,))
     conn.commit()
 
+
+def _tweet_sort_key(td):
+    """Module-level tweet sort key used by multiple places.
+    Returns a tuple (created_ts, numeric_id) so sorting is deterministic.
+    """
+    try:
+        ts = td.get('created_at') if isinstance(td, dict) else None
+        tsv = 0.0
+        if hasattr(ts, 'timestamp'):
+            try:
+                tsv = float(ts.timestamp())
+            except Exception:
+                tsv = 0.0
+        elif isinstance(ts, (int, float)):
+            try:
+                tsv = float(ts)
+            except Exception:
+                tsv = 0.0
+
+        idv = 0
+        if isinstance(td, dict):
+            for k in ('id', 'tweet_id', 'id_str', 'rest_id'):
+                v = td.get(k)
+                if v is None:
+                    continue
+                s = str(v).strip()
+                if s.isdigit():
+                    try:
+                        idv = int(s)
+                        break
+                    except Exception:
+                        pass
+        return (tsv, idv)
+    except Exception:
+        return (0.0, 0)
+
 def process_tweet_text(text):
     # AI, çeviri, metin düzeltme fonksiyonları
     # Çeviri: Gemini/OpenAI ile Türkçeye çevir
@@ -62,13 +140,24 @@ def process_tweet_text(text):
     return text
 
 def get_last_3_tweets():
-    tweets = []
-    for i, tweet in enumerate(sntwitter.TwitterUserScraper('BF6Media').get_items()):
-        if i >= 3:
-            break
-        if not is_tweet_shared(str(tweet.id)):
-            tweets.append(tweet)
-    return tweets
+    """Fetch the last 3 tweets using Twitter API v2."""
+    global twitter_api_v2_client
+    if twitter_api_v2_client is None:
+        from tweepy import Client
+        twitter_api_v2_client = Client(bearer_token=TWITTER_API_V2_BEARER_TOKEN)
+
+    try:
+        # Replace 'BF6Media' with the desired username
+        user = twitter_api_v2_client.get_user(username='BF6Media')
+        tweets = twitter_api_v2_client.get_users_tweets(
+            id=user.data.id,
+            max_results=3,
+            tweet_fields=['id', 'text', 'created_at']
+        )
+        return [tweet for tweet in tweets.data if not is_tweet_shared(str(tweet.id))]
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch tweets: {e}")
+        return []
 
 def share_to_subreddit(tweet):
     # Tweet içeriğini işleme
@@ -104,7 +193,7 @@ if __name__ == '__main__':
     while True:
         schedule.run_pending()
         time.sleep(60)
-# Pnytter kaldırıldı - sadece TWSCRAPE kullanılacak
+# Pnytter kaldırıldı - legacy scraper removed; using Twitter API v2
 # Lazy import için Google AI modüllerini kaldır - ihtiyaç duyulduğunda import edilecek
 # Tweepy lazy import - Twitter API v2 için
 
@@ -139,7 +228,7 @@ def _ensure_accounts_db():
             return
         b64 = os.environ.get("ACCOUNTS_DB_B64")
         if not b64:
-            # Nothing to do; twscrape will log "No active accounts" later if required
+            # Nothing to do; legacy scraper removed — using Twitter API v2
             print("[INFO] ACCOUNTS_DB_B64 bulunamadı; accounts.db oluşturulmadı")
             return
         try:
@@ -196,8 +285,7 @@ CURRENT_PROXY_INDEX = 0
 USE_PROXY = os.getenv("USE_PROXY", "false").lower() == "true"
 USE_TOR = os.getenv("USE_TOR", "false").lower() == "true"
 
-# twscrape API instance
-twscrape_api = None
+# twscrape support removed — all fetching uses Twitter API v2
 from base64 import b64decode
 
 # RedditWarp imports
@@ -560,13 +648,13 @@ EXCLUDED_TWEET_IDS = {
     "1958025330372825431",
 }
 
-# Nitter konfigürasyonu kaldırıldı - sadece TWSCRAPE kullanılacak
+# Nitter konfigürasyonu kaldırıldı - legacy scraper removed; using Twitter API v2
 TWITTER_SCREENNAME = os.getenv("TWITTER_SCREENNAME", "TheBFWire").strip()
 # Twitter User ID (tercih edilen yöntem - daha güvenilir)
 TWITTER_USER_ID = os.getenv("TWITTER_USER_ID", "1939708158051500032").strip()
 MIN_REQUEST_INTERVAL = 30  # Minimum seconds between any requests
 LAST_REQUEST_TIME = 0  # Son istek zamanı
-TWSCRAPE_DETAIL_TIMEOUT = 8  # seconds to wait for tweet_details before skipping
+DETAIL_TIMEOUT = 8  # seconds to wait for tweet/details before skipping
 REDDIT_MAX_VIDEO_SECONDS = int(os.getenv("REDDIT_MAX_VIDEO_SECONDS", "900"))
 ENABLE_SECONDARY_RETWEETS = os.getenv("ENABLE_SECONDARY_RETWEETS", "false").strip().lower() == "true"
  
@@ -776,57 +864,7 @@ def extract_username_from_tweet_url(url: str) -> str:
         pass
     return TWITTER_SCREENNAME
 
-async def init_twscrape_api():
-    """twscrape API'yi başlat"""
-    global twscrape_api
-    if twscrape_api is None:
-        # Debug: show resolved DB path and basic access
-        print(f"[DEBUG] twscrape accounts DB path: {ACCOUNTS_DB_PATH}")
-        if not os.path.exists(ACCOUNTS_DB_PATH):
-            print("[UYARI] accounts.db bulunamadı, twscrape erişimi başarısız olabilir")
-        elif not os.access(ACCOUNTS_DB_PATH, os.R_OK):
-            print("[UYARI] accounts.db dosyası okunamıyor (izin)")
-        # Optional: enable verbose native twscrape logs
-        try:
-            if os.getenv("TWSCRAPE_DEBUG", "false").strip().lower() == "true":
-                # Set up root logger minimally if not configured
-                if not logging.getLogger().handlers:
-                    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-                # Verbose for twscrape and httpx
-                logging.getLogger("twscrape").setLevel(logging.DEBUG)
-                logging.getLogger("twscrape.api").setLevel(logging.DEBUG)
-                logging.getLogger("httpx").setLevel(logging.WARNING)
-                print("[INFO] TWSCRAPE_DEBUG etkin: twscrape native logları DEBUG seviyesinde")
-        except Exception:
-            pass
-        twscrape_api = API(ACCOUNTS_DB_PATH)
-        print("[+] twscrape API başlatıldı")
-        # Diagnostics: inspect DB content and pool availability
-        try:
-            conn = sqlite3.connect(ACCOUNTS_DB_PATH)
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='accounts'")
-            has_tbl = (cur.fetchone() or [0])[0] > 0
-            if has_tbl:
-                cur.execute("SELECT username, active FROM accounts")
-                rows = cur.fetchall() or []
-                actives = [r[0] for r in rows if (r[1] in (1, True, '1'))]
-                print(f"[DIAG] accounts toplam={len(rows)} aktif={len(actives)} -> {actives}")
-            else:
-                print("[DIAG] accounts tablosu bulunamadı (DB boş olabilir)")
-            conn.close()
-
-        except Exception as de:
-            print(f"[DIAG] accounts DB inceleme hatası: {de}")
-        try:
-            nat = await twscrape_api.pool.next_available_at("timeline")
-            if not nat:
-                print("[DIAG] twscrape pool: aktif hesap yok (next_available_at=None)")
-            else:
-                print(f"[DIAG] twscrape pool: sonraki uygun hesap {nat}")
-        except Exception as de:
-            print(f"[DIAG] pool inceleme hatası: {de}")
-    return twscrape_api
+# twscrape removed: do not provide init function. Use `init_twitter_api_v2()` instead.
 
 async def init_twitter_api_v2():
     """Twitter API v2 client'ını başlat (tweepy kullanarak)"""
@@ -1080,60 +1118,86 @@ async def test_api_v2_tweet_fetch():
         traceback.print_exc()
 
 async def _get_best_media_urls(tweet_id: int | str) -> tuple[str | None, str | None]:
-    """twscrape ile tweet detaylarından en iyi MP4 ve HLS URL'lerini bul.
+    """Twitter API v2 ile tweet detaylarından en iyi MP4 ve HLS URL'lerini bul.
     Dönüş: (best_mp4_url, best_hls_url)
     """
     try:
-        api = await init_twscrape_api()
-        try:
-            detail = await asyncio.wait_for(api.tweet_details(int(tweet_id)), timeout=TWSCRAPE_DETAIL_TIMEOUT)
-        except Exception as te:
-            print(f"[UYARI] tweet_details timeout/hata: {te}")
-            detail = None
-        if not detail or not getattr(detail, "media", None):
-            print("[UYARI] Tweet detayında medya bulunamadı")
+        # Use Twitter API v2 to fetch media variants via expansions and media.fields
+        client = await init_twitter_api_v2()
+        if not client:
+            print("[INFO] Twitter API v2 client not available")
             return None, None
 
-        videos = getattr(detail.media, "videos", []) or []
-        if not videos:
-            print("[UYARI] Video medyası yok")
+        try:
+            resp = client.get_tweet(
+                int(tweet_id),
+                expansions=['attachments.media_keys'],
+                media_fields=['url', 'variants', 'type']
+            )
+        except Exception as e:
+            print(f"[UYARI] Twitter API v2 get_tweet hata: {e}")
+            return None, None
+
+        includes = getattr(resp, 'includes', None) or {}
+        medias = []
+        if isinstance(includes, dict):
+            medias = includes.get('media', [])
+        else:
+            medias = getattr(includes, 'media', []) if includes else []
+
+        if not medias:
+            print("[INFO] API v2: Tweet includes'da medya yok")
             return None, None
 
         mp4_candidates: list[tuple[int, str]] = []
         hls_candidates: list[tuple[int, str]] = []
-        for v in videos:
-            variants = getattr(v, "variants", []) or []
-            if os.getenv("ACCOUNTS_PRINT_VARIANTS", "false").lower() == "true":
-                print(f"[DEBUG] Variants: {[getattr(x,'url',None) for x in variants]}")
+
+        for m in medias:
+            variants = getattr(m, 'variants', None) or (m.get('variants') if isinstance(m, dict) else []) or []
             for var in variants:
-                url = getattr(var, "url", None)
-                br = getattr(var, "bitrate", 0) or 0
+                url = getattr(var, 'url', None) if not isinstance(var, dict) else var.get('url')
+                # bitrate keys differ between responses
+                if isinstance(var, dict):
+                    br = var.get('bit_rate') or var.get('bitrate') or var.get('bit_rate') or 0
+                    content_type = var.get('content_type') or ''
+                else:
+                    br = getattr(var, 'bit_rate', None) or getattr(var, 'bitrate', None) or 0
+                    content_type = getattr(var, 'content_type', '')
+                try:
+                    brv = int(br) if br is not None else 0
+                except Exception:
+                    brv = 0
                 if not url:
                     continue
                 ul = url.lower()
-                if ul.endswith(".m3u8"):
-                    hls_candidates.append((br, url))
-                elif ".mp4" in ul or ul.endswith(".mp4"):
-                    mp4_candidates.append((br, url))
+                if ul.endswith('.m3u8') or 'm3u8' in ul or ('mpegurl' in content_type.lower() or 'mpegurl' in content_type.lower()):
+                    hls_candidates.append((brv, url))
+                elif '.mp4' in ul or ul.endswith('.mp4') or content_type.startswith('video'):
+                    mp4_candidates.append((brv, url))
 
         best_mp4 = max(mp4_candidates, key=lambda x: x[0])[1] if mp4_candidates else None
         best_hls = max(hls_candidates, key=lambda x: x[0])[1] if hls_candidates else None
+
         if best_mp4:
-            print(f"[+] MP4 aday bulundu: {best_mp4}")
-        else:
-            print("[INFO] MP4 varyantı bulunamadı")
+            print(f"[+] API v2 MP4 candidate: {best_mp4}")
         if best_hls:
-            print(f"[+] HLS aday bulundu: {best_hls}")
+            print(f"[+] API v2 HLS candidate: {best_hls}")
+
         return best_mp4, best_hls
     except Exception as e:
-        print(f"[HATA] twscrape media çözümleme hatası: {e}")
+        print(f"[HATA] API v2 media çözümleme hatası: {e}")
         return None, None
 
 def _download_hls_py(hls_url: str, filename: str) -> str | None:
     """FFmpeg yoksa saf-Python HLS indirme (Render uyumlu)."""
     try:
+        try:
+            import m3u8
+        except ImportError:
+            print("[INFO] m3u8 not installed; cannot download HLS via Python fallback")
+            return None
         playlist = m3u8.load(hls_url)
-        if not playlist or not playlist.segments:
+        if not playlist or not getattr(playlist, 'segments', None):
             print("[UYARI] HLS playlist boş veya geçersiz")
             return None
         base = hls_url.rsplit('/', 1)[0]
@@ -1241,79 +1305,94 @@ def _is_retweet_of_target(raw_text: str, target_screenname: str) -> bool:
             return True
     return False
 
-async def _get_bf6_retweets_twscrape(target: str, count: int = 3):
-    """bf6_tr (veya SECONDARY_RETWEET_TARGET) kullanıcısının zaman akışından
-    retweet olan öğeleri bulur ve retweet edilen ORİJİNAL tweet'leri döndürür.
+async def _get_bf6_retweets_v2(target: str, count: int = 3):
+    """Using Twitter API v2: fetch tweets from `target` user and return the ORIGINAL tweets
+    that `target` has retweeted (i.e., tweets retweeted by the target).
+    Returns list of dicts: {id, text, created_at, media_urls, url}
     """
     try:
-        api = await init_twscrape_api()
-        # Hedef kullanıcıyı ID ile bulmaya çalış, yoksa login ile dene
-        target_id_env = (os.getenv("SECONDARY_RETWEET_TARGET_ID", "") or "").strip()
-        user = None
-        if target_id_env and target_id_env.isdigit():
-            try:
-                user = await api.user_by_id(int(target_id_env))
-            except Exception as _euid:
-                print(f"[UYARI] target user by id alınamadı: {target_id_env} -> {_euid}")
-        if not user:
-            user = await api.user_by_login(target)
-        if not user:
-            print(f"[HATA] Hedef kullanıcı bulunamadı: {target} / {target_id_env}")
+        client = await init_twitter_api_v2()
+        if not client:
+            return []
+
+        # Resolve target user
+        try:
+            user_resp = client.get_user(username=target)
+            if not user_resp or not getattr(user_resp, 'data', None):
+                print(f"[HATA] Hedef kullanıcı bulunamadı: {target}")
+                return []
+            user_id = user_resp.data.id
+        except Exception as ue:
+            print(f"[UYARI] target user alınamadı: {ue}")
+            return []
+
+        max_results = min(100, max(10, count * 6))
+        tweets_resp = client.get_users_tweets(
+            id=user_id,
+            max_results=max_results,
+            expansions=['referenced_tweets.id','attachments.media_keys'],
+            tweet_fields=['referenced_tweets','created_at','text','attachments'],
+            media_fields=['url','variants','type']
+        )
+
+        if not tweets_resp or not getattr(tweets_resp, 'data', None):
             return []
 
         results = []
-        detail_lookups = 0
-        max_detail_lookups = max(1, count)
-
-        async for tweet in api.user_tweets(user.id, limit=count * 6):
-            # Retweet değilse atla
-            rt = getattr(tweet, 'retweetedTweet', None)
-            if not rt:
+        for tw in tweets_resp.data:
+            referenced = getattr(tw, 'referenced_tweets', None)
+            if not referenced:
                 continue
-
-            # Medya topla (orijinal tweet)
-            media_urls = []
-            t_media = getattr(rt, 'media', None)
-            if not t_media or (
-                len(getattr(t_media, 'photos', []) or []) == 0 and
-                len(getattr(t_media, 'videos', []) or []) == 0 and
-                len(getattr(t_media, 'animated', []) or []) == 0
-            ):
-                if detail_lookups < max_detail_lookups:
+            # Find retweeted references
+            for ref in referenced:
+                if getattr(ref, 'type', '') == 'retweeted' or (isinstance(ref, dict) and ref.get('type') == 'retweeted'):
+                    ref_id = getattr(ref, 'id', None) or (ref.get('id') if isinstance(ref, dict) else None)
+                    if not ref_id:
+                        continue
+                    # Fetch original tweet details
                     try:
-                        detail = await api.tweet_details(rt.id, wait=TWSCRAPE_DETAIL_TIMEOUT)
-                        detail_lookups += 1
-                        if detail and getattr(detail, 'media', None):
-                            t_media = detail.media
-                    except Exception as de:
-                        print(f"[UYARI] Orijinal tweet detay çekilemedi: {de}")
+                        orig = client.get_tweet(int(ref_id), expansions=['attachments.media_keys'], tweet_fields=['created_at','text','attachments'], media_fields=['url','variants','type'])
+                    except Exception as oe:
+                        print(f"[UYARI] Orijinal tweet alınamadı ({ref_id}): {oe}")
+                        continue
 
-            if t_media:
-                for photo in getattr(t_media, 'photos', []) or []:
-                    url = getattr(photo, 'url', None)
-                    if url:
-                        media_urls.append(url)
-                for video in getattr(t_media, 'videos', []) or []:
-                    variants = getattr(video, 'variants', []) or []
-                    if variants:
-                        best = max(variants, key=lambda x: getattr(x, 'bitrate', 0))
-                        vurl = getattr(best, 'url', None)
-                        if vurl:
-                            media_urls.append(vurl)
+                    if not orig or not getattr(orig, 'data', None):
+                        continue
 
-            tweet_data = {
-                'id': str(getattr(rt, 'id', getattr(rt, 'id_str', ''))),
-                'text': getattr(rt, 'rawContent', ''),
-                'created_at': getattr(rt, 'date', None),
-                'media_urls': media_urls,
-                'url': getattr(rt, 'url', None)
-            }
+                    media_urls = []
+                    includes = getattr(orig, 'includes', None) or {}
+                    medias = []
+                    if isinstance(includes, dict):
+                        medias = includes.get('media', [])
+                    else:
+                        medias = getattr(includes, 'media', []) if includes else []
 
-            results.append(tweet_data)
+                    for m in medias or []:
+                        if getattr(m, 'url', None):
+                            media_urls.append(m.url)
+                        variants = getattr(m, 'variants', None) or getattr(m, 'video_variants', None) or []
+                        try:
+                            if variants:
+                                best = max(variants, key=lambda x: getattr(x, 'bit_rate', getattr(x, 'bitrate', 0)) or 0)
+                                if getattr(best, 'url', None):
+                                    media_urls.append(best.url)
+                        except Exception:
+                            pass
+
+                    tweet_data = {
+                        'id': str(orig.data.id),
+                        'text': getattr(orig.data, 'text', '') or '',
+                        'created_at': getattr(orig.data, 'created_at', None),
+                        'media_urls': media_urls,
+                        'url': f"https://x.com/i/web/status/{orig.data.id}"
+                    }
+                    results.append(tweet_data)
+                    if len(results) >= count:
+                        break
             if len(results) >= count:
                 break
 
-        # Eskiden yeniye sırala
+        # Sort by created_at then id
         def _tw_key(td):
             ts = td.get('created_at') if isinstance(td, dict) else None
             tsv = 0
@@ -1330,11 +1409,11 @@ async def _get_bf6_retweets_twscrape(target: str, count: int = 3):
         results.sort(key=_tw_key)
         return results
     except Exception as e:
-        print(f"[UYARI] @bf6_tr retweet'leri alınamadı (async): {e}")
+        print(f"[UYARI] @bf6_tr retweet'leri alınamadı (v2): {e}")
         return []
 
 def get_latest_bf6_retweets(count: int = 3):
-    """twscrape ile TWITTER_SCREENNAME zaman akışından sadece @bf6_tr retweet'lerini getirir.
+    """Twitter API v2 ile TWITTER_SCREENNAME zaman akışından sadece @bf6_tr retweet'lerini getirir.
     Başarısız olursa sessizce boş liste döner. Mevcut pipeline ile aynı veri şeklini üretir.
     """
     target = os.getenv("SECONDARY_RETWEET_TARGET", "bf6_tr")
@@ -1349,11 +1428,11 @@ def get_latest_bf6_retweets(count: int = 3):
             time.sleep(wait_time)
         LAST_REQUEST_TIME = time.time()
 
-        # Async twscrape çağrısı
+        # Async fetch (Twitter API v2)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            tweets = loop.run_until_complete(_get_bf6_retweets_twscrape(target, count))
+            tweets = loop.run_until_complete(_get_bf6_retweets_v2(target, count))
         finally:
             loop.close()
         return tweets or []
@@ -1361,25 +1440,7 @@ def get_latest_bf6_retweets(count: int = 3):
         print(f"[UYARI] @bf6_tr retweet'leri alınamadı: {e}")
         return []
 
-# Pnytter fallback fonksiyonu kaldırıldı - sadece TWSCRAPE kullanılacak
-
-# RSS fallback fonksiyonu kaldırıldı - sadece TWSCRAPE kullanılacak
-
-def get_media_urls_from_tweet_data(tweet_data):
-    """ TWSCRAPE'den alınan tweet verisinden medya URL'lerini çıkar"""
-    if not tweet_data or "media_urls" not in tweet_data:
-        return []
-    
-    try:
-        media_urls = tweet_data.get("media_urls", [])
-        return media_urls
-        
-    except Exception:
-        return []
-
-# Nitter HTML fonksiyonları kaldırıldı - sadece TWSCRAPE kullanılacak
-
-# Nitter instance yönetim fonksiyonları kaldırıldı - sadece TWSCRAPE kullanılacak
+# Legacy twscrape helpers removed — use Twitter API v2 helpers instead
 
 def _is_retweet_or_quote_by_id(tweet_id: str) -> bool:
     """Detail sorgusu ile RT/Quote olup olmadığını doğrula (senkron sarmalayıcı)."""
@@ -1388,19 +1449,26 @@ def _is_retweet_or_quote_by_id(tweet_id: str) -> bool:
         asyncio.set_event_loop(loop)
         try:
             async def _run():
-                api = await init_twscrape_api()
+                client = await init_twitter_api_v2()
+                if not client:
+                    return False
                 try:
-                    d = await asyncio.wait_for(api.tweet_details(int(tweet_id)), timeout=TWSCRAPE_DETAIL_TIMEOUT)
+                    resp = client.get_tweet(
+                        int(tweet_id),
+                        tweet_fields=['referenced_tweets', 'in_reply_to_user_id', 'in_reply_to_status_id']
+                    )
+                    if not resp or not getattr(resp, 'data', None):
+                        return False
+                    tw = resp.data
+                    referenced = getattr(tw, 'referenced_tweets', None) or []
+                    for ref in referenced:
+                        ref_type = getattr(ref, 'type', '') if not isinstance(ref, dict) else ref.get('type', '')
+                        if ref_type in ('retweeted', 'quoted'):
+                            return True
+                    if getattr(tw, 'in_reply_to_status_id', None) or getattr(tw, 'in_reply_to_user_id', None):
+                        return True
                 except Exception:
                     return False
-                if not d:
-                    return False
-                if getattr(d, 'inReplyToTweetId', None):
-                    return True
-                if getattr(d, 'retweetedTweet', None):
-                    return True
-                if getattr(d, 'quotedTweet', None) or getattr(d, 'isQuoted', False) or getattr(d, 'isQuote', False):
-                    return True
                 return False
             return bool(loop.run_until_complete(_run()))
         finally:
@@ -1414,48 +1482,65 @@ def process_specific_tweet(tweet_id: str) -> dict:
         asyncio.set_event_loop(loop)
         try:
             async def _run():
-                api = await init_twscrape_api()
+                client = await init_twitter_api_v2()
+                if not client:
+                    return {"processed": False, "reason": "no_api"}
                 try:
-                    detail = await asyncio.wait_for(api.tweet_details(int(tweet_id)), timeout=TWSCRAPE_DETAIL_TIMEOUT)
+                    resp = client.get_tweet(
+                        int(tweet_id),
+                        tweet_fields=['created_at', 'text', 'attachments', 'lang'],
+                        expansions=['attachments.media_keys', 'author_id'],
+                        media_fields=['url', 'variants', 'type', 'preview_image_url'],
+                        user_fields=['username', 'name']
+                    )
                 except Exception:
-                    detail = None
-                if not detail:
                     return {"processed": False, "reason": "detail_not_found"}
-                if getattr(detail, 'inReplyToTweetId', None):
-                    return {"processed": False, "reason": "is_reply"}
-                if getattr(detail, 'retweetedTweet', None):
-                    return {"processed": False, "reason": "is_retweet"}
-                if getattr(detail, 'quotedTweet', None) or getattr(detail, 'isQuoted', False) or getattr(detail, 'isQuote', False):
-                    return {"processed": False, "reason": "is_quote"}
+
+                if not resp or not getattr(resp, 'data', None):
+                    return {"processed": False, "reason": "detail_not_found"}
+
+                tw = resp.data
+                includes = getattr(resp, 'includes', None) or {}
+                medias = []
+                if isinstance(includes, dict):
+                    medias = includes.get('media', [])
+                else:
+                    medias = getattr(includes, 'media', []) if includes else []
 
                 media_urls = []
-                md = getattr(detail, 'media', None)
-                if md:
-                    photos = getattr(md, 'photos', []) or []
-                    for p in photos:
-                        u = getattr(p, 'url', None)
-                        if u:
-                            media_urls.append(u)
-                    videos = getattr(md, 'videos', []) or []
-                    for v in videos:
-                        vars = getattr(v, 'variants', []) or []
-                        if vars:
-                            best = max(vars, key=lambda x: getattr(x, 'bitrate', 0))
-                            u = getattr(best, 'url', None)
-                            if u:
-                                media_urls.append(u)
-                    animated = getattr(md, 'animated', []) or []
-                    for a in animated:
-                        u = getattr(a, 'videoUrl', None)
-                        if u:
-                            media_urls.append(u)
+                for m in medias or []:
+                    mtype = getattr(m, 'type', None) if not isinstance(m, dict) else m.get('type')
+                    if mtype == 'photo':
+                        url = getattr(m, 'url', None) if not isinstance(m, dict) else m.get('url')
+                        if url:
+                            media_urls.append(url)
+                    elif mtype in ('video', 'animated_gif'):
+                        variants = getattr(m, 'variants', None) or (m.get('variants') if isinstance(m, dict) else [])
+                        best = None
+                        try:
+                            if variants:
+                                def _br(v):
+                                    if isinstance(v, dict):
+                                        return int(v.get('bit_rate') or v.get('bitrate') or 0)
+                                    return int(getattr(v, 'bit_rate', None) or getattr(v, 'bitrate', None) or 0)
+                                best = max(variants, key=_br)
+                        except Exception:
+                            best = None
+                        if best:
+                            url = best.get('url') if isinstance(best, dict) else getattr(best, 'url', None)
+                            if url:
+                                media_urls.append(url)
+                        else:
+                            preview = getattr(m, 'preview_image_url', None) if not isinstance(m, dict) else m.get('preview_image_url')
+                            if preview:
+                                media_urls.append(preview)
 
                 tweet_data = {
-                    'id': str(getattr(detail, 'id', getattr(detail, 'id_str', ''))),
-                    'text': getattr(detail, 'rawContent', ''),
-                    'created_at': getattr(detail, 'date', None),
+                    'id': str(getattr(tw, 'id', '')),
+                    'text': getattr(tw, 'text', '') or '',
+                    'created_at': getattr(tw, 'created_at', None),
                     'media_urls': media_urls,
-                    'url': getattr(detail, 'url', None),
+                    'url': f"https://x.com/i/web/status/{getattr(tw,'id','')}",
                 }
 
                 text = tweet_data.get("text", "")
@@ -1467,7 +1552,7 @@ def process_specific_tweet(tweet_id: str) -> dict:
                 if cd_days is not None and cd_days > 10:
                     return {"processed": False, "reason": "countdown_gt_10"}
 
-                media_urls2 = get_media_urls_from_tweet_data(tweet_data)
+                media_urls2 = tweet_data.get('media_urls', [])
                 media_files = []
                 image_urls = []
                 video_urls = []
@@ -2852,55 +2937,69 @@ def _init_fastapi():
             tid = _extract_tweet_id(tw)
             if not tid:
                 return {"ok": False, "error": "tweet id/url gerekli"}
-            # Best-effort TWSCRAPE fetch for media
-            try:
-                # Lazy import or use existing init
-                async def _run():
-                    try:
-                        api = await init_twscrape_api()
-                        # Many twscrape builds expose tweet() or tweet_by_id; try both
-                        tw = None
-                        try:
-                            tw = await api.tweet(int(tid))
-                        except Exception:
-                            try:
-                                tw = await api.tweet_by_id(int(tid))
-                            except Exception:
-                                tw = None
-                        if not tw:
-                            return {"ok": False, "error": "tweet bulunamadı"}
-                        media_urls = []
-                        md = getattr(tw, 'media', None)
-                        if md:
-                            photos = getattr(md, 'photos', []) or []
-                            for p in photos:
-                                u = getattr(p, 'url', None)
-                                if u:
-                                    media_urls.append(u)
-                            videos = getattr(md, 'videos', []) or []
-                            for v in videos:
-                                vars = getattr(v, 'variants', []) or []
-                                if vars:
-                                    best = max(vars, key=lambda x: getattr(x, 'bitrate', 0))
-                                    u = getattr(best, 'url', None)
-                                    if u:
-                                        media_urls.append(u)
-                        return {"ok": True, "id": str(getattr(tw,'id',tid)), "text": getattr(tw,'rawContent',''), "media_urls": media_urls}
-                    finally:
-                        try:
-                            await api.aclose()
-                        except Exception:
-                            pass
-                import asyncio as _aio
-                loop = _aio.new_event_loop()
-                _aio.set_event_loop(loop)
+                # Best-effort media fetch using Twitter API v2
                 try:
-                    res = loop.run_until_complete(_run())
-                finally:
-                    loop.close()
-                return res
-            except Exception as e:
-                return {"ok": False, "error": str(e)}
+                    async def _run():
+                        client = await init_twitter_api_v2()
+                        if not client:
+                            return {"ok": False, "error": "api_v2_unavailable"}
+                        try:
+                            resp = client.get_tweet(
+                                int(tid),
+                                tweet_fields=['created_at', 'text', 'attachments', 'lang'],
+                                expansions=['attachments.media_keys', 'author_id'],
+                                media_fields=['url', 'variants', 'type', 'preview_image_url'],
+                                user_fields=['username', 'name']
+                            )
+                        except Exception as ie:
+                            return {"ok": False, "error": str(ie)}
+
+                        if not resp or not getattr(resp, 'data', None):
+                            return {"ok": False, "error": "tweet_not_found"}
+
+                        tw = resp.data
+                        includes = getattr(resp, 'includes', None) or {}
+                        medias = includes.get('media', []) if isinstance(includes, dict) else getattr(includes, 'media', []) if includes else []
+
+                        media_urls = []
+                        for m in medias or []:
+                            mtype = getattr(m, 'type', None) if not isinstance(m, dict) else m.get('type')
+                            if mtype == 'photo':
+                                url = getattr(m, 'url', None) if not isinstance(m, dict) else m.get('url')
+                                if url:
+                                    media_urls.append(url)
+                            elif mtype in ('video', 'animated_gif'):
+                                variants = getattr(m, 'variants', None) or (m.get('variants') if isinstance(m, dict) else [])
+                                best = None
+                                try:
+                                    if variants:
+                                        def _br(v):
+                                            if isinstance(v, dict):
+                                                return int(v.get('bit_rate') or v.get('bitrate') or 0)
+                                            return int(getattr(v, 'bit_rate', None) or getattr(v, 'bitrate', None) or 0)
+                                        best = max(variants, key=_br)
+                                except Exception:
+                                    best = None
+                                if best:
+                                    url = best.get('url') if isinstance(best, dict) else getattr(best, 'url', None)
+                                    if url:
+                                        media_urls.append(url)
+                                else:
+                                    preview = getattr(m, 'preview_image_url', None) if not isinstance(m, dict) else m.get('preview_image_url')
+                                    if preview:
+                                        media_urls.append(preview)
+
+                        return {"ok": True, "id": str(getattr(tw, 'id', tid)), "text": getattr(tw, 'text', ''), "media_urls": media_urls}
+
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        res = loop.run_until_complete(_run())
+                    finally:
+                        loop.close()
+                    return res
+                except Exception as e:
+                    return {"ok": False, "error": str(e)}
 
         @app.post("/admin/compose_submit")
         def admin_compose_submit(request: Request):
@@ -3201,131 +3300,37 @@ app = None if LOCAL_ONLY else _init_fastapi()
 
 # Route tanımları _init_fastapi() fonksiyonuna taşındı
 
-# Nitter multi-instance fonksiyonu kaldırıldı - sadece TWSCRAPE kullanılacak
+# Nitter multi-instance fonksiyonu kaldırıldı - legacy scraper removed; using Twitter API v2
 
-# Gallery-dl fonksiyonu kaldırıldı - sadece TWSCRAPE kullanılacak
+# Gallery-dl fonksiyonu kaldırıldı - legacy scraper removed; using Twitter API v2
 
 def translate_text(text, has_video: bool = False):
-    """ Gemini 2.5 Flash ile İngilizce -> Türkçe çeviri (memory optimized)
-    Çıkış: Sadece ham çeviri (ek açıklama, tırnak, etiket vs. yok).
-    Özel terimleri ÇEVİRME: battlefield, free pass, battle pass.
-    has_video: Kaynak tweet'te video varsa True (ör: 'reload' -> 'Şarjör').
+    """Placeholder translation function (no external AI).
+    This keeps the interface but avoids external AI dependencies.
+    Returns cached translation if available, otherwise None.
     """
     try:
         if not text or not text.strip():
             return None
-        
-        # Lazy import - sadece ihtiyaç duyulduğunda import et
-        try:
-            from google import genai
-            from google.genai import types
-        except ImportError:
-            return None
-        
-        # Normalize input to NFC first
+
         original_text = _nfc(text)
-        # If text is shouty ALL CAPS, create a de-shouted version for translation
         input_for_translation = _deshout_en_sentence_case(original_text) if _is_all_caps_like(original_text) else original_text
 
-        # Cache lookup (normalized key)
         key = input_for_translation.strip()
         with TRANSLATE_CACHE_LOCK:
             cached = TRANSLATE_CACHE.get(key)
             if cached is not None:
-                # touch LRU order if available
                 try:
                     TRANSLATE_CACHE.move_to_end(key)
                 except Exception:
                     pass
                 return cached
 
-        # Gemini client - lazy initialization
-        client = None
-        try:
-            client = genai.Client()
-        except Exception:
-            return None
-        # Modeller: primary ve fallback env ile ayarlanabilir
-        model_primary = os.getenv("GEMINI_MODEL_PRIMARY", "gemini-2.5-flash-lite").strip()
-        model_fallback = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash").strip()
-
-        # Talimat: sadece ham çeviri, belirli terimler çevrilmez.
-        # Bağlam satırı: video var/yok bilgisi ile özel kurallar uygulanır.
-        prompt = (
-            "Translate the text from English (source: en) to Turkish (target: tr). Output ONLY the translation with no extra words, "
-            "no quotes, no labels. Do NOT translate these terms and keep their original casing: "
-            "Battlefield, Free Pass, Battle Pass, Operation Firestorm, Easter Egg, Plus, Trickshot, Support, Recon, Assault, Engineer.\n"
-            "Preserve the original tweet's capitalization EXACTLY for all words where possible; do not change upper/lower casing from the source text, "
-            "but apply strict capitalization preservation ONLY to protected terms and proper nouns; Turkish words should use natural Turkish casing.\n"
-            "Translate ALL parts of the text into Turkish EXCEPT the protected terms listed above. Do NOT leave any sentence or common word in English.\n"
-            "If the input includes any mentions like @nickname or patterns like 'via @nickname', exclude them from the output entirely.\n"
-            "If the content appears to be a short gameplay/clip highlight rather than a news/article, compress it into ONE coherent Turkish sentence (no bullet points, no multiple sentences).\n"
-            "Remove any first-person opinions or subjective phrases (e.g., 'I think', 'IMO', 'bence', 'bana göre'); keep only neutral, factual content.\n"
-            "Before finalizing, re-read your Turkish output and ensure it is coherent and faithful: do NOT invent numbers, durations (e.g., '3-5 gün'), hedging words (e.g., 'sanki', 'gibi', 'muhtemelen') unless they EXIST in the English. Remove any such additions. Do NOT add or change meaning.\n"
-            "Do not translate 'Campaign' in a video game context as 'Kampanya'; prefer 'Hikaye' (or 'Hikaye modu' if fits better). Translate 'Campaign Early Access' as 'Hikaye Erken Erişimi'.\n"
-            f"Context: HAS_VIDEO={'true' if has_video else 'false'} — If HAS_VIDEO is true AND the English contains the word 'reload', translate 'reload' specifically as 'Şarjör' (capitalize S). Otherwise, translate naturally (do NOT use 'Şarjör').\n"
-            "Before finalizing, ensure the Turkish output is coherent and natural; do NOT produce two unrelated sentences or add stray quoted fragments. If any part seems odd, fix it for clarity while staying faithful to the source.\n\n"
-            "Important: When translating phrases like 'your [THING] rating', do NOT add Turkish possessive suffixes to game/brand names. Prefer the structure '[NAME] için ... derecelendirmeniz' instead of '[NAME]'nızın ...'.\n"
-            "Example: 'What is your FINAL Rating of the Battlefield 6 Beta? (1-10)' -> 'Battlefield 6 Beta için FINAL derecelendirmeniz nedir? (1-10)'.\n\n"
-            "Countdown phrasing: For patterns like 'X days until [EVENT]' / '[EVENT] in X days' / 'X days to go', ALWAYS translate as '[EVENT] gelmesine X gün kaldı'. "
-            "NEVER produce 'gelmeden X gün kaldı' or similar negative-meaning constructs. If the subject is implicit (e.g., a map/name), keep it as a noun: 'Eastwood Haritası gelmesine 2 gün kaldı'.\n\n"
-            "Idioms: Translate 'can't wait' / 'cannot wait' / 'can NOT wait' as positive excitement -> 'sabırsızlanıyorum' (NOT 'sabırsızlanamam'). If the English uses emphasis (e.g., NOT in caps), you may emphasize the Turkish verb (e.g., SABIRSIZLANIYORUM) but do not change the meaning to negative.\n"
-            "Meme pattern '... be like': Translate patterns such as 'waiting BF6 be like...' as 'BF6’yı beklemek böyle bir şey...' or '[X] böyle bir şey...' Do NOT produce literal 'bekliyorum sanki' or similar unnatural phrasing.\n"
-            "Consistency: Never introduce or switch to a different game/series/version that is not in the source. If the source mentions 'Battlefield 2042', do not output 'Battlefield 6', and vice versa. Keep titles and versions consistent with the input.\n"
-            "Natural wording: Translate generic English gaming terms to proper Turkish instead of mixing languages (e.g., translate 'cosmetics' as 'kozmetikler' when not a protected proper noun; avoid forms like 'Cosmetics'ler'). Keep protected terms listed above in English as instructed.\n"
-            "Use correct Turkish diacritics (ç, ğ, ı, İ, ö, ş, ü) and keep Unicode in NFC form. Preserve basic punctuation and line breaks.\n\n"
-            "Text:\n" + input_for_translation.strip()
-        )
-
-        def _translate_with(model_name: str):
-            resp = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(thinking_budget=0)
-                ),
-            )
-            out_local = _nfc((resp.text or "").strip())
-            if out_local and out_local != text.strip():
-                # Cache write-through + basit LRU tahliyesi
-                try:
-                    with TRANSLATE_CACHE_LOCK:
-                        TRANSLATE_CACHE[key] = out_local
-                        try:
-                            TRANSLATE_CACHE.move_to_end(key)
-                        except Exception:
-                            pass
-                        try:
-                            while len(TRANSLATE_CACHE) > TRANSLATE_CACHE_MAX:
-                                TRANSLATE_CACHE.popitem(last=False)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                return out_local
-            return None
-
-        # Önce primary modeli dene
-        out = None
-        try:
-            out = _translate_with(model_primary)
-        except Exception as e:
-            print(f"[UYARI] Gemini model hata ({model_primary}): {e}")
-
-        # Başarısızsa fallback modeli dene
-        if not out and model_fallback and model_fallback != model_primary:
-            try:
-                out = _translate_with(model_fallback)
-            except Exception as e:
-                print(f"[UYARI] Gemini model hata ({model_fallback}): {e}")
-
-        if out:
-            # If original was ALL CAPS, avoid re-uppercasing Turkish output blindly; keep natural casing
-            return out
-        print("[UYARI] Çeviri boş döndü veya orijinal ile aynı")
+        # AI-backed translation removed. Implement an external translator or leave None.
+        print("[INFO] genai removed: no automatic translation available.")
         return None
     except Exception as e:
-        print(f"[UYARI] Gemini çeviri hatası: {e}")
+        print(f"[UYARI] Translation error: {e}")
         return None
 
 # (Şaka/"joke" notu ile ilgili tüm kodlar kaldırıldı)
@@ -3452,182 +3457,8 @@ def select_flair_with_ai(title, original_tweet_text="", has_video: bool = False)
     
     selected_flair_id = FLAIR_OPTIONS[selected_flair]
     print(f"[+] Kural tabanlı flair seçimi: {selected_flair} (ID: {selected_flair_id})")
-    
-    # OpenAI/Gemini AI'yi dene (opsiyonel)
-    try:
-        # Global toggles and CB state
-        AI_FLAIR_ENABLED = os.getenv("AI_FLAIR_ENABLED", "true").strip().lower() == "true"
-        AI_FLAIR_TIMEOUT_SECONDS = int(os.getenv("AI_FLAIR_TIMEOUT_SECONDS", "10") or 10)
-        AI_FLAIR_MAX_RETRIES = int(os.getenv("AI_FLAIR_MAX_RETRIES", "3") or 3)
-        AI_FLAIR_CIRCUIT_BREAKER_FAILS = int(os.getenv("AI_FLAIR_CIRCUIT_BREAKER_FAILS", "3") or 3)
-        AI_FLAIR_CIRCUIT_BREAKER_COOLDOWN = int(os.getenv("AI_FLAIR_CIRCUIT_BREAKER_COOLDOWN", "600") or 600)
-
-        # Circuit breaker globals
-        global _AI_CB_FAILS, _AI_CB_UNTIL
-        try:
-            _AI_CB_FAILS
-        except NameError:
-            _AI_CB_FAILS = 0
-        try:
-            _AI_CB_UNTIL
-        except NameError:
-            _AI_CB_UNTIL = 0
-
-        now_ts = int(time.time())
-        if not AI_FLAIR_ENABLED:
-            print("[INFO] AI_FLAIR_ENABLED=false, kural tabanlı seçim kullanılacak")
-            return selected_flair_id
-        if now_ts < _AI_CB_UNTIL:
-            print(f"[INFO] AI circuit breaker aktif ({_AI_CB_UNTIL - now_ts}s), kural tabanlı seçim kullanılacak")
-            return selected_flair_id
-
-        # API key kontrolü
-        ai_api_key = os.getenv("OPENAI_API_KEY")
-        if not ai_api_key:
-            print("[!] OPENAI_API_KEY bulunamadı, Gemini ile deneniyor")
-            # Gemini istemcisi ve model
-            gclient = genai.Client()
-            g_model_primary = os.getenv("GEMINI_MODEL_PRIMARY", "gemini-2.5-flash-lite").strip()
-            g_model_fallback = os.getenv("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash").strip()
-
-            g_prompt = (
-                "Aşağıdaki içeriği analiz et ve en uygun Reddit flair'ini seç. Sadece aşağıdaki seçeneklerden BİRİNİ aynen döndür (başka hiçbir şey yazma):\n"
-                "Haberler | Klip | Tartışma | Soru | İnceleme | Kampanya | Arkaplan | Sızıntı\n\n"
-                "Kural: Eğer video VAR ve metin haber/duyuru gibi değilse 'Klip' seçeneğine öncelik ver. Haber duyurusu ise 'Haberler' uygundur.\n\n"
-                f"Başlık: {title}\n"
-                f"Video: {'Evet' if has_video else 'Hayır'}\n"
-                + (f"Orijinal Tweet: {original_tweet_text}\n" if original_tweet_text else "") +
-                "Yalnızca seçimi döndür."
-            )
-
-            def _ask_gemini(model_name: str) -> str:
-                resp = gclient.models.generate_content(
-                    model=model_name,
-                    contents=g_prompt,
-                    config=types.GenerateContentConfig(
-                        thinking_config=types.ThinkingConfig(thinking_budget=0)
-                    ),
-                )
-                return (getattr(resp, 'text', '') or '').strip()
-
-            ai_suggestion = ""
-            try:
-                try:
-                    ai_suggestion = _ask_gemini(g_model_primary)
-                except Exception as ge1:
-                    try:
-                        ai_suggestion = _ask_gemini(g_model_fallback)
-                    except Exception as ge2:
-                        ai_suggestion = ""
-                        print(f"[UYARI] Gemini flair (primary) hata: {ge1}")
-                        print(f"[UYARI] Gemini flair (fallback) hata: {ge2}")
-            except Exception as e:
-                print(f"[UYARI] Gemini hata: {e}")
-                return selected_flair_id
-
-            if ai_suggestion:
-                ai_clean = ai_suggestion.replace(".", "").replace(":", "").strip()
-                # Tam eşleşme veya içerme ile eşleştir
-                for flair_name, flair_id in FLAIR_OPTIONS.items():
-                    if ai_clean.lower() == flair_name.lower() or flair_name.lower() in ai_clean.lower() or ai_clean.lower() in flair_name.lower():
-                        print(f"[+] Gemini seçilen flair: {flair_name} (ID: {flair_id})")
-                        return flair_id
-                print(f"[!] Gemini önerisi eşleşmedi ({ai_clean}), kural tabanlı seçim kullanılıyor: {selected_flair}")
-                return selected_flair_id
-            else:
-                print("[!] Gemini sonuç üretmedi, kural tabanlı seçim kullanılıyor")
-                return selected_flair_id
-            
-        if ai_api_key:
-            # OpenAI API için prompt hazırla
-            content_to_analyze = f"Başlık: {title}\nVideo: {'Evet' if has_video else 'Hayır'}"
-            if original_tweet_text:
-                content_to_analyze += f"\nOrijinal Tweet: {original_tweet_text}"
-            
-            prompt = f"""Aşağıdaki Battlefield 6 ile ilgili içeriği analiz et ve en uygun flair'i seç.
-
-Kurallar:
-- Eğer video VAR ve metin haber/duyuru gibi değilse 'Klip' seçeneğine öncelik ver.
-- Haber/duyuru ise 'Haberler' uygundur.
-
-İçerik:
-{content_to_analyze}
-
-Sadece şu seçeneklerden birini döndür: Haberler, Klip, Tartışma, Soru, İnceleme, Kampanya, Arkaplan, Sızıntı
-Sadece flair adını yaz (örnek: Haberler). Başka bir şey yazma."""
-            
-            # OpenAI API çağrısı
-            url = "https://api.openai.com/v1/chat/completions"
-            payload = {
-                "model": "gpt-4o-mini",  # Daha ekonomik model
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                "max_tokens": 50,
-                "temperature": 0.1
-            }
-            headers = {
-                "Authorization": f"Bearer {ai_api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            # Simple retry with backoff
-            last_err = None
-            for attempt in range(1, AI_FLAIR_MAX_RETRIES + 1):
-                try:
-                    print(f"[+] OpenAI API çağrısı yapılıyor... (deneme {attempt}/{AI_FLAIR_MAX_RETRIES})")
-                    response = requests.post(url, json=payload, headers=headers, timeout=AI_FLAIR_TIMEOUT_SECONDS)
-                    print(f"[DEBUG] API Response Status: {response.status_code}")
-                    if response.status_code != 200:
-                        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
-                    result = response.json()
-                    print(f"[DEBUG] OpenAI Response: {result}")
-                    if "choices" in result and len(result["choices"]) > 0:
-                        ai_suggestion = result["choices"][0]["message"]["content"].strip()
-                        print(f"[+] AI flair önerisi: {ai_suggestion}")
-                        ai_suggestion_clean = ai_suggestion.replace(".", "").replace(":", "").strip()
-                        for flair_name, flair_id in FLAIR_OPTIONS.items():
-                            if flair_name.lower() in ai_suggestion_clean.lower() or ai_suggestion_clean.lower() in flair_name.lower():
-                                print(f"[+] AI seçilen flair: {flair_name} (ID: {flair_id})")
-                                _AI_CB_FAILS = 0
-                                _AI_CB_UNTIL = 0
-                                return flair_id
-                        print(f"[!] AI önerisi eşleşmedi ({ai_suggestion_clean}), kural tabanlı seçim kullanılıyor: {selected_flair}")
-                        _AI_CB_FAILS = 0
-                        _AI_CB_UNTIL = 0
-                        return selected_flair_id
-                    else:
-                        raise RuntimeError("Boş AI yanıtı")
-                except Exception as e_try:
-                    last_err = e_try
-                    print(f"[UYARI] OpenAI denemesi başarısız: {e_try}")
-                    if attempt < AI_FLAIR_MAX_RETRIES:
-                        sleep_s = min(5, 0.5 * (2 ** (attempt - 1)))
-                        time.sleep(sleep_s)
-            # All retries failed -> trip circuit breaker
-            _AI_CB_FAILS = (_AI_CB_FAILS + 1) if isinstance(_AI_CB_FAILS, int) else 1
-            if _AI_CB_FAILS >= AI_FLAIR_CIRCUIT_BREAKER_FAILS:
-                _AI_CB_UNTIL = int(time.time()) + AI_FLAIR_CIRCUIT_BREAKER_COOLDOWN
-                print(f"[UYARI] AI circuit breaker tetiklendi, {AI_FLAIR_CIRCUIT_BREAKER_COOLDOWN}s devre dışı (son hata: {last_err})")
-            print(f"[+] Kural tabanlı seçim kullanılıyor: {selected_flair}")
-            return selected_flair_id
-                
-    except requests.exceptions.Timeout:
-        print("[!] AI API timeout, kural tabanlı seçim kullanılıyor")
-        return selected_flair_id
-    except requests.exceptions.RequestException as req_e:
-        print(f"[!] AI API çağrısı başarısız: {req_e}")
-        print(f"[+] Kural tabanlı seçim kullanılıyor: {selected_flair}")
-        return selected_flair_id
-    except Exception as e:
-        print(f"[!] Flair seçimi hatası: {e}")
-        print(f"[+] Kural tabanlı seçim kullanılıyor: {selected_flair}")
-        import traceback
-        traceback.print_exc()
-        return selected_flair_id
+    # AI features removed — return rule-based flair immediately
+    return selected_flair_id
 
 def download_media(media_url, filename):
     try:
@@ -5344,147 +5175,7 @@ def _db_save_posted_id(tweet_id: str):
     finally:
         conn.close()
 
-def get_latest_tweets_with_retweet_check(count: int = 8):
-    """🧹 TWSCRAPE ile tweet çekme (memory optimized)
-    Sadece TWSCRAPE kullanır, fallback'ler kaldırıldı.
-    Dönüş: list[{'id','text','created_at','media_urls'}]
-    """
-    try:
-        # Global rate-limit uygula
-        global LAST_REQUEST_TIME
-        current_time = time.time()
-        time_since_last_request = current_time - LAST_REQUEST_TIME
-        if time_since_last_request < MIN_REQUEST_INTERVAL:
-            wait_time = MIN_REQUEST_INTERVAL - time_since_last_request
-            time.sleep(wait_time)
-        LAST_REQUEST_TIME = time.time()
-
-        def _twscrape_fetch_sync():
-            async def _run():
-                api = None
-                user = None
-                tweets_generator = None
-                try:
-                    api = await init_twscrape_api()
-                    # Kullanıcıyı ID ile getir (daha güvenilir)
-                    try:
-                        user = await api.user_by_id(int(TWITTER_USER_ID))
-                    except Exception as ue:
-                        print(f"[HATA] user_by_id hatası: {ue} | ID={TWITTER_USER_ID}")
-                        try:
-                            nat = await api.pool.next_available_at("timeline")
-                            print(f"[DIAG] next_available_at: {nat}")
-                        except Exception as de:
-                            print(f"[DIAG] next_available_at hatası: {de}")
-                        return []
-                    if not user:
-                        print(f"[HATA] Twitter kullanıcısı bulunamadı: ID {TWITTER_USER_ID} | muhtemel neden: pasif hesap/oturum yok/yanlış ID")
-                        try:
-                            nat = await api.pool.next_available_at("timeline")
-                            print(f"[DIAG] next_available_at: {nat}")
-                        except Exception as de:
-                            print(f"[DIAG] next_available_at hatası: {de}")
-                        return []
-                    
-                    # 🧹 Generator kullan - büyük listeleri RAM'e yükleme
-                    tweets_generator = api.user_tweets(user.id, limit=max(10, count * 3))
-                    out = []
-                    
-                    async for tw in tweets_generator:
-                        # Reply veya retweet olanları atla
-                        if getattr(tw, 'inReplyToTweetId', None):
-                            continue
-                        if getattr(tw, 'retweetedTweet', None):
-                            continue
-                        # Alıntı (quote) tweet'leri atla
-                        if getattr(tw, 'quotedTweet', None) or getattr(tw, 'isQuoted', False) or getattr(tw, 'isQuote', False):
-                            continue
-
-                        # Medya URL'lerini çıkar
-                        media_urls = []
-                        md = getattr(tw, 'media', None)
-                        if md:
-                            # 🧹 Lazy evaluation - sadece gerektiğinde işle
-                            photos = getattr(md, 'photos', []) or []
-                            for p in photos:
-                                url = getattr(p, 'url', None)
-                                if url:
-                                    media_urls.append(url)
-                            
-                            videos = getattr(md, 'videos', []) or []
-                            for v in videos:
-                                variants = getattr(v, 'variants', []) or []
-                                if variants:
-                                    best = max(variants, key=lambda x: getattr(x, 'bitrate', 0))
-                                    url = getattr(best, 'url', None)
-                                    if url:
-                                        media_urls.append(url)
-                            
-                            animated = getattr(md, 'animated', []) or []
-                            for a in animated:
-                                url = getattr(a, 'videoUrl', None)
-                                if url:
-                                    media_urls.append(url)
-                            
-                            # 🧹 Temizlik - kullanılmayan objeleri serbest bırak
-                            del photos, videos, animated
-
-                        tweet_data = {
-                            'id': str(getattr(tw, 'id', getattr(tw, 'id_str', ''))),
-                            'text': getattr(tw, 'rawContent', ''),
-                            'created_at': getattr(tw, 'date', None),
-                            'media_urls': media_urls,
-                            'url': getattr(tw, 'url', None),
-                        }
-                        out.append(tweet_data)
-                        
-                        # 🧹 Temizlik
-                        del media_urls, md, tweet_data
-                        
-                        if len(out) >= count:
-                            break
-                    
-                    # Eskiden yeniye sırala
-                    try:
-                        out.sort(key=_tweet_sort_key, reverse=False)
-                    except Exception:
-                        pass
-                    
-                    return out
-                except Exception as e:
-                    return []
-                finally:
-                    # 🧹 Async generator düzgün kapat
-                    try:
-                        if 'tweets_generator' in locals() and tweets_generator is not None:
-                            aclose = getattr(tweets_generator, 'aclose', None)
-                            if callable(aclose):
-                                await aclose()
-                    except Exception:
-                        pass
-                    # 🧹 Temizlik - kullanılmayan objeleri serbest bırak
-                    del api, user, tweets_generator
-
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result = loop.run_until_complete(_run())
-                return result
-            finally:
-                loop.close()
-                # 🧹 Loop temizliği
-                del loop
-
-        # TWSCRAPE PRIMARY (fallback'ler kaldırıldı)
-        normalized = _twscrape_fetch_sync()
-        
-        # 🧹 Temizlik
-        del _twscrape_fetch_sync
-        
-        return normalized or []
-        
-    except Exception as e:
-        return []
+# Legacy twscrape timeline fetch removed — use Twitter API v2 queries instead.
 
 def main_loop():
     # Persistent storage ile posted tweet IDs'leri yükle
@@ -5555,7 +5246,7 @@ def main_loop():
 
             # External queue modu: manifest'ten zaman gelenleri post et ve döngüye devam et
             if USE_EXTERNAL_QUEUE:
-                print("[MODE] USE_EXTERNAL_QUEUE=true -> Manifest işleniyor (twscrape atlanır)")
+                print("[MODE] USE_EXTERNAL_QUEUE=true -> Manifest işleniyor (legacy scraper bypassed)")
                 next_due_ts = process_external_due_items(posted_tweet_ids)
                 # Dinamik bekleme: bir sonraki manifest zamanına kadar
                 now_ts = time.time()
@@ -5586,15 +5277,20 @@ def main_loop():
                     time.sleep(120)
                 continue
             
-            # Son 8 tweet'i al ve retweet kontrolü yap (daha fazla tweet kontrol et)
-            tweets_data = get_latest_tweets_with_retweet_check(8)
+            # Son 8 tweet'i al ve retweet kontrolü yap (Twitter API v2)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                tweets_data = loop.run_until_complete(fetch_tweets_with_api_v2(f"from:{TWITTER_SCREENNAME}", max_results=8))
+            finally:
+                loop.close()
             
             if isinstance(tweets_data, dict) and "error" in tweets_data:
-                print(f"[!] TWSCRAPE hatası: {tweets_data['error']}")
+                print(f"[!] Tweet fetch error: {tweets_data['error']}")
                 time.sleep(MIN_REQUEST_INTERVAL)
                 continue
             elif not tweets_data:
-                print("[!] Tweet bulunamadı veya TWSCRAPE hatası.")
+                print("[!] Tweet bulunamadı veya çekme hatası.")
                 time.sleep(MIN_REQUEST_INTERVAL)
                 continue
             
@@ -5728,7 +5424,7 @@ def main_loop():
                 
                 # Medya çıkarımı (önce video var mı tespit et)
                 print("[+] Medya URL'leri çıkarılıyor...")
-                media_urls = get_media_urls_from_tweet_data(tweet_data)
+                media_urls = tweet_data.get('media_urls', [])
                 media_files = []
                 
                 image_urls: list[str] = []
@@ -5770,11 +5466,11 @@ def main_loop():
                         media_files.append(path)
                         print(f"[+] Resim hazır: {path}")
                 
-                # Videolar (twscrape üzerinden en kaliteli varyant)
+                # Videolar (API v2 üzerinden en iyi varyant seçiliyor)
                 if video_urls:
                     try:
                         filename = f"temp_video_{tweet_id}_0.mp4"
-                        print("[+] En kaliteli video indiriliyor (twscrape/HLS öncelikli)...")
+                        print("[+] En kaliteli video indiriliyor (API v2 / HLS öncelikli)...")
                         path = download_best_video_for_tweet(tweet_id, filename)
                         if path:
                             # Süre kontrolü: Reddit limitini aşarsa tüm tweet'i atla
@@ -5921,7 +5617,7 @@ def main_loop():
                             else:
                                 # Önce medya çıkar ve video var mı tespit et
                                 print("[+] RT Medya URL'leri çıkarılıyor...")
-                                media_urls = get_media_urls_from_tweet_data(tweet_data)
+                                media_urls = tweet_data.get('media_urls', [])
                                 media_files = []
                                 image_urls = []
                                 video_urls = []
@@ -5965,7 +5661,7 @@ def main_loop():
                             if video_urls:
                                 try:
                                     filename = f"temp_video_{tweet_id}_0.mp4"
-                                    print("[+] RT En kaliteli video indiriliyor (twscrape/HLS öncelikli)...")
+                                    print("[+] RT En kaliteli video indiriliyor (API v2 / HLS öncelikli)...")
                                     path = download_best_video_for_tweet(tweet_id, filename)
                                     if path:
                                         # Süre kontrolü: Reddit limitini aşarsa tüm RT tweet'i atla
@@ -6226,28 +5922,56 @@ def process_retweet(retweet_info: dict):
         
         print(f"[+] Yeni retweet işleniyor: {tweet_id} -> {original_tweet_id}")
         
-        # Orijinal tweet'i TWSCRAPE ile çek
+        # Orijinal tweet'i Twitter API v2 ile çek
         try:
-            async def fetch_original_tweet():
-                api = API()
-                try:
-                    tweet = await api.tweet_details(original_tweet_id)
-                    return tweet
-                except Exception as e:
-                    print(f"[HATA] Orijinal tweet çekilemedi: {e}")
-                    return None
-            
-            # Async fonksiyonu çalıştır
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            original_tweet = loop.run_until_complete(fetch_original_tweet())
-            loop.close()
-            
-            if not original_tweet:
+            try:
+                from tweepy import Client
+            except Exception:
+                print("[HATA] tweepy yüklenemedi; orijinal tweet çekilemiyor")
+                save_processed_retweet(tweet_id, original_tweet_id, retweet_info['user_id'])
+                return
+
+            if not TWITTER_API_V2_BEARER_TOKEN:
+                print("[UYARI] Twitter API v2 Bearer Token bulunamadı; orijinal tweet çekilemiyor")
+                save_processed_retweet(tweet_id, original_tweet_id, retweet_info['user_id'])
+                return
+
+            client = Client(bearer_token=TWITTER_API_V2_BEARER_TOKEN)
+            try:
+                resp = client.get_tweet(int(original_tweet_id), expansions=['attachments.media_keys'], tweet_fields=['created_at','text'], media_fields=['url','variants','type'])
+            except Exception as e:
+                print(f"[HATA] Orijinal tweet API hatası: {e}")
+                save_processed_retweet(tweet_id, original_tweet_id, retweet_info['user_id'])
+                return
+
+            if not resp or not getattr(resp, 'data', None):
                 print(f"[HATA] Orijinal tweet bulunamadı: {original_tweet_id}")
                 save_processed_retweet(tweet_id, original_tweet_id, retweet_info['user_id'])
                 return
+
+            # Build a minimal original_tweet-like object
+            media_urls = []
+            includes = getattr(resp, 'includes', None) or {}
+            medias = includes.get('media', []) if isinstance(includes, dict) else getattr(includes, 'media', [])
+            for m in medias or []:
+                if getattr(m, 'url', None):
+                    media_urls.append(m.url)
+                # variants may differ; try common attrs
+                variants = getattr(m, 'variants', None) or getattr(m, 'video_variants', None) or []
+                try:
+                    if variants:
+                        best = max(variants, key=lambda x: getattr(x, 'bit_rate', getattr(x, 'bitrate', 0)) or 0)
+                        if getattr(best, 'url', None):
+                            media_urls.append(best.url)
+                except Exception:
+                    pass
+
+            original_tweet = SimpleNamespace(
+                rawContent = getattr(resp.data, 'text', '') or '',
+                date = getattr(resp.data, 'created_at', None),
+                media = None,
+                media_urls = media_urls
+            )
             
             # Tweet'i normal işleme sürecinden geçir
             tweet_data = {
