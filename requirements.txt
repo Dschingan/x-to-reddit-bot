@@ -1,50 +1,10 @@
-# Twitter to Reddit Bot - Python Dependencies
-# Updated for media download and upload functionality
-
-# Core dependencies
-requests>=2.27.0,<3.0.0
-praw>=7.7.1
-python-dotenv>=1.0.0
-Pillow>=9.0.0
-
-# Media handling (for downloading and processing)
-urllib3>=1.26.0,<2.0.0
-beautifulsoup4>=4.11.0
-lxml>=5.1.0
-m3u8>=4.0.0
-
-# HTTP and authentication
-certifi>=2023.7.22
-charset-normalizer>=2.1.0
-idna>=3.4
-oauthlib>=3.2.2
-requests-oauthlib>=1.3.1
-PySocks>=1.7.1
-requests[socks]>=2.27.0
-redditwarp
-twscrape>=0.12.0
-tweepy>=4.14.0
-gallery-dl>=1.27.0
-google-genai>=0.3.0
-
-tzdata>=2024.1
-
-# Web service (Render Web Service)
-fastapi>=0.111.0
-uvicorn[standard]>=0.30.0
-python-multipart>=0.0.6
-schedule>=1.2.0
-
-# PRAW dependencies
-websocket-client>=1.6.1
-update-checker>=0.18.0
-
-# Development and testing (optional)
-# pytest>=7.4.0
-# black>=23.7.0
-# flake8>=6.0.0
-
-# Database
-psycopg2-binary>=2.9.9
-snscrape
-flask
+fastapi
+uvicorn
+requests
+praw
+tweepy
+psycopg2-binary
+python-dotenv
+jinja2
+pillow
+schedule
