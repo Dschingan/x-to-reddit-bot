@@ -1,10 +1,11 @@
 fastapi
 uvicorn
+python-multipart
 requests
 praw
 tweepy
 psycopg2-binary
 python-dotenv
-jinja2
-pillow
 schedule
+jinja2
+pydantic
